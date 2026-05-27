@@ -34,8 +34,9 @@ history, and optional daily background updates.
   `https://bhadial.com/dashboard` when reachable. The final 0-100 score reads
   higher as a more supportive macro backdrop. ETF-exact factors use documented
   public proxies until a stable local ETF history feed is available.
-- Generated `data/dashboard.json` from public data sources, with a static
-  fallback for direct `file://` opening.
+- Generated `data/dashboard.json` from public data sources for HTTP/static
+  serving and smoke checks; direct `file://` opening uses the embedded static
+  fallback in `app.js`.
 - Local SQLite history persistence in `data/history.sqlite3`, storing full
   refresh snapshots and normalized key metrics for trend/backfill work.
 - Five-year public historical series backfill into SQLite for Treasury curve,
@@ -95,9 +96,12 @@ again every day at the configured `HH:MM`. After each scheduled daily refresh,
 the server also refreshes the public historical SQLite backfill for the last
 5 years unless `--history-years 0` is passed. Refresh writes are atomic, so API
 requests do not read a partially written dashboard file. If a refresh returns
-real-source `error` rows while the current dashboard is healthy, the service
-keeps serving the last healthy dashboard and writes the failed candidate to
-`the-dial-treasury-v1/data/dashboard.failed.json` for inspection.
+real-source `error` rows while the current dashboard is healthy, the updater
+writes the candidate to `the-dial-treasury-v1/data/dashboard.failed.json` for
+inspection. If the candidate still has the core curve, scorecard, and
+Conditions Score trend content, it becomes the served snapshot and is persisted
+to history; if the candidate lacks that core content, the service keeps serving
+the last healthy dashboard and does not write it to history.
 
 The hero `刷新` button triggers `POST /api/update`, which starts the same
 public-data refresh in a background thread and returns the current snapshot
@@ -107,8 +111,8 @@ If another manual refresh is already running, the endpoint returns `running`
 and reuses the active thread instead of starting a duplicate fetch.
 Every successful startup, scheduled, CLI, or manual refresh also persists the
 full dashboard snapshot and key metric observations into
-`the-dial-treasury-v1/data/history.sqlite3`. Failed refresh candidates that are
-rejected in favor of the last healthy dashboard are not written to history.
+`the-dial-treasury-v1/data/history.sqlite3`. Only failed refresh candidates
+that are rejected in favor of the last healthy dashboard are skipped by history.
 
 To seed or refresh the five-year historical series immediately:
 
@@ -248,13 +252,16 @@ REST slices:
 - `POST /api/update`
 
 List-style endpoints that carry ISO dates, such as `/api/events`, accept
-`from=YYYY-MM-DD` and `to=YYYY-MM-DD`. Any API route can be exported as CSV
-with `format=csv`; curve exports are transposed by tenor.
+`from=YYYY-MM-DD` and `to=YYYY-MM-DD`. Dashboard slice routes handled by
+`treasury_data.api` can be exported as CSV with `format=csv`; this excludes
+`/api/health`, `/api/history*`, and `POST /api/update`. Curve exports are
+transposed by tenor.
 `/api/health` returns `ok` or `degraded` plus source-status counts and update
 timestamps for local monitoring. It also includes the SQLite history summary
-and latest 5-year history backfill run. If the latest backfill has source
-errors, those errors are surfaced as health warnings so the daily health
-checker can notify on background-history issues.
+and latest 5-year history backfill run. Critical or degraded backfill source
+errors are surfaced as health warnings so the daily health checker can notify
+on background-history issues; warning-severity source errors remain in
+`history.latestBackfill.sourceErrors` without making health fail.
 `POST /api/update` starts a background refresh and returns `202 accepted` with
 the current `asOf` and `generatedAt`; repeated calls while it is active return
 `running` without launching duplicate source fetches.
@@ -262,8 +269,9 @@ the current `asOf` and `generatedAt`; repeated calls while it is active return
 `/api/history/snapshots` returns recent stored snapshot metadata.
 `/api/history/stats` returns per-series count, date range, latest value,
 min/max, mean, and P10/P50/P90 quantiles. `/api/history/series` accepts
-`category`, `name`, optional `label`, `years`, and `limit` query parameters and
-returns sampled chronological points for the interactive history chart.
+`category`, `name`, optional `label`, `years`, `from`, `limit`, and the
+`max_points` alias, and returns sampled chronological points for the
+interactive history chart.
 `/api/cross` includes the `historySeries` registry used by section 07 to
 request cross-market history without hard-coding UI-only series lists.
 
@@ -293,3 +301,8 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=the-dial-treasury-v1 \
 Copy `content/overrides.example.json` to `content/overrides.json` to override
 manual narratives, events/news, ideas, group weights, or factor scores during
 the next data build.
+
+Manual `ideas` overrides replace the generated cards as supplied. If an
+override omits confidence or `equityImpact` fields, `/api/ideas` reflects that
+manual shape; the frontend renders an explicit low-confidence historical SPY
+placeholder rather than inventing generated statistics.

@@ -13,6 +13,11 @@ These files were moved out of the MarcoMonitor root when
 - `output/`: historical Playwright screenshots and visual QA artifacts.
 - `test-results/`: historical test output artifacts.
 
+`output/` and `test-results/` are retained as historical QA artifacts from the
+legacy implementations. Do not append new runtime artifacts here; current
+visual checks and test output should stay under ignored local paths unless a
+specific artifact is intentionally promoted into documentation.
+
 ## Archived Root Files
 
 - `TechSpec.md`

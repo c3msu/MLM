@@ -17,6 +17,20 @@ Historical implementations are archived under `archive/legacy/2026-05-25/`.
 Do not use archived directories as the runtime or documentation source of
 truth.
 
+## Repository
+
+This workspace is published on `main` at:
+
+```text
+https://github.com/c3msu/MLM
+```
+
+`the-dial-treasury-v1/data/dashboard.json` is tracked because it is the
+HTTP/static serving snapshot and the smoke-check fixture. Direct `file://`
+opening uses the embedded static fallback in `app.js`. Local SQLite history,
+rejected refresh candidates, logs, Playwright scratch output, and analyst
+overrides are ignored.
+
 ## Run Locally
 
 ```bash
@@ -50,6 +64,9 @@ For server-backed verification:
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=the-dial-treasury-v1 \
   python3 the-dial-treasury-v1/scripts/smoke_check.py \
   --url http://127.0.0.1:8451
+
+python3 the-dial-treasury-v1/scripts/check_health.py \
+  --url http://127.0.0.1:8451/api/health
 ```
 
 ## Documentation

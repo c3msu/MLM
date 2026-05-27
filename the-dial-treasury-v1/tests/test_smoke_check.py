@@ -42,6 +42,24 @@ class SmokeCheckTests(unittest.TestCase):
                     },
                 ],
             },
+            "ideas": [
+                {
+                    "title": "战术减久期",
+                    "tag": "SHORT 久期",
+                    "text": "通胀偏热时维持低于基准久期。",
+                    "source": "宏观基本面",
+                    "confidenceLevel": "high",
+                    "confidenceLabel": "高可信",
+                    "confidenceNote": "证据质量 0.96",
+                    "equityImpact": {
+                        "available": True,
+                        "proxy": "S&P 500 price-index proxy for SPY",
+                        "basis": "同类宏观评分水平 + 3M评分变化",
+                        "sampleSize": 9,
+                        "summary": "历史同类环境下,S&P 500价格指数代理SPY未来3M中位回报+1.44%,胜率67%,样本9; 仅为历史统计,不构成方向承诺。",
+                    },
+                }
+            ],
         }
 
         self.assertEqual(validate_dashboard(dashboard), [])
@@ -55,6 +73,7 @@ class SmokeCheckTests(unittest.TestCase):
             "events": [],
             "news": [["05/19", "FRED", "10Y 4.67%"]],
             "cross": {"inflation": []},
+            "ideas": [{"title": "观点缺字段"}],
         }
 
         issues = validate_dashboard(dashboard)
@@ -65,6 +84,7 @@ class SmokeCheckTests(unittest.TestCase):
         self.assertIn("missing official news headline", issues)
         self.assertIn("missing gold spot cross-market row", issues)
         self.assertIn("missing cross-market history series", issues)
+        self.assertIn("investment ideas missing confidence/equityImpact contract", issues)
 
 
 if __name__ == "__main__":

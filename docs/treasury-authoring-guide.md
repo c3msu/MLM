@@ -137,6 +137,10 @@ price-index proxy behavior for past observations with the same Conditions
 Score level bucket and 3-month score-change bucket. Keep this block historical:
 use the stored `macroLiquidityEquity.series` sample, preserve the minimum
 sample gate, and avoid wording that presents the result as a prediction.
+Manual `ideas` overrides replace generated cards as supplied. If an override
+omits confidence or `equityImpact`, the API reflects that manual shape; the
+frontend displays an explicit low-confidence placeholder instead of generating
+historical statistics from override text.
 
 When changing this layer, add or update scenario tests in
 `tests/test_build_dashboard.py`. See `docs/investment-view-rule-audit.md` for
@@ -182,11 +186,15 @@ Before marking a source as real:
 - Historical percentile ranks state their window and sample source.
 - `sourceStatus` reports failures instead of silently falling back.
 - `/api/health` becomes degraded when a required real source fails.
-- `/api/health` includes latest history-backfill status; source errors from a
-  history-only backfill should appear as health warnings instead of silently
-  disappearing.
-- A failed refresh candidate does not overwrite the last healthy
-  `data/dashboard.json`; inspect `data/dashboard.failed.json` when present.
+- `/api/health` includes latest history-backfill status. Critical or degraded
+  backfill source errors appear as health warnings; warning-severity source
+  errors remain in `history.latestBackfill.sourceErrors` without making health
+  fail.
+- A refresh candidate with source errors is copied to
+  `data/dashboard.failed.json` for inspection. It still becomes the served
+  snapshot and is saved to history when core curve, scorecard, and Conditions
+  Score trend content are present; candidates missing that core content do not
+  overwrite the last healthy `data/dashboard.json`.
 - Successful refreshes are persisted into `data/history.sqlite3`; inspect
   `/api/history` or `/api/history/snapshots` to confirm the local history store
   is growing.

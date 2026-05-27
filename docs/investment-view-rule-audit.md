@@ -71,6 +71,12 @@ This overlay is deliberately separate from the Treasury trade rule direction.
 It can provide risk-context for SPY/SPX exposure, but it does not flip duration,
 curve, front-end, or breakeven views.
 
+If `content/overrides.json` supplies `ideas`, those manual cards replace the
+generated section-09 payload as supplied. The API will not invent
+`confidence*` or `equityImpact` fields for manual overrides. The browser still
+shows a low-confidence placeholder for missing historical SPY impact so the
+absence of generated statistics is visible.
+
 ## Remaining Boundaries
 
 - These cards are rule-based research views, not portfolio sizing or trade

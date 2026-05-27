@@ -79,15 +79,30 @@ The local server exposes the existing dashboard slice APIs, history APIs, and
 `POST /api/update`. The refactor does not rename the active directory or change
 the API contract.
 
+## Repository State
+
+The workspace root is now a git repository on `main`, tracking:
+
+```text
+https://github.com/c3msu/MLM
+```
+
+Tracked source includes the active runtime, docs, archive metadata and legacy
+reference files, plus `the-dial-treasury-v1/data/dashboard.json` as the
+HTTP/static serving snapshot used by the local server and smoke checks. Direct
+`file://` opening uses the embedded static fallback in `app.js`.
+
+Runtime-local artifacts are intentionally not tracked: SQLite history stores,
+database sidecars, rejected refresh candidates, logs, Playwright scratch
+output, Python caches, `.DS_Store`, and local content overrides.
+
 ## Known Limits
 
-- This workspace root is not a git repository. Commit/branch workflows do not
-  apply here unless a repo is initialized later.
 - The default runtime is local. Static/Vercel deployment remains out of scope
   for the current codebase.
 - Paid or licensed feeds such as MOVE, swaps, futures basis, and market depth
   remain documented boundaries unless credentials and redistribution rights are
   provided.
-- `data/dashboard.json` is intentionally kept as a serving snapshot for direct
-  file fallback and smoke checks. Do not refresh it unless the task explicitly
-  calls for a data update.
+- `the-dial-treasury-v1/data/dashboard.json` is intentionally tracked as a
+  serving snapshot. `the-dial-treasury-v1/data/history.sqlite3` and other
+  SQLite/DB files are not tracked.

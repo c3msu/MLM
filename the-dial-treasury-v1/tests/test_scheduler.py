@@ -430,6 +430,15 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(len(series_payload["points"]), 2)
             self.assertEqual(series_payload["series"]["name"], "10Y收益率")
 
+    def test_unknown_history_endpoint_returns_not_found(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "history.sqlite3"
+
+            status, payload = serve.history_payload_for_path("/api/history/unknown", db_path)
+
+            self.assertEqual(status, 404)
+            self.assertEqual(payload, {"error": "unknown api route"})
+
     def test_api_health_includes_latest_history_backfill_errors(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             output = Path(temp_dir) / "data" / "dashboard.json"

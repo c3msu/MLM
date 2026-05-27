@@ -36,6 +36,9 @@ pnpm-debug.log*
 *.db-wal
 
 # Generated data/cache artifacts
+output/
+test-results/
+playwright-report/
 the-dial-treasury-v1/logs/
 the-dial-treasury-v1/output/
 the-dial-treasury-v1/data/dashboard.failed.json

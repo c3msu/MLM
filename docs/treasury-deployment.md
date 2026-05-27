@@ -87,8 +87,10 @@ the UI to request global-rate, risk/dollar, and inflation/commodity history
 through `/api/history/series`.
 
 List endpoints with ISO dates, such as `/api/events`, support
-`from=YYYY-MM-DD` and `to=YYYY-MM-DD`. Add `format=csv` to any route to export
-CSV; `/api/curve?format=csv` returns one row per tenor.
+`from=YYYY-MM-DD` and `to=YYYY-MM-DD`. Add `format=csv` to dashboard slice
+routes handled by `treasury_data.api` to export CSV; `/api/curve?format=csv`
+returns one row per tenor. CSV export does not apply to `/api/health`,
+`/api/history*`, or `POST /api/update`.
 `POST /api/update` starts the public-data refresh in a background thread and
 returns `202 accepted` with the currently served snapshot metadata, so the UI
 does not block while public sources are fetched. If a manual refresh is already
@@ -98,11 +100,13 @@ a duplicate fetch.
 `/api/history/snapshots` returns recent stored snapshot metadata.
 `/api/history/stats` returns per-series counts, ranges, latest values, and
 basic quantiles. `/api/history/series` returns sampled chronological points
-for an individual historical series.
+for an individual historical series and accepts `category`, `name`, optional
+`label`, `years`, `from`, `limit`, and the `max_points` alias.
 `/api/health` also includes the SQLite history summary and latest 5-year
-history backfill run. Backfill source errors are exposed as health warnings,
-so `scripts/check_health.py` exits non-zero and can notify on background
-history issues.
+history backfill run. Critical or degraded backfill source errors are exposed
+as health warnings, so `scripts/check_health.py` exits non-zero and can notify
+on background history issues. Warning-severity source errors remain visible in
+`history.latestBackfill.sourceErrors` but do not make health fail.
 
 ## Daily Background Update
 
@@ -118,8 +122,11 @@ once per day at the configured local `HH:MM`. Successful refreshes write the
 current JSON snapshot and append/update SQLite history in
 `data/history.sqlite3`. The JSON write is atomic. If a refresh produces
 real-source `error` rows while the current dashboard is healthy, the updater
-preserves the healthy dashboard and stores the rejected candidate as
-`data/dashboard.failed.json` without adding it to history.
+stores the candidate as `data/dashboard.failed.json` for inspection. A
+candidate with core curve, scorecard, and Conditions Score trend content still
+becomes the served snapshot and is saved to history; a candidate missing that
+core content is rejected in favor of the last healthy dashboard and is not
+added to history.
 Daily history backfill runs are recorded in SQLite as `history_backfill_runs`.
 Single-source backfill failures are recorded in that run metadata and do not
 block saving the remaining public history series.

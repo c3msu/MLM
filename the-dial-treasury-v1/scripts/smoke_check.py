@@ -66,6 +66,8 @@ def validate_dashboard(dashboard: dict[str, Any]) -> list[str]:
     history_series = dashboard.get("cross", {}).get("historySeries", [])
     if not has_cross_history_target(history_series, "risk", "S&P 500") or not has_cross_history_target(history_series, "commodity", "WTI原油"):
         issues.append("missing cross-market history series")
+    if not ideas_have_investment_contract(dashboard.get("ideas", [])):
+        issues.append("investment ideas missing confidence/equityImpact contract")
     return issues
 
 
@@ -109,6 +111,29 @@ def has_cross_history_target(groups: Any, category: str, name: str) -> bool:
             if isinstance(item, dict) and item.get("category") == category and item.get("name") == name:
                 return True
     return False
+
+
+def ideas_have_investment_contract(ideas: Any) -> bool:
+    if not isinstance(ideas, list) or not ideas:
+        return False
+    for idea in ideas:
+        if not isinstance(idea, dict):
+            return False
+        for key in ("title", "tag", "text", "source", "confidenceLevel", "confidenceLabel", "confidenceNote"):
+            if not isinstance(idea.get(key), str) or not idea.get(key):
+                return False
+        impact = idea.get("equityImpact")
+        if not isinstance(impact, dict):
+            return False
+        if impact.get("proxy") != "S&P 500 price-index proxy for SPY":
+            return False
+        if not isinstance(impact.get("summary"), str) or "历史" not in impact.get("summary", ""):
+            return False
+        if "预测" in impact.get("summary", ""):
+            return False
+        if not isinstance(impact.get("sampleSize"), int):
+            return False
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:

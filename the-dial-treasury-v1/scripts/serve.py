@@ -169,7 +169,7 @@ def history_payload_for_path(path: str, db_path: Path, params: dict[str, list[st
             start_date=start_date,
             limit=int_param(params, "limit", int_param(params, "max_points", 1200)),
         )
-        return 404, {"error": "unknown api route"}
+    return 404, {"error": "unknown api route"}
 
 
 def history_backfill_warnings(history: dict[str, Any]) -> list[dict[str, Any]]:
