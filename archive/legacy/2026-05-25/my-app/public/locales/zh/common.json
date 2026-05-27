@@ -1,0 +1,62 @@
+{
+  "appName": "经济仪表盘",
+  "tagline": "宏观经济智能仪表板",
+  "nav": {
+    "dashboard": "仪表板",
+    "modules": "模块",
+    "encyclopedia": "百科",
+    "calendar": "日历",
+    "pricing": "定价",
+    "about": "关于",
+    "contact": "联系"
+  },
+  "common": {
+    "loading": "加载中...",
+    "error": "发生错误",
+    "retry": "重试",
+    "cancel": "取消",
+    "save": "保存",
+    "delete": "删除",
+    "edit": "编辑",
+    "close": "关闭",
+    "search": "搜索",
+    "filter": "筛选",
+    "export": "导出",
+    "share": "分享",
+    "settings": "设置",
+    "profile": "个人资料",
+    "logout": "退出",
+    "login": "登录",
+    "signup": "注册",
+    "learnMore": "了解更多",
+    "getStarted": "开始使用",
+    "viewDetails": "查看详情"
+  },
+  "dashboard": {
+    "title": "经济仪表板",
+    "overallScore": "综合评分",
+    "lastUpdated": "最后更新",
+    "modules": "经济模块",
+    "trends": "趋势",
+    "factors": "关键因素",
+    "exportReport": "导出报告"
+  },
+  "scores": {
+    "healthy": "健康",
+    "warning": "警告",
+    "critical": "危急",
+    "improving": "改善中",
+    "declining": "下降中",
+    "stable": "稳定"
+  },
+  "modules": {
+    "laborMarket": "劳动力市场",
+    "inflation": "通货膨胀",
+    "gdpGrowth": "GDP增长",
+    "interestRates": "利率",
+    "housingMarket": "房地产市场",
+    "consumerSentiment": "消费者信心",
+    "manufacturing": "制造业",
+    "internationalTrade": "国际贸易"
+  }
+}

@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="The Dial 仪表盘 - 实时宏观经济监测">
+  <meta name="robots" content="noindex, nofollow">
+  
+  <!-- Security Headers -->
+  <meta http-equiv="X-Frame-Options" content="DENY">
+  <meta http-equiv="X-Content-Type-Options" content="nosniff">
+  <meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin">
+  <meta http-equiv="Permissions-Policy" content="geolocation=(), microphone=(), camera=()">
+  
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'self';
+    script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net;
+    style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+    font-src 'self' https://fonts.gstatic.com;
+    img-src 'self' data:;
+    connect-src 'self';
+    frame-ancestors 'none';
+  ">
+  
+  <title>仪表盘 - The Dial</title>
+  
+  <!-- Preconnect -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="preconnect" href="https://unpkg.com" crossorigin>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  
+  <!-- Preload -->
+  <link rel="preload" href="css/common.css" as="style">
+  <link rel="preload" href="js/dashboard.js" as="script">
+  
+  <!-- Styles -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="css/common.css">
+  
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            'dial-bg': '#fafafc',
+            'dial-dark-bg': '#1c1c1e',
+            'dial-card': '#ffffff',
+            'dial-dark-card': '#2c2c2e',
+            'dial-border': '#e5e5e7',
+            'dial-dark-border': '#3a3a3c',
+            'dial-text': '#3c3c43',
+            'dial-dark-text': '#aeaeb2',
+            'score-green': '#34c759',
+            'score-yellow': '#ff9500',
+            'score-red': '#ff3b30',
+            'dial-accent': '#007aff',
+          }
+        }
+      }
+    }
+  </script>
+  
+  <style>
+    /* Dashboard-specific styles */
+    .sidebar-link {
+      display: flex;
+      align-items: center;
+      padding: 0.5rem 0.75rem;
+      border-radius: 0.5rem;
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: var(--fg);
+      transition: all 0.2s;
+    }
+    
+    .sidebar-link:hover,
+    .sidebar-link.active {
+      background: var(--accent);
+      color: white;
+    }
+    
+    .metric-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      padding: 1rem;
+    }
+    
+    .progress-bar {
+      height: 0.5rem;
+      background: var(--border);
+      border-radius: 0.25rem;
+      overflow: hidden;
+    }
+    
+    .progress-fill {
+      height: 100%;
+      border-radius: 0.25rem;
+      transition: width 0.5s ease;
+    }
+  </style>
+</head>
+<body class="antialiased">
+  <!-- Navigation -->
+  <nav class="fixed top-0 left-0 right-0 z-50 nav-blur bg-white/80 dark:bg-dial-dark-bg/80 border-b border-dial-border dark:border-dial-dark-border">
+    <div class="container mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="flex items-center justify-between h-16">
+        <a href="index.html" class="flex items-center space-x-2">
+          <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-dial-accent to-score-green flex items-center justify-center">
+            <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="10"/>
+              <path d="M12 6v6l4 2" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <span class="text-xl font-bold text-dial-text dark:text-white">The Dial</span>
+        </a>
+        
+        <div class="flex items-center space-x-4">
+          <button data-theme-toggle class="p-2 rounded-lg hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors" aria-label="切换主题">
+            <svg class="w-5 h-5 hidden dark:block text-dial-dark-text" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="5"/>
+              <path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+            </svg>
+            <svg class="w-5 h-5 block dark:hidden text-dial-text" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+            </svg>
+          </button>
+          <a href="index.html" class="text-sm font-medium text-dial-text/70 dark:text-dial-dark-text hover:text-dial-accent transition-colors">
+            返回首页
+          </a>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <div class="flex pt-16 min-h-screen">
+    <!-- Sidebar -->
+    <aside class="w-64 fixed left-0 top-16 bottom-0 bg-dial-card dark:bg-dial-dark-card border-r border-dial-border dark:border-dial-dark-border overflow-y-auto hidden lg:block">
+      <div class="p-4">
+        <div class="mb-6">
+          <p class="text-xs font-medium text-dial-text/40 dark:text-dial-dark-text/40 uppercase tracking-wider mb-2">模块</p>
+          <nav class="space-y-1">
+            <a href="module-liquidity.html" class="sidebar-link">
+              <svg class="w-4 h-4 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>
+              </svg>
+              流动性
+              <span class="ml-auto text-xs score-medium">52.4</span>
+            </a>
+            <a href="module-funding.html" class="sidebar-link">
+              <svg class="w-4 h-4 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <rect x="2" y="6" width="20" height="12" rx="2"/>
+                <circle cx="12" cy="12" r="2"/>
+              </svg>
+              融资
+              <span class="ml-auto text-xs score-high">61.2</span>
+            </a>
+            <a href="module-treasury.html" class="sidebar-link">
+              <svg class="w-4 h-4 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+              </svg>
+              国债
+              <span class="ml-auto text-xs score-medium">48.7</span>
+            </a>
+            <a href="module-rates.html" class="sidebar-link">
+              <svg class="w-4 h-4 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <line x1="19" y1="5" x2="5" y2="19"/>
+                <circle cx="6.5" cy="6.5" r="2.5"/>
+                <circle cx="17.5" cy="17.5" r="2.5"/>
+              </svg>
+              利率
+              <span class="ml-auto text-xs score-low">42.1</span>
+            </a>
+            <a href="module-credit.html" class="sidebar-link">
+              <svg class="w-4 h-4 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <rect x="1" y="4" width="22" height="16" rx="2"/>
+                <line x1="1" y1="10" x2="23" y2="10"/>
+              </svg>
+              信用
+              <span class="ml-auto text-xs score-low">38.9</span>
+            </a>
+            <a href="module-risk.html" class="sidebar-link">
+              <svg class="w-4 h-4 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+                <line x1="12" y1="9" x2="12" y2="13"/>
+                <line x1="12" y1="17" x2="12.01" y2="17"/>
+              </svg>
+              风险
+              <span class="ml-auto text-xs score-medium">45.6</span>
+            </a>
+            <a href="module-external.html" class="sidebar-link">
+              <svg class="w-4 h-4 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="2" y1="12" x2="22" y2="12"/>
+                <path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/>
+              </svg>
+              外部
+              <span class="ml-auto text-xs score-high">58.3</span>
+            </a>
+          </nav>
+        </div>
+        
+        <div>
+          <p class="text-xs font-medium text-dial-text/40 dark:text-dial-dark-text/40 uppercase tracking-wider mb-2">数据</p>
+          <nav class="space-y-1">
+            <button onclick="alert('数据更新需要Python后端支持')" class="sidebar-link w-full text-left">
+              <svg class="w-4 h-4 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path d="M23 4v6h-6"/>
+                <path d="M1 20v-6h6"/>
+                <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+              </svg>
+              更新数据
+            </button>
+            <button onclick="alert('导出功能需要Python后端支持')" class="sidebar-link w-full text-left">
+              <svg class="w-4 h-4 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+              导出数据
+            </button>
+          </nav>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="flex-1 lg:ml-64 p-6">
+      <div class="max-w-6xl mx-auto">
+        <!-- Header -->
+        <div class="mb-8">
+          <h1 class="text-2xl font-bold text-dial-text dark:text-white mb-2">宏观经济仪表盘</h1>
+          <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">
+            最后更新：2026年2月22日 | 数据来源：FRED
+          </p>
+        </div>
+
+        <!-- Overall Score -->
+        <div class="grid lg:grid-cols-3 gap-6 mb-8">
+          <!-- Gauge -->
+          <div class="card rounded-2xl p-6 lg:col-span-1">
+            <h2 class="text-lg font-semibold text-dial-text dark:text-white mb-4">经济环境评分</h2>
+            <div class="flex flex-col items-center">
+              <div class="relative w-48 h-48">
+                <svg viewBox="0 0 200 200" class="w-full h-full" style="transform: rotate(-90deg)">
+                  <circle cx="100" cy="100" r="90" fill="none" stroke="currentColor" stroke-width="12" 
+                    class="text-dial-border dark:text-dial-dark-border" stroke-linecap="round"/>
+                  <circle cx="100" cy="100" r="90" fill="none" stroke="url(#dashGradient)" stroke-width="12" 
+                    stroke-linecap="round" stroke-dasharray="283" stroke-dashoffset="146"/>
+                  <defs>
+                    <linearGradient id="dashGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                      <stop offset="0%" stop-color="#ff3b30"/>
+                      <stop offset="50%" stop-color="#ff9500"/>
+                      <stop offset="100%" stop-color="#34c759"/>
+                    </linearGradient>
+                  </defs>
+                </svg>
+                <div class="absolute inset-0 flex flex-col items-center justify-center">
+                  <span class="text-4xl font-bold text-dial-text dark:text-white">48.3</span>
+                  <span class="text-xs text-dial-text/60 dark:text-dial-dark-text/60 mt-1">/ 100</span>
+                </div>
+              </div>
+              <div class="mt-4 text-center">
+                <span class="inline-flex items-center px-3 py-1 rounded-full bg-score-yellow/10 text-score-yellow text-sm font-medium">
+                  中性偏紧
+                </span>
+                <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60 mt-2">
+                  较上周 -2.1
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Trend Chart -->
+          <div class="card rounded-2xl p-6 lg:col-span-2">
+            <h2 class="text-lg font-semibold text-dial-text dark:text-white mb-4">评分趋势（30天）</h2>
+            <canvas id="trendChart" height="200"></canvas>
+          </div>
+        </div>
+
+        <!-- Key Metrics -->
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+          <div class="metric-card">
+            <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-1">健康模块</p>
+            <p class="text-2xl font-bold score-high">3</p>
+            <p class="text-xs text-dial-text/40 dark:text-dial-dark-text/40">共7个</p>
+          </div>
+          <div class="metric-card">
+            <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-1">临界模块</p>
+            <p class="text-2xl font-bold score-low">2</p>
+            <p class="text-xs text-dial-text/40 dark:text-dial-dark-text/40">需关注</p>
+          </div>
+          <div class="metric-card">
+            <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-1">5年百分位</p>
+            <p class="text-2xl font-bold score-medium">42%</p>
+            <p class="text-xs text-dial-text/40 dark:text-dial-dark-text/40">历史中位</p>
+          </div>
+          <div class="metric-card">
+            <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-1">数据覆盖</p>
+            <p class="text-2xl font-bold text-dial-accent">47/47</p>
+            <p class="text-xs text-dial-text/40 dark:text-dial-dark-text/40">指标完整</p>
+          </div>
+        </div>
+
+        <!-- Modules Grid -->
+        <h2 class="text-xl font-semibold text-dial-text dark:text-white mb-4">模块概览</h2>
+        <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+          <a href="module-liquidity.html" class="card rounded-xl p-4 hover:border-blue-500/30 transition-colors">
+            <div class="flex items-center justify-between mb-2">
+              <div class="flex items-center">
+                <div class="w-10 h-10 rounded-lg bg-blue-500/10 flex items-center justify-center mr-3">
+                  <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>
+                  </svg>
+                </div>
+                <div>
+                  <h3 class="font-semibold text-dial-text dark:text-white">流动性</h3>
+                  <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60">8个因子</p>
+                </div>
+              </div>
+              <span class="text-xl font-bold score-medium">52.4</span>
+            </div>
+            <div class="progress-bar">
+              <div class="progress-fill bg-score-yellow" style="width: 52.4%"></div>
+            </div>
+          </a>
+
+          <a href="module-funding.html" class="card rounded-xl p-4 hover:border-green-500/30 transition-colors">
+            <div class="flex items-center justify-between mb-2">
+              <div class="flex items-center">
+                <div class="w-10 h-10 rounded-lg bg-green-500/10 flex items-center justify-center mr-3">
+                  <svg class="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <rect x="2" y="6" width="20" height="12" rx="2"/>
+                    <circle cx="12" cy="12" r="2"/>
+                  </svg>
+                </div>
+                <div>
+                  <h3 class="font-semibold text-dial-text dark:text-white">融资</h3>
+                  <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60">12个因子</p>
+                </div>
+              </div>
+              <span class="text-xl font-bold score-high">61.2</span>
+            </div>
+            <div class="progress-bar">
+              <div class="progress-fill bg-score-green" style="width: 61.2%"></div>
+            </div>
+          </a>
+
+          <a href="module-treasury.html" class="card rounded-xl p-4 hover:border-yellow-500/30 transition-colors">
+            <div class="flex items-center justify-between mb-2">
+              <div class="flex items-center">
+                <div class="w-10 h-10 rounded-lg bg-yellow-500/10 flex items-center justify-center mr-3">
+                  <svg class="w-5 h-5 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+                  </svg>
+                </div>
+                <div>
+                  <h3 class="font-semibold text-dial-text dark:text-white">国债</h3>
+                  <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60">8个因子</p>
+                </div>
+              </div>
+              <span class="text-xl font-bold score-medium">48.7</span>
+            </div>
+            <div class="progress-bar">
+              <div class="progress-fill bg-score-yellow" style="width: 48.7%"></div>
+            </div>
+          </a>
+
+          <a href="module-rates.html" class="card rounded-xl p-4 hover:border-purple-500/30 transition-colors">
+            <div class="flex items-center justify-between mb-2">
+              <div class="flex items-center">
+                <div class="w-10 h-10 rounded-lg bg-purple-500/10 flex items-center justify-center mr-3">
+                  <svg class="w-5 h-5 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <line x1="19" y1="5" x2="5" y2="19"/>
+                    <circle cx="6.5" cy="6.5" r="2.5"/>
+                    <circle cx="17.5" cy="17.5" r="2.5"/>
+                  </svg>
+                </div>
+                <div>
+                  <h3 class="font-semibold text-dial-text dark:text-white">利率</h3>
+                  <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60">5个因子</p>
+                </div>
+              </div>
+              <span class="text-xl font-bold score-low">42.1</span>
+            </div>
+            <div class="progress-bar">
+              <div class="progress-fill bg-score-red" style="width: 42.1%"></div>
+            </div>
+          </a>
+
+          <a href="module-credit.html" class="card rounded-xl p-4 hover:border-red-500/30 transition-colors">
+            <div class="flex items-center justify-between mb-2">
+              <div class="flex items-center">
+                <div class="w-10 h-10 rounded-lg bg-red-500/10 flex items-center justify-center mr-3">
+                  <svg class="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <rect x="1" y="4" width="22" height="16" rx="2"/>
+                    <line x1="1" y1="10" x2="23" y2="10"/>
+                  </svg>
+                </div>
+                <div>
+                  <h3 class="font-semibold text-dial-text dark:text-white">信用</h3>
+                  <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60">4个因子</p>
+                </div>
+              </div>
+              <span class="text-xl font-bold score-low">38.9</span>
+            </div>
+            <div class="progress-bar">
+              <div class="progress-fill bg-score-red" style="width: 38.9%"></div>
+            </div>
+          </a>
+
+          <a href="module-risk.html" class="card rounded-xl p-4 hover:border-orange-500/30 transition-colors">
+            <div class="flex items-center justify-between mb-2">
+              <div class="flex items-center">
+                <div class="w-10 h-10 rounded-lg bg-orange-500/10 flex items-center justify-center mr-3">
+                  <svg class="w-5 h-5 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+                    <line x1="12" y1="9" x2="12" y2="13"/>
+                    <line x1="12" y1="17" x2="12.01" y2="17"/>
+                  </svg>
+                </div>
+                <div>
+                  <h3 class="font-semibold text-dial-text dark:text-white">风险</h3>
+                  <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60">5个因子</p>
+                </div>
+              </div>
+              <span class="text-xl font-bold score-medium">45.6</span>
+            </div>
+            <div class="progress-bar">
+              <div class="progress-fill bg-score-yellow" style="width: 45.6%"></div>
+            </div>
+          </a>
+        </div>
+
+        <!-- Data Status -->
+        <div class="mt-8 card rounded-xl p-4">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center">
+              <div class="w-2 h-2 rounded-full bg-score-green mr-2 animate-pulse"></div>
+              <span class="text-sm text-dial-text dark:text-dial-dark-text">数据状态正常</span>
+            </div>
+            <div class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">
+              SQLite数据库 · 本地存储 · 上次更新：2026-02-22
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Scripts -->
+  <script src="js/common.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+    // Trend Chart
+    const ctx = document.getElementById('trendChart').getContext('2d');
+    new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: Array.from({length: 30}, (_, i) => {
+          const d = new Date();
+          d.setDate(d.getDate() - (29 - i));
+          return `${d.getMonth() + 1}/${d.getDate()}`;
+        }),
+        datasets: [{
+          label: '经济环境评分',
+          data: [52.1, 51.8, 51.5, 51.2, 50.9, 50.6, 50.3, 50.0, 49.7, 49.4, 49.1, 48.8, 48.5, 48.2, 47.9, 47.6, 47.3, 47.0, 46.7, 46.4, 46.1, 45.8, 45.5, 45.2, 44.9, 44.6, 44.3, 44.0, 43.7, 43.4],
+          borderColor: '#007aff',
+          backgroundColor: 'rgba(0, 122, 255, 0.1)',
+          borderWidth: 2,
+          fill: true,
+          tension: 0.4
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false }
+        },
+        scales: {
+          y: {
+            min: 0,
+            max: 100,
+            grid: { color: 'rgba(0,0,0,0.05)' }
+          },
+          x: {
+            grid: { display: false }
+          }
+        }
+      }
+    });
+  </script>
+</body>
+</html>

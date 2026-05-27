@@ -1,0 +1,45 @@
+{
+  "groupWeights": {
+    "g1": 25,
+    "g2": 25,
+    "g3": 15,
+    "g4": 15,
+    "g5": 10,
+    "g6": 10
+  },
+  "factorOverrides": {
+    "g4": {
+      "拍卖需求": {
+        "score": 0,
+        "note": "人工复核后可在这里覆盖单个因子的分数和说明。"
+      }
+    }
+  },
+  "events": [
+    [
+      "2026-05-20",
+      "示例: FOMC minutes",
+      "中"
+    ],
+    [
+      "2026-06-17",
+      "示例: FOMC decision + SEP",
+      "高"
+    ]
+  ],
+  "news": [
+    [
+      "05/20",
+      "Manual",
+      "示例: 将授权新闻、会议纪要摘要或人工观点写入 content/overrides.json。"
+    ]
+  ],
+  "ideas": [
+    {
+      "title": "示例观点",
+      "tag": "MANUAL",
+      "text": "复制本文件为 overrides.json 后,这里的观点会覆盖自动生成的投资观点。",
+      "source": "content override"
+    }
+  ]
+}

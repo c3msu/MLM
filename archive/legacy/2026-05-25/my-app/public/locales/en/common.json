@@ -1,0 +1,62 @@
+{
+  "appName": "The Dial",
+  "tagline": "Macroeconomic Intelligence Dashboard",
+  "nav": {
+    "dashboard": "Dashboard",
+    "modules": "Modules",
+    "encyclopedia": "Encyclopedia",
+    "calendar": "Calendar",
+    "pricing": "Pricing",
+    "about": "About",
+    "contact": "Contact"
+  },
+  "common": {
+    "loading": "Loading...",
+    "error": "An error occurred",
+    "retry": "Retry",
+    "cancel": "Cancel",
+    "save": "Save",
+    "delete": "Delete",
+    "edit": "Edit",
+    "close": "Close",
+    "search": "Search",
+    "filter": "Filter",
+    "export": "Export",
+    "share": "Share",
+    "settings": "Settings",
+    "profile": "Profile",
+    "logout": "Logout",
+    "login": "Login",
+    "signup": "Sign Up",
+    "learnMore": "Learn More",
+    "getStarted": "Get Started",
+    "viewDetails": "View Details"
+  },
+  "dashboard": {
+    "title": "Economic Dashboard",
+    "overallScore": "Overall Score",
+    "lastUpdated": "Last Updated",
+    "modules": "Economic Modules",
+    "trends": "Trends",
+    "factors": "Key Factors",
+    "exportReport": "Export Report"
+  },
+  "scores": {
+    "healthy": "Healthy",
+    "warning": "Warning",
+    "critical": "Critical",
+    "improving": "Improving",
+    "declining": "Declining",
+    "stable": "Stable"
+  },
+  "modules": {
+    "laborMarket": "Labor Market",
+    "inflation": "Inflation",
+    "gdpGrowth": "GDP Growth",
+    "interestRates": "Interest Rates",
+    "housingMarket": "Housing Market",
+    "consumerSentiment": "Consumer Sentiment",
+    "manufacturing": "Manufacturing",
+    "internationalTrade": "International Trade"
+  }
+}

@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="宏观流动性监控 · Macro Liquidity Monitor">
+  <title>宏观流动性监控 · Macro Liquidity Monitor</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23f4f2ea'/%3E%3Cpath d='M12 42h40M16 39c8-15 16-19 28-23' fill='none' stroke='%23a87614' stroke-width='5' stroke-linecap='round'/%3E%3Ccircle cx='44' cy='16' r='5' fill='%233f6cb0'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650;9..144,750&family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css?v=20260527-spy-impact">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="#summary" aria-label="Back to summary">
+      <span class="brand-mark">MLM</span>
+      <span>
+        <strong data-i18n="brand.title">宏观流动性监控</strong>
+        <small data-i18n="brand.subtitle">Macro Liquidity Monitor</small>
+      </span>
+    </a>
+    <nav class="top-nav" aria-label="Primary sections">
+      <a href="#summary" data-i18n="nav.summary">摘要</a>
+      <a href="#curve" data-i18n="nav.curve">收益率曲线</a>
+      <a href="#decomposition" data-i18n="nav.decomposition">成分分解</a>
+      <a href="#scorecard" data-i18n="nav.scorecard">因子计分卡</a>
+      <a href="#policy" data-i18n="nav.policy">货币政策</a>
+      <a href="#supply" data-i18n="nav.supply">供给与拍卖</a>
+      <a href="#positioning" data-i18n="nav.positioning">持仓与资金流</a>
+      <a href="#crossmarket" data-i18n="nav.crossmarket">跨市场</a>
+      <a href="#events" data-i18n="nav.events">事件与新闻</a>
+      <a href="#views" data-i18n="nav.views">投资观点</a>
+    </nav>
+    <div class="header-meta"><span data-i18n="header.snapshot">数据快照</span> · <strong data-field="asOf"></strong> <span data-i18n="header.close">收盘</span><br><span data-i18n="header.frequency">日频研究节奏</span></div>
+    <div class="header-actions">
+      <button id="languageToggle" class="icon-btn lang-btn" type="button" data-i18n-title="button.language" title="English">EN</button>
+      <button id="resetState" class="icon-btn" type="button" data-i18n-title="button.reset" title="恢复默认计分">↺</button>
+      <button id="exportState" class="icon-btn" type="button" data-i18n-title="button.export" title="导出当前页面HTML">⇩</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="summary" class="hero section-band">
+      <article class="panel macro-liquidity-panel macro-liquidity-topline summary-macro-liquidity">
+        <div class="panel-title">
+          <div>
+            <h3>宏观环境综合评分 · Conditions Score</h3>
+            <span id="macroLiquidityMethod" class="panel-kicker">Bhadial-compatible 30-factor composite</span>
+            <p id="macroLiquidityRead" class="macro-liquidity-read">--</p>
+            <div id="macroLiquidityTrend" class="macro-liquidity-trend"></div>
+            <div id="macroLiquidityBalance" class="macro-liquidity-balance"></div>
+            <div id="macroLiquidityQuality" class="macro-liquidity-quality"></div>
+          </div>
+          <button id="expandMacroLiquidityTrend" class="icon-btn chart-expand-btn" type="button" title="放大查看宏观环境评分与S&P 500对比" aria-label="放大查看宏观环境评分与S&P 500对比">⛶</button>
+        </div>
+        <div class="macro-liquidity-head">
+          <div>
+            <strong id="macroLiquidityScore">--</strong>
+            <span id="macroLiquidityRegime">--</span>
+          </div>
+          <div id="macroLiquidityGauge" class="macro-liquidity-gauge"></div>
+        </div>
+        <div id="macroLiquidityTrendChart" class="macro-liquidity-trend-chart"></div>
+        <div id="macroLiquidityTrendTooltip" class="percentile-tooltip macro-liquidity-tooltip" hidden></div>
+        <div id="macroLiquidityImplications" class="macro-liquidity-implications"></div>
+      </article>
+      <div class="hero-copy">
+        <p class="market-badge"><span></span> <span data-i18n="hero.badge">当前市场状态 · 通胀冲击 / 政策路径逆转</span></p>
+        <h1 class="market-title" data-i18n-html="hero.titleHtml">
+          美债正从 2025 年的降息周期切换为 <strong>通胀冲击下的政策对峙</strong>: 能源冲击、CPI/PPI 超预期与长端供给压力共同推高收益率,
+          市场重新评估年内 <strong>加息风险</strong>,曲线呈 <strong>熊市变陡</strong>。
+        </h1>
+        <div class="data-status-row">
+          <p id="dataStatus" class="data-status">数据加载中...</p>
+          <button id="refreshRuntimeData" class="data-status-btn" type="button" title="触发本地后台刷新">刷新</button>
+          <button id="openSourceStatus" class="data-status-btn" type="button" title="查看数据源健康与覆盖">数据源</button>
+        </div>
+      </div>
+      <div class="stance-panel">
+        <div>
+          <span data-i18n="stance.duration">久期立场 · Duration Stance</span>
+          <strong id="durationStance">--</strong>
+          <small id="durationScore">综合分 --</small>
+        </div>
+        <div>
+          <span data-i18n="stance.curve">曲线立场 · Curve Stance</span>
+          <strong id="curveStance">--</strong>
+          <small id="curveScore">曲线分 --</small>
+        </div>
+      </div>
+      <div id="conclusionAudit" class="conclusion-audit" aria-label="Conclusion credibility audit"></div>
+      <div id="heroTiles" class="hero-tiles" aria-label="Key yield tiles"></div>
+    </section>
+
+    <section id="curve" class="section-band">
+      <div class="section-heading">
+        <p class="eyebrow" data-i18n="section.curve.eyebrow">01 收益率曲线</p>
+        <h2 data-i18n-html="section.curve.titleHtml">收益率曲线 <span>YIELD CURVE</span></h2>
+        <p data-i18n="section.curve.desc">全曲线 11 个期限的水平与变动。当前、一周前、一月前三条曲线用于观察平移、变陡、变平及驱动位置。</p>
+      </div>
+      <div class="two-column">
+        <article class="panel chart-panel">
+          <div class="panel-title">
+            <h3 data-i18n="panel.curveChart">Par 收益率曲线 · 叠加对比</h3>
+            <div class="legend">
+              <span><i class="line today"></i><span data-i18n="legend.today">当前</span></span>
+              <span><i class="line week"></i><span data-i18n="legend.week">一周前</span></span>
+              <span><i class="line month"></i><span data-i18n="legend.month">一月前</span></span>
+            </div>
+          </div>
+          <div id="curveChart" class="svg-frame"></div>
+        </article>
+        <article class="panel">
+          <div class="panel-title">
+            <h3 data-i18n="panel.curveMetrics">曲线指标</h3>
+          </div>
+          <div id="curveMetrics" class="metric-grid compact"></div>
+        </article>
+      </div>
+      <article class="panel table-panel">
+        <div class="panel-title">
+          <h3 data-i18n="panel.curveTable">期限明细 · 单位 %</h3>
+        </div>
+        <div class="table-wrap">
+          <table id="curveTable"></table>
+        </div>
+      </article>
+    </section>
+
+    <section id="decomposition" class="section-band">
+      <div class="section-heading">
+        <p class="eyebrow" data-i18n="section.decomp.eyebrow">02 收益率成分分解</p>
+        <h2 data-i18n-html="section.decomp.titleHtml">成分分解 <span>YIELD DECOMPOSITION</span></h2>
+        <p data-i18n="section.decomp.desc">依据 Clarida 四分法,把 10Y 名义利率拆成短端实际利率、短端通胀预期、实际期限溢价和通胀风险溢价。</p>
+      </div>
+      <article class="panel">
+        <div class="decomp-formula">
+          <div class="formula-head">
+            <span>10Y Nominal</span>
+            <strong id="nominalYield">--</strong>
+            <small id="nominalMove">-- · 1月</small>
+          </div>
+          <div id="decompCards" class="formula-components"></div>
+        </div>
+      </article>
+      <div class="two-column">
+        <article class="panel">
+          <div class="panel-title">
+            <h3 data-i18n="panel.fundamental">基本面视角 · Fundamental</h3>
+          </div>
+          <div class="callout">
+            <strong id="fundamentalEquation">--</strong>
+            <p id="fundamentalSummary">--</p>
+          </div>
+          <div id="attributionChart" class="svg-frame small"></div>
+        </article>
+        <article class="panel">
+          <div class="panel-title">
+            <h3 data-i18n="panel.policy">政策视角 · Policy</h3>
+          </div>
+          <div class="callout">
+            <strong id="policyEquation">--</strong>
+            <p id="policySummary">--</p>
+          </div>
+          <div class="table-wrap">
+            <table id="attributionTable"></table>
+          </div>
+        </article>
+      </div>
+      <article class="panel">
+        <div class="panel-title">
+          <h3 data-i18n="panel.expectations">短端利率预期 · 三种来源对比</h3>
+        </div>
+        <div id="expectationSources" class="source-grid"></div>
+      </article>
+    </section>
+
+    <section id="scorecard" class="section-band">
+      <div class="section-heading">
+        <p class="eyebrow" data-i18n="section.scorecard.eyebrow">03 因子计分卡</p>
+        <h2 data-i18n-html="section.scorecard.titleHtml">因子计分卡 <span>FACTOR SCORECARD</span></h2>
+        <p data-i18n="section.scorecard.desc">每个因子打 -2 到 +2 分,正分代表利多久期,负分代表利空久期。点击信号格可手动调整评分,权重也可编辑。</p>
+      </div>
+      <article id="macroLiquidityEquityLead" class="panel liquidity-equity-panel">
+        <div class="panel-title">
+          <div>
+            <h3>宏观环境评分 vs S&P 500 · 5Y Lead Study</h3>
+            <span id="liquidityEquityMethod" class="panel-kicker">monthly sample · forward return test</span>
+          </div>
+          <span id="liquidityEquityCoverage" class="panel-kicker">loading</span>
+        </div>
+        <p id="liquidityEquityRead" class="liquidity-equity-read">--</p>
+        <div id="liquidityEquitySignal" class="liquidity-equity-signal"></div>
+        <div id="liquidityEquityStateGrid" class="liquidity-state-grid"></div>
+        <div id="liquidityEquityStats" class="liquidity-equity-stats"></div>
+        <div id="liquidityEquityChart" class="liquidity-equity-chart"></div>
+        <div id="liquidityEquityBuckets" class="liquidity-equity-buckets"></div>
+        <div id="liquidityEquityDiagnostics" class="liquidity-equity-diagnostics">
+          <section>
+            <h4>Lead/Lag Matrix</h4>
+            <div id="liquidityEquityLeadLag"></div>
+          </section>
+          <section>
+            <h4>Score Change</h4>
+            <div id="liquidityEquityChangeBuckets"></div>
+          </section>
+          <section>
+            <h4>Rolling Corr / Drawdown</h4>
+            <div id="liquidityEquityRolling"></div>
+          </section>
+        </div>
+      </article>
+      <div class="score-summary">
+        <div>
+          <span data-i18n="stance.duration">综合久期立场 · Composite</span>
+          <strong id="scorecardDuration">--</strong>
+          <small id="scorecardDurationValue">综合分 --</small>
+        </div>
+        <div>
+          <span data-i18n="stance.curve">曲线立场 · Curve</span>
+          <strong id="scorecardCurve">--</strong>
+          <small id="scorecardCurveValue">曲线分 --</small>
+        </div>
+        <div class="score-scale" aria-hidden="true">
+          <span data-i18n="score.strongBear">强烈看空</span><span data-i18n="score.bear">看空</span><span data-i18n="score.neutral">中性</span><span data-i18n="score.bull">看多</span><span data-i18n="score.strongBull">强烈看多</span>
+        </div>
+      </div>
+      <div id="scorecardSourceLegend" class="score-source-legend"></div>
+      <article id="bhadialCoveragePanel" class="panel bhadial-coverage-panel" hidden></article>
+      <div class="bhadial-feature-grid">
+        <article class="panel percentile-panel">
+          <div class="panel-title">
+            <h3>历史百分位趋势 · Factor History</h3>
+            <div class="panel-actions">
+              <span id="percentileMethod" class="panel-kicker">核心4项 · 5Y rolling percentile</span>
+              <button id="expandPercentileChart" class="icon-btn chart-expand-btn" type="button" title="放大查看全部趋势" aria-label="放大查看全部历史百分位趋势">⛶</button>
+            </div>
+          </div>
+          <div id="percentileTrendChart" class="percentile-chart"></div>
+          <div id="percentileTrendTooltip" class="percentile-tooltip" hidden></div>
+          <div id="percentileTrendLegend" class="percentile-legend"></div>
+          <div class="percentile-lists">
+            <div>
+              <h4>Top Movers</h4>
+              <div id="percentileMovers" class="mini-list"></div>
+            </div>
+            <div>
+              <h4>Extreme Alerts</h4>
+              <div id="percentileAlerts" class="mini-list"></div>
+            </div>
+          </div>
+        </article>
+        <article class="panel driver-panel">
+          <div class="panel-title">
+            <h3>主要驱动 · Module Pulse</h3>
+            <span class="panel-kicker">weighted score</span>
+          </div>
+          <div id="factorDrivers" class="driver-list"></div>
+          <div id="modulePulse" class="module-pulse"></div>
+        </article>
+      </div>
+      <article class="panel history-panel">
+        <div class="panel-title history-title">
+          <div>
+            <h3>5年历史数据 · Interactive History</h3>
+            <span id="historyCoverage" class="panel-kicker">loading public history</span>
+          </div>
+          <div class="history-controls">
+            <select id="historySeriesSelect" aria-label="选择历史序列"></select>
+            <div id="historyRangeControls" class="chart-mode-controls compact" aria-label="历史图时间窗口">
+              <button type="button" data-history-range="1">1Y</button>
+              <button type="button" data-history-range="3">3Y</button>
+              <button type="button" class="active" data-history-range="5">5Y</button>
+            </div>
+          </div>
+        </div>
+        <div id="historyStats" class="history-stats"></div>
+        <div id="historyInteractiveChart" class="history-chart"></div>
+        <div id="historyChartTooltip" class="history-tooltip" hidden></div>
+      </article>
+      <div id="scorecardGroups" class="scorecard-groups"></div>
+    </section>
+
+    <section id="policy" class="section-band">
+      <div class="section-heading">
+        <p class="eyebrow" data-i18n="section.policy.eyebrow">04 货币政策路径</p>
+        <h2 data-i18n-html="section.policy.titleHtml">货币政策 <span>MONETARY POLICY</span></h2>
+        <p data-i18n="section.policy.desc">政策利率、市场隐含路径与流动性管道。核心叙事是市场定价从降息转向加息风险。</p>
+      </div>
+      <div class="two-column">
+        <article class="panel">
+          <div class="panel-title">
+            <h3 data-i18n="panel.policyRate">政策利率 · Policy Rate</h3>
+          </div>
+          <div id="policyCards" class="metric-grid compact"></div>
+          <p class="note">连续三次维持利率;投票分歧升温后,市场重新评估政策反应函数是否更鹰。</p>
+        </article>
+        <article class="panel">
+          <div class="panel-title">
+            <h3 data-i18n="panel.impliedPath">市场隐含政策路径 · Implied Path</h3>
+          </div>
+          <div id="fedPathChart" class="stacked-bars"></div>
+          <p class="note">近端会议仍定价按兵不动,远端加息尾部风险上升。</p>
+        </article>
+      </div>
+      <article class="panel">
+        <div class="panel-title">
+          <h3 data-i18n="panel.plumbing">流动性管道 · Plumbing</h3>
+        </div>
+        <div id="plumbingCards" class="metric-grid"></div>
+      </article>
+    </section>
+
+    <section id="supply" class="section-band">
+      <div class="section-heading">
+        <p class="eyebrow" data-i18n="section.supply.eyebrow">05 供给与拍卖</p>
+        <h2 data-i18n-html="section.supply.titleHtml">供给与拍卖 <span>SUPPLY & AUCTIONS</span></h2>
+        <p data-i18n="section.supply.desc">发行节奏、拍卖质量与财政现金。拍卖尾部和投标倍数偏低是长端需求疲弱的直接信号。</p>
+      </div>
+      <div class="two-column">
+        <article class="panel table-panel">
+          <div class="panel-title">
+            <h3 data-i18n="panel.auctions">近期拍卖评分 · Recent Auctions</h3>
+          </div>
+          <div class="table-wrap">
+            <table id="auctionTable"></table>
+          </div>
+          <p class="note">长端拍卖明显走弱,前端票据需求仍稳健,需求分层明确。</p>
+        </article>
+        <article class="panel">
+          <div class="panel-title">
+            <h3 data-i18n="panel.fiscal">发行结构与财政 · Issuance & Fiscal</h3>
+          </div>
+          <div id="fiscalCards" class="metric-grid compact"></div>
+          <p class="note">下一次 QRA 是关键观察点;若进一步上调长债占比,长端期限溢价将再受冲击。</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="positioning" class="section-band">
+      <div class="section-heading">
+        <p class="eyebrow" data-i18n="section.positioning.eyebrow">06 持仓与资金流</p>
+        <h2 data-i18n-html="section.positioning.titleHtml">持仓与资金流 <span>POSITIONING & FLOWS</span></h2>
+        <p data-i18n="section.positioning.desc">CFTC、NY Fed primary dealer 统计为周频,TIC 外资数据为月频且滞后约六周。低频限制明显,但持仓极值常是反向预警。</p>
+      </div>
+      <div class="three-column">
+        <article class="panel">
+          <div class="panel-title">
+            <h3 data-i18n="panel.cftc">CFTC 期货持仓 · Weekly</h3>
+          </div>
+          <div id="cftcList" class="signal-list"></div>
+        </article>
+        <article class="panel">
+          <div class="panel-title">
+            <h3 data-i18n="panel.dealers">一级交易商 · NY Fed Weekly</h3>
+          </div>
+          <div id="dealerCards" class="metric-grid compact"></div>
+        </article>
+        <article class="panel">
+          <div class="panel-title">
+            <h3 data-i18n="panel.tic">海外持仓 · TIC Monthly</h3>
+          </div>
+          <div id="ticCards" class="metric-grid compact"></div>
+          <p class="note">海外买盘对长端的边际支撑下降,与拍卖端长债需求偏弱相互印证。</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="crossmarket" class="section-band">
+      <div class="section-heading">
+        <p class="eyebrow" data-i18n="section.cross.eyebrow">07 跨市场背景</p>
+        <h2 data-i18n-html="section.cross.titleHtml">跨市场 <span>CROSS-MARKET</span></h2>
+        <p data-i18n="section.cross.desc">全球利率、风险资产、美元与通胀补偿共同构成背景板。</p>
+      </div>
+      <div class="three-column">
+        <article class="panel">
+          <div class="panel-title">
+            <h3 data-i18n="panel.globalYields">全球 10 年期国债</h3>
+          </div>
+          <div id="globalYields" class="bar-list"></div>
+        </article>
+        <article class="panel">
+          <div class="panel-title">
+            <h3 data-i18n="panel.riskUsd">风险资产与美元</h3>
+          </div>
+          <div id="riskUsd" class="signal-list"></div>
+        </article>
+        <article class="panel">
+          <div class="panel-title">
+            <h3 data-i18n="panel.inflationCommodity">通胀补偿与商品</h3>
+          </div>
+          <div id="inflationCommodity" class="signal-list"></div>
+        </article>
+      </div>
+      <article class="panel cross-history-panel">
+        <div class="panel-title history-title">
+          <div>
+            <h3>跨市场历史动态 · Cross-Market History</h3>
+            <span id="crossHistoryCoverage" class="panel-kicker">loading cross-market history</span>
+          </div>
+          <div class="history-controls cross-history-controls">
+            <div id="crossHistoryGroupControls" class="chart-mode-controls compact" aria-label="跨市场历史分组"></div>
+            <select id="crossHistorySeriesSelect" aria-label="选择跨市场历史序列"></select>
+            <div id="crossHistoryRangeControls" class="chart-mode-controls compact" aria-label="跨市场历史图时间窗口">
+              <button type="button" data-cross-history-range="1">1Y</button>
+              <button type="button" class="active" data-cross-history-range="3">3Y</button>
+              <button type="button" data-cross-history-range="5">5Y</button>
+            </div>
+          </div>
+        </div>
+        <div id="crossHistoryStats" class="history-stats cross-history-stats"></div>
+        <div id="crossHistoryChart" class="history-chart cross-history-chart"></div>
+        <div id="crossHistoryTooltip" class="history-tooltip" hidden></div>
+      </article>
+    </section>
+
+    <section id="events" class="section-band">
+      <div class="section-heading">
+        <p class="eyebrow" data-i18n="section.events.eyebrow">08 事件与新闻</p>
+        <h2 data-i18n-html="section.events.titleHtml">事件与新闻 <span>EVENTS & NEWS</span></h2>
+        <p data-i18n="section.events.desc">市场交易的是超预期而非数据本身。左侧为前瞻事件日历,右侧为近期新闻流。</p>
+      </div>
+      <div class="two-column">
+        <article class="panel">
+          <div class="panel-title">
+            <h3 data-i18n="panel.calendar">前瞻事件日历 · Calendar</h3>
+          </div>
+          <div id="eventTimeline" class="timeline"></div>
+        </article>
+        <article class="panel">
+          <div class="panel-title">
+            <h3 data-i18n="panel.news">驱动新闻流 · News Flow</h3>
+          </div>
+          <div id="newsFlow" class="news-list"></div>
+        </article>
+      </div>
+    </section>
+
+    <section id="views" class="section-band">
+      <div class="section-heading">
+        <p class="eyebrow" data-i18n="section.views.eyebrow">09 投资观点综合</p>
+        <h2 data-i18n-html="section.views.titleHtml">投资观点 <span>INVESTMENT VIEW</span></h2>
+        <p data-i18n="section.views.desc">计分卡结论落到可执行交易。每个想法标注背后的因子来源,并可直接编辑论点文本。</p>
+      </div>
+      <p id="viewUpdateHint" class="edit-hint" data-i18n="hint.viewDefault">↑ 可直接点击编辑论点 · 计分卡评分变动时会给出更新提示</p>
+      <div id="ideaCards" class="idea-grid"></div>
+      <article class="panel risk-panel">
+        <div class="panel-title">
+          <h3 data-i18n="panel.riskScenarios">风险情景 · Risk Scenarios</h3>
+        </div>
+        <p>
+          最大反向风险:地缘冲突快速缓和导致油价回落;劳动力市场骤然恶化使衰退叙事回归;
+          杠杆基金长端净空头轧空与基差交易去杠杆触发非基本面行情。久期空头与做陡头寸均应带止损。
+        </p>
+      </article>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>数据来源 · 收益率曲线: U.S. Treasury / FRED H.15 · 政策与流动性: Federal Reserve / NY Fed · 拍卖: TreasuryDirect · 持仓: CFTC COT / Treasury TIC · 跨市场与新闻: FRED / Stooq / 官方公开发布</p>
+    <p>更新机制 · HTTP 模式读取本地生成的 data/dashboard.json;后台服务可每日刷新。Fed path 仍为模型,CME/OIS、MOVE、付费新闻与微观交易数据按边界标注。</p>
+    <p>免责声明 · 本看板为研究与观测工具,所有评分与交易想法为框架示意,不构成投资建议。</p>
+  </footer>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div id="sourceStatusModal" class="chart-modal" role="dialog" aria-modal="true" aria-labelledby="sourceStatusModalTitle" hidden>
+    <div class="chart-modal-backdrop" data-close-source-status-modal></div>
+    <section class="chart-modal-panel source-status-panel">
+      <div class="panel-title modal-title">
+        <div>
+          <h3 id="sourceStatusModalTitle">数据源健康 · Source Coverage</h3>
+          <span class="panel-kicker">public-source audit · model boundary</span>
+        </div>
+        <button id="closeSourceStatusModal" class="icon-btn chart-close-btn" type="button" title="关闭" aria-label="关闭数据源健康弹窗">×</button>
+      </div>
+      <div id="sourceStatusSummary" class="source-status-grid"></div>
+      <div id="sourceStatusControls" class="source-status-controls" aria-label="数据源筛选与导出">
+        <div id="sourceStatusFilterGroup" class="source-filter-group" aria-label="筛选数据源状态"></div>
+        <label class="source-search-field">搜索
+          <input id="sourceStatusSearch" type="search" placeholder="数据源名称 / 日期 / 说明">
+        </label>
+        <button id="exportSourceStatusCsv" class="source-export-btn" type="button">导出CSV</button>
+        <span id="sourceStatusVisibleCount" class="source-visible-count"></span>
+      </div>
+      <div class="source-status-table-wrap">
+        <table id="sourceStatusTable"></table>
+      </div>
+    </section>
+  </div>
+  <div id="percentileModal" class="chart-modal" role="dialog" aria-modal="true" aria-labelledby="percentileModalTitle" hidden>
+    <div class="chart-modal-backdrop" data-close-percentile-modal></div>
+    <section class="chart-modal-panel">
+      <div class="panel-title modal-title">
+        <div>
+          <h3 id="percentileModalTitle">历史百分位趋势 · 全部因子</h3>
+          <span class="panel-kicker">3Y trend · 5Y rolling percentile</span>
+        </div>
+        <button id="closePercentileModal" class="icon-btn chart-close-btn" type="button" title="关闭" aria-label="关闭历史百分位趋势弹窗">×</button>
+      </div>
+      <div id="percentileModalControls" class="chart-mode-controls" aria-label="历史百分位趋势模式"></div>
+      <div id="percentileModalChart" class="percentile-chart modal-chart"></div>
+      <div id="percentileModalTooltip" class="percentile-tooltip modal-tooltip" hidden></div>
+      <div id="percentileModalLegend" class="percentile-legend modal-legend"></div>
+    </section>
+  </div>
+  <div id="macroLiquidityTrendModal" class="chart-modal" role="dialog" aria-modal="true" aria-labelledby="macroLiquidityTrendModalTitle" hidden>
+    <div class="chart-modal-backdrop" data-close-macro-liquidity-trend-modal></div>
+    <section class="chart-modal-panel">
+      <div class="panel-title modal-title">
+        <div>
+          <h3 id="macroLiquidityTrendModalTitle">宏观环境评分历史分位 vs S&P 500</h3>
+          <span class="panel-kicker">5Y monthly percentile · S&P 500 indexed</span>
+        </div>
+        <button id="closeMacroLiquidityTrendModal" class="icon-btn chart-close-btn" type="button" title="关闭" aria-label="关闭宏观环境评分对比弹窗">×</button>
+      </div>
+      <div id="macroLiquidityTrendModalChart" class="macro-liquidity-trend-chart macro-trend-modal-chart modal-chart"></div>
+      <div id="macroLiquidityTrendModalTooltip" class="percentile-tooltip macro-liquidity-tooltip modal-tooltip" hidden></div>
+    </section>
+  </div>
+  <script src="i18n.js?v=20260526-html-export"></script>
+  <script src="app.js?v=20260527-spy-impact"></script>
+</body>
+</html>

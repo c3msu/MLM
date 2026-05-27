@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign Up - The Dial</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script>tailwind.config={darkMode:'class',theme:{extend:{colors:{'dial-bg':'#fafafc','dial-dark-bg':'#1c1c1e','dial-card':'#ffffff','dial-dark-card':'#2c2c2e','dial-border':'#e5e5e7','dial-dark-border':'#3a3a3c','dial-text':'#3c3c43','dial-dark-text':'#aeaeb2','score-green':'#34c759','score-yellow':'#ff9500','score-red':'#ff3b30','dial-accent':'#007aff'},fontFamily:{sans:['Inter','system-ui','sans-serif']}}}}</script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>:root{--background:#fafafc;--foreground:#3c3c43;--card:#ffffff;--border:#e5e5e7;--accent:#007aff}.dark{--background:#1c1c1e;--foreground:#aeaeb2;--card:#2c2c2e;--border:#3a3a3c}body{font-family:'Inter',system-ui,sans-serif;background-color:var(--background);color:var(--foreground);transition:background-color 0.3s ease,color 0.3s ease}.card{background-color:var(--card);border:1px solid var(--border)}.nav-blur{backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}</style>
+</head>
+<body class="antialiased min-h-screen flex flex-col">
+    <nav class="fixed top-0 left-0 right-0 z-50 nav-blur bg-white/80 dark:bg-dial-dark-bg/80 border-b border-dial-border dark:border-dial-dark-border">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <a href="index.html" class="flex items-center space-x-2">
+                    <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-dial-accent to-score-green flex items-center justify-center"><i data-lucide="gauge" class="w-5 h-5 text-white"></i></div>
+                    <span class="text-xl font-bold text-dial-text dark:text-white">The Dial</span>
+                </a>
+                <button id="themeToggle" class="p-2 rounded-lg hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors"><i data-lucide="sun" class="w-5 h-5 hidden dark:block text-dial-dark-text"></i><i data-lucide="moon" class="w-5 h-5 block dark:hidden text-dial-text"></i></button>
+            </div>
+        </div>
+    </nav>
+    <main class="flex-1 flex items-center justify-center pt-16 px-4 sm:px-6 lg:px-8">
+        <div class="w-full max-w-md">
+            <div class="card rounded-2xl p-8 shadow-xl">
+                <div class="text-center mb-8">
+                    <div class="w-16 h-16 rounded-2xl bg-gradient-to-br from-dial-accent to-score-green flex items-center justify-center mx-auto mb-4"><i data-lucide="user-plus" class="w-8 h-8 text-white"></i></div>
+                    <h1 class="text-2xl font-bold text-dial-text dark:text-white mb-2">Create account</h1>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">Start your free trial today</p>
+                </div>
+                <form id="signupForm" class="space-y-4">
+                    <div class="grid grid-cols-2 gap-4">
+                        <div><label class="block text-sm font-medium text-dial-text dark:text-white mb-1">First name</label><input type="text" required class="w-full px-4 py-3 rounded-xl border border-dial-border dark:border-dial-dark-border bg-transparent text-dial-text dark:text-white focus:outline-none focus:ring-2 focus:ring-dial-accent focus:border-transparent transition-all" placeholder="John"></div>
+                        <div><label class="block text-sm font-medium text-dial-text dark:text-white mb-1">Last name</label><input type="text" required class="w-full px-4 py-3 rounded-xl border border-dial-border dark:border-dial-dark-border bg-transparent text-dial-text dark:text-white focus:outline-none focus:ring-2 focus:ring-dial-accent focus:border-transparent transition-all" placeholder="Doe"></div>
+                    </div>
+                    <div><label class="block text-sm font-medium text-dial-text dark:text-white mb-1">Email</label><input type="email" required class="w-full px-4 py-3 rounded-xl border border-dial-border dark:border-dial-dark-border bg-transparent text-dial-text dark:text-white focus:outline-none focus:ring-2 focus:ring-dial-accent focus:border-transparent transition-all" placeholder="you@example.com"></div>
+                    <div><label class="block text-sm font-medium text-dial-text dark:text-white mb-1">Password</label><div class="relative"><input type="password" id="password" required class="w-full px-4 py-3 rounded-xl border border-dial-border dark:border-dial-dark-border bg-transparent text-dial-text dark:text-white focus:outline-none focus:ring-2 focus:ring-dial-accent focus:border-transparent transition-all" placeholder="••••••••"><button type="button" id="togglePassword" class="absolute right-3 top-1/2 -translate-y-1/2 text-dial-text/60 dark:text-dial-dark-text/60 hover:text-dial-text dark:hover:text-dial-dark-text"><i data-lucide="eye" class="w-5 h-5"></i></button></div><p class="mt-1 text-xs text-dial-text/60 dark:text-dial-dark-text/60">Must be at least 8 characters</p></div>
+                    <div class="flex items-start"><input type="checkbox" required class="mt-1 w-4 h-4 rounded border-dial-border dark:border-dial-dark-border text-dial-accent focus:ring-dial-accent"><span class="ml-2 text-sm text-dial-text/70 dark:text-dial-dark-text/70">I agree to the <a href="terms.html" class="text-dial-accent hover:underline">Terms of Service</a> and <a href="privacy.html" class="text-dial-accent hover:underline">Privacy Policy</a></span></div>
+                    <button type="submit" class="w-full py-3 px-4 bg-dial-accent text-white font-medium rounded-xl hover:bg-dial-accent/90 transition-colors flex items-center justify-center"><i data-lucide="user-plus" class="w-5 h-5 mr-2"></i>Create Account</button>
+                </form>
+                <div class="mt-6"><div class="relative"><div class="absolute inset-0 flex items-center"><div class="w-full border-t border-dial-border dark:border-dial-dark-border"></div></div><div class="relative flex justify-center text-sm"><span class="px-2 bg-white dark:bg-dial-dark-card text-dial-text/60 dark:text-dial-dark-text/60">Or sign up with</span></div></div><div class="mt-4 grid grid-cols-2 gap-3"><button class="flex items-center justify-center px-4 py-2 border border-dial-border dark:border-dial-dark-border rounded-xl hover:bg-dial-border/50 dark:hover:bg-dial-dark-border/50 transition-colors"><i data-lucide="github" class="w-5 h-5 mr-2 text-dial-text dark:text-dial-dark-text"></i><span class="text-sm text-dial-text dark:text-dial-dark-text">GitHub</span></button><button class="flex items-center justify-center px-4 py-2 border border-dial-border dark:border-dial-dark-border rounded-xl hover:bg-dial-border/50 dark:hover:bg-dial-dark-border/50 transition-colors"><i data-lucide="chrome" class="w-5 h-5 mr-2 text-dial-text dark:text-dial-dark-text"></i><span class="text-sm text-dial-text dark:text-dial-dark-text">Google</span></button></div></div>
+                <p class="mt-6 text-center text-sm text-dial-text/60 dark:text-dial-dark-text/60">Already have an account? <a href="login.html" class="text-dial-accent hover:underline font-medium">Sign in</a></p>
+            </div>
+        </div>
+    </main>
+    <script>
+        document.addEventListener('DOMContentLoaded',function(){lucide.createIcons();const themeToggle=document.getElementById('themeToggle'),html=document.documentElement,savedTheme=localStorage.getItem('theme');if(savedTheme==='dark'||(!savedTheme&&window.matchMedia('(prefers-color-scheme: dark)').matches))html.classList.add('dark');themeToggle.addEventListener('click',()=>{html.classList.toggle('dark');localStorage.setItem('theme',html.classList.contains('dark')?'dark':'light')});
+        const togglePassword=document.getElementById('togglePassword'),password=document.getElementById('password');togglePassword.addEventListener('click',()=>{const type=password.getAttribute('type')==='password'?'text':'password';password.setAttribute('type',type);togglePassword.innerHTML=type==='password'?'<i data-lucide="eye" class="w-5 h-5"></i>':'<i data-lucide="eye-off" class="w-5 h-5"></i>';lucide.createIcons()});
+        document.getElementById('signupForm').addEventListener('submit',(e)=>{e.preventDefault();window.location.href='dashboard.html';});
+        });
+    </script>
+</body>
+</html>

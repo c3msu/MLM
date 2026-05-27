@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Dial - 个人宏观经济仪表盘</title>
+    <meta name="description" content="个人使用的宏观经济监测仪表盘，追踪流动性、融资、国债、利率、信用、风险和外部因素。">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        'dial-bg': '#fafafc',
+                        'dial-dark-bg': '#1c1c1e',
+                        'dial-card': '#ffffff',
+                        'dial-dark-card': '#2c2c2e',
+                        'dial-border': '#e5e5e7',
+                        'dial-dark-border': '#3a3a3c',
+                        'dial-text': '#3c3c43',
+                        'dial-dark-text': '#aeaeb2',
+                        'score-green': '#34c759',
+                        'score-yellow': '#ff9500',
+                        'score-red': '#ff3b30',
+                        'dial-accent': '#007aff',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', 'sans-serif'],
+                    },
+                }
+            }
+        }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --background: #fafafc;
+            --foreground: #3c3c43;
+            --card: #ffffff;
+            --border: #e5e5e7;
+            --score-green: #34c759;
+            --score-yellow: #ff9500;
+            --score-red: #ff3b30;
+            --accent: #007aff;
+        }
+        .dark {
+            --background: #1c1c1e;
+            --foreground: #aeaeb2;
+            --card: #2c2c2e;
+            --border: #3a3a3c;
+        }
+        body {
+            font-family: 'Inter', system-ui, sans-serif;
+            background-color: var(--background);
+            color: var(--foreground);
+            transition: background-color 0.3s ease, color 0.3s ease;
+        }
+        .card {
+            background-color: var(--card);
+            border: 1px solid var(--border);
+            transition: background-color 0.3s ease, border-color 0.3s ease, transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        .card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+        }
+        .dark .card:hover {
+            box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+        }
+        .gauge-needle {
+            transform-origin: center;
+            transition: transform 1.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+        .fade-in {
+            opacity: 0;
+            transform: translateY(30px);
+            transition: opacity 0.6s ease, transform 0.6s ease;
+        }
+        .fade-in.visible, .hero .fade-in {
+            opacity: 1;
+            transform: translateY(0);
+        }
+        .nav-blur {
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+        }
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: var(--background);
+        }
+        ::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 4px;
+        }
+        .gradient-text {
+            background: linear-gradient(135deg, #007aff 0%, #34c759 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .score-high { color: var(--score-green); }
+        .score-medium { color: var(--score-yellow); }
+        .score-low { color: var(--score-red); }
+    </style>
+</head>
+<body class="antialiased">
+    <!-- Navigation -->
+    <nav class="fixed top-0 left-0 right-0 z-50 nav-blur bg-white/80 dark:bg-dial-dark-bg/80 border-b border-dial-border dark:border-dial-dark-border">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <a href="index.html" class="flex items-center space-x-2">
+                    <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-dial-accent to-score-green flex items-center justify-center">
+                        <i data-lucide="gauge" class="w-5 h-5 text-white"></i>
+                    </div>
+                    <span class="text-xl font-bold text-dial-text dark:text-white">The Dial</span>
+                </a>
+
+                <div class="hidden md:flex items-center space-x-8">
+                    <a href="#features" class="text-sm font-medium text-dial-text/70 dark:text-dial-dark-text hover:text-dial-accent dark:hover:text-dial-accent transition-colors">功能</a>
+                    <a href="#modules" class="text-sm font-medium text-dial-text/70 dark:text-dial-dark-text hover:text-dial-accent dark:hover:text-dial-accent transition-colors">模块</a>
+                    <a href="dashboard.html" class="text-sm font-medium text-dial-text/70 dark:text-dial-dark-text hover:text-dial-accent dark:hover:text-dial-accent transition-colors">仪表盘</a>
+                    <a href="#data" class="text-sm font-medium text-dial-text/70 dark:text-dial-dark-text hover:text-dial-accent dark:hover:text-dial-accent transition-colors">数据管理</a>
+                </div>
+
+                <div class="flex items-center space-x-4">
+                    <button id="themeToggle" class="p-2 rounded-lg hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors" aria-label="Toggle theme">
+                        <i data-lucide="sun" class="w-5 h-5 hidden dark:block text-dial-dark-text"></i>
+                        <i data-lucide="moon" class="w-5 h-5 block dark:hidden text-dial-text"></i>
+                    </button>
+
+                    <a href="dashboard.html" class="hidden sm:inline-flex items-center px-4 py-2 text-sm font-medium text-white bg-dial-accent rounded-lg hover:bg-dial-accent/90 transition-colors">
+                        进入仪表盘
+                    </a>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Hero Section -->
+    <section class="hero pt-32 pb-20 px-4 sm:px-6 lg:px-8">
+        <div class="max-w-7xl mx-auto">
+            <div class="grid lg:grid-cols-2 gap-12 items-center">
+                <div class="fade-in">
+                    <div class="inline-flex items-center px-3 py-1 rounded-full bg-dial-accent/10 text-dial-accent text-sm font-medium mb-6">
+                        <span class="w-2 h-2 rounded-full bg-dial-accent mr-2 animate-pulse"></span>
+                        个人宏观经济研究工具
+                    </div>
+                    <h1 class="text-4xl sm:text-5xl lg:text-6xl font-bold text-dial-text dark:text-white leading-tight mb-6">
+                        宏观经济环境，<span class="gradient-text">一目了然</span>
+                    </h1>
+                    <p class="text-lg text-dial-text/70 dark:text-dial-dark-text mb-8 max-w-xl">
+                        追踪47个宏观因子，7大分析模块，一个经济环境评分。基于FRED数据，本地SQLite存储，完全个人使用。
+                    </p>
+                    <div class="flex flex-wrap gap-4">
+                        <a href="dashboard.html" class="inline-flex items-center px-6 py-3 text-base font-medium text-white bg-dial-accent rounded-xl hover:bg-dial-accent/90 transition-all hover:shadow-lg hover:shadow-dial-accent/25">
+                            <i data-lucide="layout-dashboard" class="w-5 h-5 mr-2"></i>
+                            查看仪表盘
+                        </a>
+                        <a href="#data" class="inline-flex items-center px-6 py-3 text-base font-medium text-dial-text dark:text-white bg-dial-border/50 dark:bg-dial-dark-border/50 rounded-xl hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors">
+                            <i data-lucide="database" class="w-5 h-5 mr-2"></i>
+                            数据管理
+                        </a>
+                    </div>
+                </div>
+
+                <div class="fade-in flex justify-center">
+                    <div class="relative w-80 h-80">
+                        <svg viewBox="0 0 200 200" class="w-full h-full transform -rotate-90">
+                            <circle cx="100" cy="100" r="90" fill="none" stroke="currentColor" stroke-width="12" class="text-dial-border dark:text-dial-dark-border" stroke-linecap="round"/>
+                            <circle cx="100" cy="100" r="90" fill="none" stroke="url(#gradient)" stroke-width="12" stroke-linecap="round" stroke-dasharray="283" stroke-dashoffset="99" class="gauge-bg"/>
+                            <defs>
+                                <linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                                    <stop offset="0%" stop-color="#ff3b30"/>
+                                    <stop offset="50%" stop-color="#ff9500"/>
+                                    <stop offset="100%" stop-color="#34c759"/>
+                                </linearGradient>
+                            </defs>
+                        </svg>
+                        <div class="absolute inset-0 flex flex-col items-center justify-center">
+                            <span id="heroScore" class="text-5xl font-bold text-dial-text dark:text-white">64.9</span>
+                            <span class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mt-1">经济环境评分</span>
+                            <span id="heroInterpretation" class="text-xs text-score-green mt-2">支持性</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Stats Section -->
+    <section class="py-12 px-4 sm:px-6 lg:px-8 border-y border-dial-border dark:border-dial-dark-border">
+        <div class="max-w-7xl mx-auto">
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-8">
+                <div class="text-center fade-in">
+                    <div class="text-3xl font-bold text-dial-text dark:text-white mb-1">47</div>
+                    <div class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">宏观因子</div>
+                </div>
+                <div class="text-center fade-in">
+                    <div class="text-3xl font-bold text-dial-text dark:text-white mb-1">7</div>
+                    <div class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">分析模块</div>
+                </div>
+                <div class="text-center fade-in">
+                    <div class="text-3xl font-bold text-dial-text dark:text-white mb-1">5Y</div>
+                    <div class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">滚动窗口</div>
+                </div>
+                <div class="text-center fade-in">
+                    <div class="text-3xl font-bold text-dial-text dark:text-white mb-1">每日</div>
+                    <div class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">数据更新</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Features Section -->
+    <section id="features" class="py-20 px-4 sm:px-6 lg:px-8">
+        <div class="max-w-7xl mx-auto">
+            <div class="text-center mb-16 fade-in">
+                <h2 class="text-3xl sm:text-4xl font-bold text-dial-text dark:text-white mb-4">研究宏观经济所需的一切</h2>
+                <p class="text-lg text-dial-text/70 dark:text-dial-dark-text max-w-2xl mx-auto">
+                    基于FRED数据，本地存储，完全掌控
+                </p>
+            </div>
+
+            <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <div class="card rounded-2xl p-6 fade-in">
+                    <div class="w-12 h-12 rounded-xl bg-dial-accent/10 flex items-center justify-center mb-4">
+                        <i data-lucide="gauge" class="w-6 h-6 text-dial-accent"></i>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-2">经济环境评分</h3>
+                    <p class="text-dial-text/70 dark:text-dial-dark-text text-sm">
+                        将47个宏观因子综合为0-100百分位分数，一个分数总览全局。
+                    </p>
+                </div>
+
+                <div class="card rounded-2xl p-6 fade-in">
+                    <div class="w-12 h-12 rounded-xl bg-score-green/10 flex items-center justify-center mb-4">
+                        <i data-lucide="grid-3x3" class="w-6 h-6 text-score-green"></i>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-2">7大分析模块</h3>
+                    <p class="text-dial-text/70 dark:text-dial-dark-text text-sm">
+                        流动性、融资、国债、利率、信用、风险、外部——每个模块独立检视宏观环境的一个维度。
+                    </p>
+                </div>
+
+                <div class="card rounded-2xl p-6 fade-in">
+                    <div class="w-12 h-12 rounded-xl bg-score-yellow/10 flex items-center justify-center mb-4">
+                        <i data-lucide="history" class="w-6 h-6 text-score-yellow"></i>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-2">历史百分位上下文</h3>
+                    <p class="text-dial-text/70 dark:text-dial-dark-text text-sm">
+                        5年滚动窗口百分位评分，每个指标都有其自身历史的纵深对比。
+                    </p>
+                </div>
+
+                <div class="card rounded-2xl p-6 fade-in">
+                    <div class="w-12 h-12 rounded-xl bg-score-red/10 flex items-center justify-center mb-4">
+                        <i data-lucide="database" class="w-6 h-6 text-score-red"></i>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-2">本地数据存储</h3>
+                    <p class="text-dial-text/70 dark:text-dial-dark-text text-sm">
+                        使用SQLite本地存储，数据完全掌控，支持历史数据回溯。
+                    </p>
+                </div>
+
+                <div class="card rounded-2xl p-6 fade-in">
+                    <div class="w-12 h-12 rounded-xl bg-purple-500/10 flex items-center justify-center mb-4">
+                        <i data-lucide="download" class="w-6 h-6 text-purple-500"></i>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-2">CSV数据导入</h3>
+                    <p class="text-dial-text/70 dark:text-dial-dark-text text-sm">
+                        直接从FRED下载CSV数据，导入本地数据库，无需API密钥。
+                    </p>
+                </div>
+
+                <div class="card rounded-2xl p-6 fade-in">
+                    <div class="w-12 h-12 rounded-xl bg-pink-500/10 flex items-center justify-center mb-4">
+                        <i data-lucide="moon" class="w-6 h-6 text-pink-500"></i>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-2">精心设计的界面</h3>
+                    <p class="text-dial-text/70 dark:text-dial-dark-text text-sm">
+                        支持亮色和暗色主题，为长时间研究阅读体验而设计。
+                    </p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Modules Section -->
+    <section id="modules" class="py-20 px-4 sm:px-6 lg:px-8 bg-dial-bg dark:bg-dial-dark-bg">
+        <div class="max-w-7xl mx-auto">
+            <div class="text-center mb-16 fade-in">
+                <h2 class="text-3xl sm:text-4xl font-bold text-dial-text dark:text-white mb-4">7大分析模块，47个宏观因子</h2>
+                <p class="text-lg text-dial-text/70 dark:text-dial-dark-text max-w-2xl mx-auto">
+                    每个模块独立检视宏观环境的一个维度
+                </p>
+            </div>
+
+            <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <a href="module-liquidity.html" class="card rounded-2xl p-6 fade-in hover:border-dial-accent/50">
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="w-12 h-12 rounded-xl bg-blue-500/10 flex items-center justify-center">
+                            <i data-lucide="droplets" class="w-6 h-6 text-blue-500"></i>
+                        </div>
+                        <span class="text-2xl font-bold score-high">76.9</span>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-1">流动性</h3>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-3">Liquidity</p>
+                    <p class="text-sm text-dial-text/70 dark:text-dial-dark-text">8个因子 · 衡量金融系统中资金的可用性和流动</p>
+                </a>
+
+                <a href="module-funding.html" class="card rounded-2xl p-6 fade-in hover:border-dial-accent/50">
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="w-12 h-12 rounded-xl bg-green-500/10 flex items-center justify-center">
+                            <i data-lucide="banknote" class="w-6 h-6 text-green-500"></i>
+                        </div>
+                        <span class="text-2xl font-bold score-high">61.5</span>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-1">融资</h3>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-3">Funding</p>
+                    <p class="text-sm text-dial-text/70 dark:text-dial-dark-text">12个因子 · 追踪银行间融资成本和市场流动性</p>
+                </a>
+
+                <a href="module-treasury.html" class="card rounded-2xl p-6 fade-in hover:border-dial-accent/50">
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="w-12 h-12 rounded-xl bg-yellow-500/10 flex items-center justify-center">
+                            <i data-lucide="landmark" class="w-6 h-6 text-yellow-500"></i>
+                        </div>
+                        <span class="text-2xl font-bold score-medium">42.1</span>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-1">国债</h3>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-3">Treasury</p>
+                    <p class="text-sm text-dial-text/70 dark:text-dial-dark-text">8个因子 · 监测国债收益率曲线和市场深度</p>
+                </a>
+
+                <a href="module-rates.html" class="card rounded-2xl p-6 fade-in hover:border-dial-accent/50">
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="w-12 h-12 rounded-xl bg-purple-500/10 flex items-center justify-center">
+                            <i data-lucide="percent" class="w-6 h-6 text-purple-500"></i>
+                        </div>
+                        <span class="text-2xl font-bold score-medium">50.0</span>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-1">利率</h3>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-3">Rates</p>
+                    <p class="text-sm text-dial-text/70 dark:text-dial-dark-text">5个因子 · 跟踪关键利率和利差水平</p>
+                </a>
+
+                <a href="module-credit.html" class="card rounded-2xl p-6 fade-in hover:border-dial-accent/50">
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="w-12 h-12 rounded-xl bg-red-500/10 flex items-center justify-center">
+                            <i data-lucide="credit-card" class="w-6 h-6 text-red-500"></i>
+                        </div>
+                        <span class="text-2xl font-bold score-high">93.3</span>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-1">信用</h3>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-3">Credit</p>
+                    <p class="text-sm text-dial-text/70 dark:text-dial-dark-text">4个因子 · 评估信用利差和违约风险</p>
+                </a>
+
+                <a href="module-risk.html" class="card rounded-2xl p-6 fade-in hover:border-dial-accent/50">
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="w-12 h-12 rounded-xl bg-orange-500/10 flex items-center justify-center">
+                            <i data-lucide="alert-triangle" class="w-6 h-6 text-orange-500"></i>
+                        </div>
+                        <span class="text-2xl font-bold score-low">39.5</span>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-1">风险</h3>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-3">Risk</p>
+                    <p class="text-sm text-dial-text/70 dark:text-dial-dark-text">5个因子 · 监测波动率和风险指标</p>
+                </a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Data Management Section -->
+    <section id="data" class="py-20 px-4 sm:px-6 lg:px-8">
+        <div class="max-w-7xl mx-auto">
+            <div class="text-center mb-16 fade-in">
+                <h2 class="text-3xl sm:text-4xl font-bold text-dial-text dark:text-white mb-4">数据管理</h2>
+                <p class="text-lg text-dial-text/70 dark:text-dial-dark-text max-w-2xl mx-auto">
+                    使用CSV文件从FRED获取数据，本地SQLite存储
+                </p>
+            </div>
+
+            <div class="grid lg:grid-cols-2 gap-8">
+                <div class="card rounded-2xl p-8 fade-in">
+                    <div class="flex items-center mb-6">
+                        <div class="w-12 h-12 rounded-xl bg-dial-accent/10 flex items-center justify-center mr-4">
+                            <i data-lucide="download" class="w-6 h-6 text-dial-accent"></i>
+                        </div>
+                        <div>
+                            <h3 class="text-xl font-semibold text-dial-text dark:text-white">从FRED下载数据</h3>
+                            <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">无需API密钥</p>
+                        </div>
+                    </div>
+
+                    <div class="space-y-4">
+                        <div class="flex items-start">
+                            <div class="w-6 h-6 rounded-full bg-dial-accent/10 flex items-center justify-center mr-3 mt-0.5 flex-shrink-0">
+                                <span class="text-xs font-medium text-dial-accent">1</span>
+                            </div>
+                            <div>
+                                <p class="text-sm text-dial-text dark:text-dial-dark-text">访问 <a href="https://fred.stlouisfed.org/" target="_blank" class="text-dial-accent hover:underline">FRED官网</a></p>
+                            </div>
+                        </div>
+                        <div class="flex items-start">
+                            <div class="w-6 h-6 rounded-full bg-dial-accent/10 flex items-center justify-center mr-3 mt-0.5 flex-shrink-0">
+                                <span class="text-xs font-medium text-dial-accent">2</span>
+                            </div>
+                            <div>
+                                <p class="text-sm text-dial-text dark:text-dial-dark-text">搜索需要的经济指标（如：DGS10, UNRATE, GDPC1）</p>
+                            </div>
+                        </div>
+                        <div class="flex items-start">
+                            <div class="w-6 h-6 rounded-full bg-dial-accent/10 flex items-center justify-center mr-3 mt-0.5 flex-shrink-0">
+                                <span class="text-xs font-medium text-dial-accent">3</span>
+                            </div>
+                            <div>
+                                <p class="text-sm text-dial-text dark:text-dial-dark-text">点击"Download"按钮，选择CSV格式</p>
+                            </div>
+                        </div>
+                        <div class="flex items-start">
+                            <div class="w-6 h-6 rounded-full bg-dial-accent/10 flex items-center justify-center mr-3 mt-0.5 flex-shrink-0">
+                                <span class="text-xs font-medium text-dial-accent">4</span>
+                            </div>
+                            <div>
+                                <p class="text-sm text-dial-text dark:text-dial-dark-text">将CSV文件保存到项目的data目录</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mt-6 p-4 bg-dial-bg dark:bg-dial-dark-bg rounded-xl">
+                        <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60 mb-2">常用指标代码：</p>
+                        <div class="flex flex-wrap gap-2">
+                            <span class="px-2 py-1 bg-dial-border dark:bg-dial-dark-border rounded text-xs">DGS10</span>
+                            <span class="px-2 py-1 bg-dial-border dark:bg-dial-dark-border rounded text-xs">UNRATE</span>
+                            <span class="px-2 py-1 bg-dial-border dark:bg-dial-dark-border rounded text-xs">GDPC1</span>
+                            <span class="px-2 py-1 bg-dial-border dark:bg-dial-dark-border rounded text-xs">CPIAUCSL</span>
+                            <span class="px-2 py-1 bg-dial-border dark:bg-dial-dark-border rounded text-xs">FEDFUNDS</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card rounded-2xl p-8 fade-in">
+                    <div class="flex items-center mb-6">
+                        <div class="w-12 h-12 rounded-xl bg-score-green/10 flex items-center justify-center mr-4">
+                            <i data-lucide="database" class="w-6 h-6 text-score-green"></i>
+                        </div>
+                        <div>
+                            <h3 class="text-xl font-semibold text-dial-text dark:text-white">本地SQLite存储</h3>
+                            <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">轻量级数据库</p>
+                        </div>
+                    </div>
+
+                    <div class="space-y-4">
+                        <p class="text-sm text-dial-text dark:text-dial-dark-text">
+                            使用SQLite作为本地数据库，无需服务器，数据完全存储在本地文件中。
+                        </p>
+
+                        <div class="p-4 bg-dial-bg dark:bg-dial-dark-bg rounded-xl">
+                            <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60 mb-2">数据库结构：</p>
+                            <ul class="text-xs text-dial-text dark:text-dial-dark-text space-y-1">
+                                <li>• <strong>indicators</strong> - 存储所有经济指标数据</li>
+                                <li>• <strong>modules</strong> - 7大模块配置</li>
+                                <li>• <strong>scores</strong> - 每日评分记录</li>
+                                <li>• <strong>metadata</strong> - 指标元数据</li>
+                            </ul>
+                        </div>
+
+                        <div class="flex items-center p-4 bg-score-yellow/10 rounded-xl">
+                            <i data-lucide="alert-circle" class="w-5 h-5 text-score-yellow mr-3 flex-shrink-0"></i>
+                            <p class="text-xs text-dial-text dark:text-dial-dark-text">
+                                需要Python后端支持CSV导入和数据库操作。详见项目文档。
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="mt-8 card rounded-2xl p-8 fade-in">
+                <h3 class="text-xl font-semibold text-dial-text dark:text-white mb-4">Python数据导入脚本</h3>
+                <div class="bg-dial-bg dark:bg-dial-dark-bg rounded-xl p-4 overflow-x-auto">
+                    <pre class="text-xs text-dial-text dark:text-dial-dark-text"><code># data_import.py
+import pandas as pd
+import sqlite3
+from pathlib import Path
+
+# 连接到SQLite数据库
+conn = sqlite3.connect('macro_data.db')
+
+# 读取CSV并导入
+def import_fred_csv(csv_path, series_id):
+    df = pd.read_csv(csv_path, skiprows=0)
+    df['series_id'] = series_id
+    df.to_sql('indicators', conn, if_exists='append', index=False)
+    print(f"Imported {series_id}: {len(df)} rows")
+
+# 示例：导入多个指标
+indicators = {
+    'DGS10': 'data/DGS10.csv',      # 10年期国债收益率
+    'UNRATE': 'data/UNRATE.csv',    # 失业率
+    'GDPC1': 'data/GDPC1.csv',      # 实际GDP
+    'CPIAUCSL': 'data/CPIAUCSL.csv' # CPI
+}
+
+for series_id, path in indicators.items():
+    import_fred_csv(path, series_id)
+
+conn.close()
+print("数据导入完成！")</code></pre>
+                </div>
+                <div class="mt-4 flex gap-4">
+                    <a href="#" class="inline-flex items-center px-4 py-2 text-sm font-medium text-white bg-dial-accent rounded-lg hover:bg-dial-accent/90 transition-colors" onclick="alert('请查看项目文档获取完整脚本')">
+                        <i data-lucide="file-text" class="w-4 h-4 mr-2"></i>
+                        查看完整脚本
+                    </a>
+                    <a href="https://fred.stlouisfed.org/docs/api/fred/" target="_blank" class="inline-flex items-center px-4 py-2 text-sm font-medium text-dial-text dark:text-dial-dark-text bg-dial-border dark:bg-dial-dark-border rounded-lg hover:bg-dial-border/80 dark:hover:bg-dial-dark-border/80 transition-colors">
+                        <i data-lucide="external-link" class="w-4 h-4 mr-2"></i>
+                        FRED文档
+                    </a>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="py-12 px-4 sm:px-6 lg:px-8 border-t border-dial-border dark:border-dial-dark-border">
+        <div class="max-w-7xl mx-auto">
+            <div class="flex flex-col md:flex-row items-center justify-between gap-4">
+                <div class="flex items-center space-x-2">
+                    <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-dial-accent to-score-green flex items-center justify-center">
+                        <i data-lucide="gauge" class="w-5 h-5 text-white"></i>
+                    </div>
+                    <span class="text-lg font-bold text-dial-text dark:text-white">The Dial</span>
+                </div>
+                <div class="flex items-center space-x-6 text-sm text-dial-text/60 dark:text-dial-dark-text/60">
+                    <span>个人宏观经济研究工具</span>
+                    <span>·</span>
+                    <span>基于FRED数据</span>
+                    <span>·</span>
+                    <span>本地SQLite存储</span>
+                </div>
+            </div>
+            <div class="mt-8 pt-8 border-t border-dial-border dark:border-dial-dark-border text-center text-sm text-dial-text/40 dark:text-dial-dark-text/40">
+                <p>仅用于教育和研究目的，不构成专业建议。</p>
+                <p class="mt-2">数据来源：Federal Reserve Economic Data (FRED)</p>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        // Initialize Lucide icons
+        lucide.createIcons();
+
+        // Theme toggle
+        const themeToggle = document.getElementById('themeToggle');
+        const html = document.documentElement;
+
+        // Check for saved theme preference
+        if (localStorage.getItem('theme') === 'dark' || (!localStorage.getItem('theme') && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+            html.classList.add('dark');
+        }
+
+        themeToggle.addEventListener('click', () => {
+            html.classList.toggle('dark');
+            localStorage.setItem('theme', html.classList.contains('dark') ? 'dark' : 'light');
+        });
+
+        // Scroll animations
+        const observerOptions = {
+            threshold: 0.1,
+            rootMargin: '0px 0px -50px 0px'
+        };
+
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add('visible');
+                }
+            });
+        }, observerOptions);
+
+        document.querySelectorAll('.fade-in').forEach(el => observer.observe(el));
+    </script>
+</body>
+</html>

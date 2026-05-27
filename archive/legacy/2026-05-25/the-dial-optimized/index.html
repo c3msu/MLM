@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="The Dial - 个人宏观经济研究工具，追踪47个宏观因子，7大分析模块，本地SQLite存储，基于FRED数据">
+  <meta name="keywords" content="宏观经济, FRED, 经济指标, 流动性, 融资, 国债, 利率, 信用, 风险">
+  <meta name="author" content="The Dial">
+  <meta name="robots" content="index, follow">
+  
+  <!-- Security Headers (via meta for static sites) -->
+  <meta http-equiv="X-Frame-Options" content="DENY">
+  <meta http-equiv="X-Content-Type-Options" content="nosniff">
+  <meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin">
+  <meta http-equiv="Permissions-Policy" content="geolocation=(), microphone=(), camera=()">
+  
+  <!-- CSP - Strict but allows necessary CDN resources -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'self';
+    script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net;
+    style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+    font-src 'self' https://fonts.gstatic.com;
+    img-src 'self' data: https:;
+    connect-src 'self';
+    frame-ancestors 'none';
+    base-uri 'self';
+    form-action 'self';
+  ">
+  
+  <title>The Dial - 个人宏观经济仪表盘</title>
+  
+  <!-- Preconnect for performance -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="preconnect" href="https://unpkg.com" crossorigin>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  
+  <!-- Preload critical resources -->
+  <link rel="preload" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" as="style">
+  <link rel="preload" href="css/common.css" as="style">
+  
+  <!-- Styles -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="css/common.css">
+  
+  <!-- Tailwind CSS with SRI -->
+  <script src="https://cdn.tailwindcss.com" 
+    integrity="sha384-..." 
+    crossorigin="anonymous"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            'dial-bg': '#fafafc',
+            'dial-dark-bg': '#1c1c1e',
+            'dial-card': '#ffffff',
+            'dial-dark-card': '#2c2c2e',
+            'dial-border': '#e5e5e7',
+            'dial-dark-border': '#3a3a3c',
+            'dial-text': '#3c3c43',
+            'dial-dark-text': '#aeaeb2',
+            'score-green': '#34c759',
+            'score-yellow': '#ff9500',
+            'score-red': '#ff3b30',
+            'dial-accent': '#007aff',
+          }
+        }
+      }
+    }
+  </script>
+  
+  <!-- Favicon -->
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
+  
+  <style>
+    /* Page-specific styles */
+    .hero-gauge {
+      position: relative;
+      width: 280px;
+      height: 280px;
+    }
+    
+    .gauge-bg {
+      stroke-dasharray: 283;
+      stroke-dashoffset: 146;
+      animation: gaugeFill 1.5s ease-out forwards;
+    }
+    
+    @keyframes gaugeFill {
+      from { stroke-dashoffset: 283; }
+      to { stroke-dashoffset: 146; }
+    }
+    
+    .feature-icon {
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 16px;
+    }
+    
+    .module-card {
+      transition: all 0.2s ease;
+    }
+    
+    .module-card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 12px 32px rgba(0,0,0,0.1);
+    }
+    
+    .dark .module-card:hover {
+      box-shadow: 0 12px 32px rgba(0,0,0,0.3);
+    }
+  </style>
+</head>
+<body class="antialiased">
+  <!-- Navigation -->
+  <nav class="fixed top-0 left-0 right-0 z-50 nav-blur bg-white/80 dark:bg-dial-dark-bg/80 border-b border-dial-border dark:border-dial-dark-border">
+    <div class="container mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="flex items-center justify-between h-16">
+        <!-- Logo -->
+        <a href="index.html" class="flex items-center space-x-2 group" aria-label="The Dial 首页">
+          <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-dial-accent to-score-green flex items-center justify-center transition-transform group-hover:scale-105">
+            <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="10" stroke-width="2"/>
+              <path d="M12 6v6l4 2" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <span class="text-xl font-bold text-dial-text dark:text-white">The Dial</span>
+        </a>
+        
+        <!-- Desktop Nav -->
+        <div class="hidden md:flex items-center space-x-8">
+          <a href="#features" class="text-sm font-medium text-dial-text/70 dark:text-dial-dark-text hover:text-dial-accent dark:hover:text-dial-accent transition-colors">功能</a>
+          <a href="#modules" class="text-sm font-medium text-dial-text/70 dark:text-dial-dark-text hover:text-dial-accent dark:hover:text-dial-accent transition-colors">模块</a>
+          <a href="dashboard.html" class="text-sm font-medium text-dial-text/70 dark:text-dial-dark-text hover:text-dial-accent dark:hover:text-dial-accent transition-colors">仪表盘</a>
+          <a href="#data" class="text-sm font-medium text-dial-text/70 dark:text-dial-dark-text hover:text-dial-accent dark:hover:text-dial-accent transition-colors">数据管理</a>
+        </div>
+        
+        <!-- Actions -->
+        <div class="flex items-center space-x-3">
+          <button data-theme-toggle class="p-2 rounded-lg hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors" aria-label="切换主题">
+            <svg class="w-5 h-5 hidden dark:block text-dial-dark-text" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="5"/>
+              <path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+            </svg>
+            <svg class="w-5 h-5 block dark:hidden text-dial-text" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+            </svg>
+          </button>
+          
+          <a href="dashboard.html" class="hidden sm:inline-flex items-center px-4 py-2 text-sm font-medium text-white bg-dial-accent rounded-lg hover:bg-dial-accent/90 transition-colors">
+            进入仪表盘
+          </a>
+          
+          <!-- Mobile menu button -->
+          <button data-mobile-toggle class="md:hidden p-2 rounded-lg hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors" aria-label="打开菜单" aria-expanded="false">
+            <svg class="w-6 h-6 text-dial-text dark:text-dial-dark-text" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Mobile Menu -->
+    <div data-mobile-menu class="hidden md:hidden border-t border-dial-border dark:border-dial-dark-border bg-white dark:bg-dial-dark-bg">
+      <div class="container mx-auto px-4 py-4 space-y-2">
+        <a href="#features" class="block py-2 text-dial-text dark:text-dial-dark-text hover:text-dial-accent">功能</a>
+        <a href="#modules" class="block py-2 text-dial-text dark:text-dial-dark-text hover:text-dial-accent">模块</a>
+        <a href="dashboard.html" class="block py-2 text-dial-text dark:text-dial-dark-text hover:text-dial-accent">仪表盘</a>
+        <a href="#data" class="block py-2 text-dial-text dark:text-dial-dark-text hover:text-dial-accent">数据管理</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero Section -->
+  <section class="pt-32 pb-20 px-4 sm:px-6 lg:px-8">
+    <div class="container mx-auto max-w-6xl">
+      <div class="grid lg:grid-cols-2 gap-12 items-center">
+        <!-- Content -->
+        <div data-animate>
+          <div class="inline-flex items-center px-3 py-1 rounded-full bg-dial-accent/10 text-dial-accent text-sm font-medium mb-6">
+            <span class="w-2 h-2 rounded-full bg-dial-accent mr-2 animate-pulse"></span>
+            个人宏观经济研究工具
+          </div>
+          <h1 class="text-4xl sm:text-5xl lg:text-6xl font-bold text-dial-text dark:text-white leading-tight mb-6">
+            宏观经济环境，<span class="gradient-text">一目了然</span>
+          </h1>
+          <p class="text-lg text-dial-text/70 dark:text-dial-dark-text mb-8 max-w-xl">
+            追踪47个宏观因子，7大分析模块，一个经济环境评分。基于FRED数据，本地SQLite存储，完全个人使用。
+          </p>
+          <div class="flex flex-wrap gap-4">
+            <a href="dashboard.html" class="inline-flex items-center px-6 py-3 text-base font-medium text-white bg-dial-accent rounded-xl hover:bg-dial-accent/90 transition-all hover:shadow-lg hover:shadow-dial-accent/25">
+              <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <rect x="3" y="3" width="7" height="7" rx="1"/>
+                <rect x="14" y="3" width="7" height="7" rx="1"/>
+                <rect x="14" y="14" width="7" height="7" rx="1"/>
+                <rect x="3" y="14" width="7" height="7" rx="1"/>
+              </svg>
+              查看仪表盘
+            </a>
+            <a href="#data" class="inline-flex items-center px-6 py-3 text-base font-medium text-dial-text dark:text-white bg-dial-border/50 dark:bg-dial-dark-border/50 rounded-xl hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors">
+              <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+              </svg>
+              数据管理
+            </a>
+          </div>
+        </div>
+        
+        <!-- Gauge -->
+        <div data-animate class="flex justify-center">
+          <div class="hero-gauge">
+            <svg viewBox="0 0 200 200" class="w-full h-full" style="transform: rotate(-90deg)">
+              <circle cx="100" cy="100" r="90" fill="none" stroke="currentColor" stroke-width="12" 
+                class="text-dial-border dark:text-dial-dark-border" stroke-linecap="round"/>
+              <circle cx="100" cy="100" r="90" fill="none" stroke="url(#gaugeGradient)" stroke-width="12" 
+                stroke-linecap="round" class="gauge-bg"/>
+              <defs>
+                <linearGradient id="gaugeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                  <stop offset="0%" stop-color="#ff3b30"/>
+                  <stop offset="50%" stop-color="#ff9500"/>
+                  <stop offset="100%" stop-color="#34c759"/>
+                </linearGradient>
+              </defs>
+            </svg>
+            <div class="absolute inset-0 flex flex-col items-center justify-center" style="transform: rotate(0deg)">
+              <span class="text-5xl font-bold text-dial-text dark:text-white">48.3</span>
+              <span class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mt-1">经济环境评分</span>
+              <span class="text-xs px-2 py-1 rounded-full bg-score-yellow/10 text-score-yellow mt-2">中性偏紧</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Stats Section -->
+  <section class="py-12 px-4 sm:px-6 lg:px-8 border-y border-dial-border dark:border-dial-dark-border">
+    <div class="container mx-auto max-w-6xl">
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-8">
+        <div data-animate class="text-center">
+          <div class="text-3xl font-bold text-dial-text dark:text-white mb-1">47</div>
+          <div class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">宏观因子</div>
+        </div>
+        <div data-animate class="text-center">
+          <div class="text-3xl font-bold text-dial-text dark:text-white mb-1">7</div>
+          <div class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">分析模块</div>
+        </div>
+        <div data-animate class="text-center">
+          <div class="text-3xl font-bold text-dial-text dark:text-white mb-1">5Y</div>
+          <div class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">滚动窗口</div>
+        </div>
+        <div data-animate class="text-center">
+          <div class="text-3xl font-bold text-dial-text dark:text-white mb-1">每日</div>
+          <div class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">数据更新</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features Section -->
+  <section id="features" class="py-20 px-4 sm:px-6 lg:px-8">
+    <div class="container mx-auto max-w-6xl">
+      <div data-animate class="text-center mb-16">
+        <h2 class="text-3xl sm:text-4xl font-bold text-dial-text dark:text-white mb-4">研究宏观经济所需的一切</h2>
+        <p class="text-lg text-dial-text/70 dark:text-dial-dark-text max-w-2xl mx-auto">
+          基于FRED数据，本地存储，完全掌控
+        </p>
+      </div>
+      
+      <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <!-- Feature 1 -->
+        <div data-animate class="card rounded-2xl p-6">
+          <div class="feature-icon bg-dial-accent/10">
+            <svg class="w-6 h-6 text-dial-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="10"/>
+              <path d="M12 6v6l4 2" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-2">经济环境评分</h3>
+          <p class="text-dial-text/70 dark:text-dial-dark-text text-sm">
+            将47个宏观因子综合为0-100百分位分数，一个分数总览全局。
+          </p>
+        </div>
+        
+        <!-- Feature 2 -->
+        <div data-animate class="card rounded-2xl p-6">
+          <div class="feature-icon bg-score-green/10">
+            <svg class="w-6 h-6 text-score-green" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <rect x="3" y="3" width="7" height="7"/>
+              <rect x="14" y="3" width="7" height="7"/>
+              <rect x="14" y="14" width="7" height="7"/>
+              <rect x="3" y="14" width="7" height="7"/>
+            </svg>
+          </div>
+          <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-2">7大分析模块</h3>
+          <p class="text-dial-text/70 dark:text-dial-dark-text text-sm">
+            流动性、融资、国债、利率、信用、风险、外部——每个模块独立检视宏观环境的一个维度。
+          </p>
+        </div>
+        
+        <!-- Feature 3 -->
+        <div data-animate class="card rounded-2xl p-6">
+          <div class="feature-icon bg-score-yellow/10">
+            <svg class="w-6 h-6 text-score-yellow" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+          </div>
+          <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-2">历史百分位上下文</h3>
+          <p class="text-dial-text/70 dark:text-dial-dark-text text-sm">
+            5年滚动窗口百分位评分，每个指标都有其自身历史的纵深对比。
+          </p>
+        </div>
+        
+        <!-- Feature 4 -->
+        <div data-animate class="card rounded-2xl p-6">
+          <div class="feature-icon bg-score-red/10">
+            <svg class="w-6 h-6 text-score-red" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <ellipse cx="12" cy="5" rx="9" ry="3"/>
+              <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+              <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+            </svg>
+          </div>
+          <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-2">本地数据存储</h3>
+          <p class="text-dial-text/70 dark:text-dial-dark-text text-sm">
+            使用SQLite本地存储，数据完全掌控，支持历史数据回溯。
+          </p>
+        </div>
+        
+        <!-- Feature 5 -->
+        <div data-animate class="card rounded-2xl p-6">
+          <div class="feature-icon bg-purple-500/10">
+            <svg class="w-6 h-6 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+          </div>
+          <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-2">CSV数据导入</h3>
+          <p class="text-dial-text/70 dark:text-dial-dark-text text-sm">
+            直接从FRED下载CSV数据，导入本地数据库，无需API密钥。
+          </p>
+        </div>
+        
+        <!-- Feature 6 -->
+        <div data-animate class="card rounded-2xl p-6">
+          <div class="feature-icon bg-pink-500/10">
+            <svg class="w-6 h-6 text-pink-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+            </svg>
+          </div>
+          <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-2">精心设计的界面</h3>
+          <p class="text-dial-text/70 dark:text-dial-dark-text text-sm">
+            支持亮色和暗色主题，为长时间研究阅读体验而设计。
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Modules Section -->
+  <section id="modules" class="py-20 px-4 sm:px-6 lg:px-8 bg-dial-bg dark:bg-dial-dark-bg">
+    <div class="container mx-auto max-w-6xl">
+      <div data-animate class="text-center mb-16">
+        <h2 class="text-3xl sm:text-4xl font-bold text-dial-text dark:text-white mb-4">7大分析模块，47个宏观因子</h2>
+        <p class="text-lg text-dial-text/70 dark:text-dial-dark-text max-w-2xl mx-auto">
+          每个模块独立检视宏观环境的一个维度
+        </p>
+      </div>
+      
+      <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <!-- Module cards -->
+        <a href="module-liquidity.html" data-animate class="module-card card rounded-2xl p-6 border-2 border-transparent hover:border-blue-500/30">
+          <div class="flex items-center justify-between mb-4">
+            <div class="w-12 h-12 rounded-xl bg-blue-500/10 flex items-center justify-center">
+              <svg class="w-6 h-6 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>
+              </svg>
+            </div>
+            <span class="text-2xl font-bold score-medium">52.4</span>
+          </div>
+          <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-1">流动性</h3>
+          <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-3">Liquidity</p>
+          <p class="text-sm text-dial-text/70 dark:text-dial-dark-text">8个因子 · 衡量金融系统中资金的可用性和流动</p>
+        </a>
+        
+        <a href="module-funding.html" data-animate class="module-card card rounded-2xl p-6 border-2 border-transparent hover:border-green-500/30">
+          <div class="flex items-center justify-between mb-4">
+            <div class="w-12 h-12 rounded-xl bg-green-500/10 flex items-center justify-center">
+              <svg class="w-6 h-6 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <rect x="2" y="6" width="20" height="12" rx="2"/>
+                <circle cx="12" cy="12" r="2"/>
+                <path d="M6 12h.01M18 12h.01"/>
+              </svg>
+            </div>
+            <span class="text-2xl font-bold score-high">61.2</span>
+          </div>
+          <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-1">融资</h3>
+          <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-3">Funding</p>
+          <p class="text-sm text-dial-text/70 dark:text-dial-dark-text">12个因子 · 追踪银行间融资成本和市场流动性</p>
+        </a>
+        
+        <a href="module-treasury.html" data-animate class="module-card card rounded-2xl p-6 border-2 border-transparent hover:border-yellow-500/30">
+          <div class="flex items-center justify-between mb-4">
+            <div class="w-12 h-12 rounded-xl bg-yellow-500/10 flex items-center justify-center">
+              <svg class="w-6 h-6 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+              </svg>
+            </div>
+            <span class="text-2xl font-bold score-medium">48.7</span>
+          </div>
+          <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-1">国债</h3>
+          <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-3">Treasury</p>
+          <p class="text-sm text-dial-text/70 dark:text-dial-dark-text">8个因子 · 监测国债收益率曲线和市场深度</p>
+        </a>
+        
+        <a href="module-rates.html" data-animate class="module-card card rounded-2xl p-6 border-2 border-transparent hover:border-purple-500/30">
+          <div class="flex items-center justify-between mb-4">
+            <div class="w-12 h-12 rounded-xl bg-purple-500/10 flex items-center justify-center">
+              <svg class="w-6 h-6 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <line x1="19" y1="5" x2="5" y2="19"/>
+                <circle cx="6.5" cy="6.5" r="2.5"/>
+                <circle cx="17.5" cy="17.5" r="2.5"/>
+              </svg>
+            </div>
+            <span class="text-2xl font-bold score-low">42.1</span>
+          </div>
+          <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-1">利率</h3>
+          <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-3">Rates</p>
+          <p class="text-sm text-dial-text/70 dark:text-dial-dark-text">5个因子 · 跟踪关键利率和利差水平</p>
+        </a>
+        
+        <a href="module-credit.html" data-animate class="module-card card rounded-2xl p-6 border-2 border-transparent hover:border-red-500/30">
+          <div class="flex items-center justify-between mb-4">
+            <div class="w-12 h-12 rounded-xl bg-red-500/10 flex items-center justify-center">
+              <svg class="w-6 h-6 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <rect x="1" y="4" width="22" height="16" rx="2"/>
+                <line x1="1" y1="10" x2="23" y2="10"/>
+              </svg>
+            </div>
+            <span class="text-2xl font-bold score-low">38.9</span>
+          </div>
+          <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-1">信用</h3>
+          <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-3">Credit</p>
+          <p class="text-sm text-dial-text/70 dark:text-dial-dark-text">4个因子 · 评估信用利差和违约风险</p>
+        </a>
+        
+        <a href="module-risk.html" data-animate class="module-card card rounded-2xl p-6 border-2 border-transparent hover:border-orange-500/30">
+          <div class="flex items-center justify-between mb-4">
+            <div class="w-12 h-12 rounded-xl bg-orange-500/10 flex items-center justify-center">
+              <svg class="w-6 h-6 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+                <line x1="12" y1="9" x2="12" y2="13"/>
+                <line x1="12" y1="17" x2="12.01" y2="17"/>
+              </svg>
+            </div>
+            <span class="text-2xl font-bold score-medium">45.6</span>
+          </div>
+          <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-1">风险</h3>
+          <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-3">Risk</p>
+          <p class="text-sm text-dial-text/70 dark:text-dial-dark-text">5个因子 · 监测波动率和风险指标</p>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Data Management Section -->
+  <section id="data" class="py-20 px-4 sm:px-6 lg:px-8">
+    <div class="container mx-auto max-w-6xl">
+      <div data-animate class="text-center mb-16">
+        <h2 class="text-3xl sm:text-4xl font-bold text-dial-text dark:text-white mb-4">数据管理</h2>
+        <p class="text-lg text-dial-text/70 dark:text-dial-dark-text max-w-2xl mx-auto">
+          使用CSV数据下载和SQLite本地存储
+        </p>
+      </div>
+      
+      <div class="grid lg:grid-cols-2 gap-8">
+        <!-- Download -->
+        <div data-animate class="card rounded-2xl p-8">
+          <div class="flex items-center mb-6">
+            <div class="w-12 h-12 rounded-xl bg-dial-accent/10 flex items-center justify-center mr-4">
+              <svg class="w-6 h-6 text-dial-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold text-dial-text dark:text-white">从FRED下载数据</h3>
+              <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">无需API密钥</p>
+            </div>
+          </div>
+          
+          <ol class="space-y-3 text-sm text-dial-text dark:text-dial-dark-text mb-6">
+            <li class="flex items-start">
+              <span class="w-6 h-6 rounded-full bg-dial-accent/10 flex items-center justify-center mr-3 flex-shrink-0 text-xs font-medium text-dial-accent">1</span>
+              <span>访问 <a href="https://fred.stlouisfed.org/" target="_blank" rel="noopener noreferrer" class="text-dial-accent hover:underline">FRED官网</a></span>
+            </li>
+            <li class="flex items-start">
+              <span class="w-6 h-6 rounded-full bg-dial-accent/10 flex items-center justify-center mr-3 flex-shrink-0 text-xs font-medium text-dial-accent">2</span>
+              <span>搜索指标代码（如：DGS10, VIXCLS）</span>
+            </li>
+            <li class="flex items-start">
+              <span class="w-6 h-6 rounded-full bg-dial-accent/10 flex items-center justify-center mr-3 flex-shrink-0 text-xs font-medium text-dial-accent">3</span>
+              <span>点击"Download"按钮，选择CSV格式</span>
+            </li>
+            <li class="flex items-start">
+              <span class="w-6 h-6 rounded-full bg-dial-accent/10 flex items-center justify-center mr-3 flex-shrink-0 text-xs font-medium text-dial-accent">4</span>
+              <span>保存到 <code class="bg-dial-border dark:bg-dial-dark-border px-1 rounded">data/</code> 目录</span>
+            </li>
+          </ol>
+          
+          <div class="p-4 bg-dial-bg dark:bg-dial-dark-bg rounded-xl">
+            <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60 mb-2">常用指标代码：</p>
+            <div class="flex flex-wrap gap-2">
+              <code class="px-2 py-1 bg-dial-border dark:bg-dial-dark-border rounded text-xs">DGS10</code>
+              <code class="px-2 py-1 bg-dial-border dark:bg-dial-dark-border rounded text-xs">VIXCLS</code>
+              <code class="px-2 py-1 bg-dial-border dark:bg-dial-dark-border rounded text-xs">UNRATE</code>
+              <code class="px-2 py-1 bg-dial-border dark:bg-dial-dark-border rounded text-xs">FEDFUNDS</code>
+            </div>
+          </div>
+        </div>
+        
+        <!-- SQLite -->
+        <div data-animate class="card rounded-2xl p-8">
+          <div class="flex items-center mb-6">
+            <div class="w-12 h-12 rounded-xl bg-score-green/10 flex items-center justify-center mr-4">
+              <svg class="w-6 h-6 text-score-green" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+              </svg>
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold text-dial-text dark:text-white">本地SQLite存储</h3>
+              <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">轻量级数据库</p>
+            </div>
+          </div>
+          
+          <p class="text-sm text-dial-text dark:text-dial-dark-text mb-4">
+            使用SQLite作为本地数据库，无需服务器，数据完全存储在本地文件中。
+          </p>
+          
+          <div class="p-4 bg-dial-bg dark:bg-dial-dark-bg rounded-xl mb-4">
+            <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60 mb-2">数据库结构：</p>
+            <ul class="text-xs text-dial-text dark:text-dial-dark-text space-y-1">
+              <li>• <strong>indicators</strong> - 存储所有经济指标数据</li>
+              <li>• <strong>module_scores</strong> - 7大模块评分</li>
+              <li>• <strong>overall_scores</strong> - 总体评分记录</li>
+            </ul>
+          </div>
+          
+          <div class="flex items-center p-4 bg-score-yellow/10 rounded-xl">
+            <svg class="w-5 h-5 text-score-yellow mr-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="12" y1="8" x2="12" y2="12"/>
+              <line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+            <p class="text-xs text-dial-text dark:text-dial-dark-text">
+              需要Python支持CSV导入和数据库操作
+            </p>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Python Script -->
+      <div data-animate class="mt-8 card rounded-2xl p-8">
+        <h3 class="text-xl font-semibold text-dial-text dark:text-white mb-4">Python数据导入脚本</h3>
+        <div class="bg-dial-bg dark:bg-dial-dark-bg rounded-xl p-4 overflow-x-auto">
+          <pre class="text-xs text-dial-text dark:text-dial-dark-text"><code># scripts/import_data.py
+import pandas as pd
+import sqlite3
+from pathlib import Path
+
+DB_PATH = 'macro_data.db'
+DATA_DIR = Path('data')
+
+def import_csv(csv_file, series_id, module_name):
+    df = pd.read_csv(csv_file)
+    df['series_id'] = series_id
+    df['module'] = module_name
+    
+    conn = sqlite3.connect(DB_PATH)
+    df.to_sql('indicators', conn, if_exists='append', index=False)
+    conn.close()
+    print(f"导入 {series_id}: {len(df)} 条记录")
+
+# 使用示例
+import_csv('data/DGS10.csv', 'DGS10', 'treasury')</code></pre>
+        </div>
+        <div class="mt-4 flex gap-4">
+          <a href="scripts/import_data.py" download class="inline-flex items-center px-4 py-2 text-sm font-medium text-white bg-dial-accent rounded-lg hover:bg-dial-accent/90 transition-colors">
+            <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            下载脚本
+          </a>
+          <a href="https://fred.stlouisfed.org/docs/api/fred/" target="_blank" rel="noopener noreferrer" class="inline-flex items-center px-4 py-2 text-sm font-medium text-dial-text dark:text-dial-dark-text bg-dial-border dark:bg-dial-dark-border rounded-lg hover:bg-dial-border/80 transition-colors">
+            <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/>
+              <polyline points="15 3 21 3 21 9"/>
+              <line x1="10" y1="14" x2="21" y2="3"/>
+            </svg>
+            FRED文档
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="py-12 px-4 sm:px-6 lg:px-8 border-t border-dial-border dark:border-dial-dark-border">
+    <div class="container mx-auto max-w-6xl">
+      <div class="flex flex-col md:flex-row items-center justify-between gap-4">
+        <div class="flex items-center space-x-2">
+          <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-dial-accent to-score-green flex items-center justify-center">
+            <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="10"/>
+              <path d="M12 6v6l4 2" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <span class="text-lg font-bold text-dial-text dark:text-white">The Dial</span>
+        </div>
+        <div class="flex items-center space-x-4 text-sm text-dial-text/60 dark:text-dial-dark-text/60">
+          <span>个人宏观经济研究工具</span>
+          <span>·</span>
+          <span>基于FRED数据</span>
+          <span>·</span>
+          <span>本地SQLite存储</span>
+        </div>
+      </div>
+      <div class="mt-8 pt-8 border-t border-dial-border dark:border-dial-dark-border text-center text-sm text-dial-text/40 dark:text-dial-dark-text/40">
+        <p>仅用于教育和研究目的，不构成专业建议。</p>
+        <p class="mt-2">数据来源：Federal Reserve Economic Data (FRED)</p>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Scripts -->
+  <script src="js/common.js"></script>
+  <script>
+    // Inline SVG icons initialization (fallback if Lucide fails)
+    document.querySelectorAll('[data-lucide]').forEach(el => {
+      const icon = el.getAttribute('data-lucide');
+      // Icons are already inline in this optimized version
+    });
+  </script>
+</body>
+</html>

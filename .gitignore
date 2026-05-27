@@ -1,0 +1,42 @@
+.DS_Store
+.playwright-cli/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+venv/
+.venv/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Local databases and SQLite sidecars
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+
+# Generated data/cache artifacts
+the-dial-treasury-v1/logs/
+the-dial-treasury-v1/output/
+the-dial-treasury-v1/data/dashboard.failed.json
+the-dial-treasury-v1/content/overrides.json

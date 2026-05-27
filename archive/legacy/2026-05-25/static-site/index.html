@@ -1,0 +1,1178 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Dial - Macroeconomic Dashboard</title>
+    <meta name="description" content="Real-time macroeconomic monitoring dashboard with 7 key modules tracking liquidity, funding, treasury, rates, credit, risk, and external factors.">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        'dial-bg': '#fafafc',
+                        'dial-dark-bg': '#1c1c1e',
+                        'dial-card': '#ffffff',
+                        'dial-dark-card': '#2c2c2e',
+                        'dial-border': '#e5e5e7',
+                        'dial-dark-border': '#3a3a3c',
+                        'dial-text': '#3c3c43',
+                        'dial-dark-text': '#aeaeb2',
+                        'score-green': '#34c759',
+                        'score-yellow': '#ff9500',
+                        'score-red': '#ff3b30',
+                        'dial-accent': '#007aff',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', 'sans-serif'],
+                    },
+                }
+            }
+        }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --background: #fafafc;
+            --foreground: #3c3c43;
+            --card: #ffffff;
+            --border: #e5e5e7;
+            --score-green: #34c759;
+            --score-yellow: #ff9500;
+            --score-red: #ff3b30;
+            --accent: #007aff;
+        }
+        .dark {
+            --background: #1c1c1e;
+            --foreground: #aeaeb2;
+            --card: #2c2c2e;
+            --border: #3a3a3c;
+        }
+        body {
+            font-family: 'Inter', system-ui, sans-serif;
+            background-color: var(--background);
+            color: var(--foreground);
+            transition: background-color 0.3s ease, color 0.3s ease;
+        }
+        .card {
+            background-color: var(--card);
+            border: 1px solid var(--border);
+            transition: background-color 0.3s ease, border-color 0.3s ease, transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        .card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+        }
+        .dark .card:hover {
+            box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+        }
+        /* Gauge Animation */
+        .gauge-needle {
+            transform-origin: center;
+            transition: transform 1.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+        .gauge-bg {
+            stroke-dasharray: 283;
+            stroke-dashoffset: 283;
+            animation: gaugeFill 1.5s ease-out forwards;
+        }
+        @keyframes gaugeFill {
+            to { stroke-dashoffset: 146; }
+        }
+        @keyframes pulse-glow {
+            0%, 100% { filter: drop-shadow(0 0 8px rgba(52, 199, 89, 0.4)); }
+            50% { filter: drop-shadow(0 0 20px rgba(52, 199, 89, 0.7)); }
+        }
+        .gauge-pulse {
+            animation: pulse-glow 2s ease-in-out infinite;
+        }
+        /* Scroll Animations */
+        .fade-in {
+            opacity: 0;
+            transform: translateY(30px);
+            transition: opacity 0.6s ease, transform 0.6s ease;
+        }
+        .fade-in.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+        /* Counter Animation */
+        .counter {
+            font-variant-numeric: tabular-nums;
+        }
+        /* Accordion */
+        .accordion-content {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease;
+        }
+        .accordion-content.open {
+            max-height: 500px;
+        }
+        .accordion-icon {
+            transition: transform 0.3s ease;
+        }
+        .accordion-icon.open {
+            transform: rotate(180deg);
+        }
+        /* Mobile Menu */
+        .mobile-menu {
+            transform: translateX(100%);
+            transition: transform 0.3s ease;
+        }
+        .mobile-menu.open {
+            transform: translateX(0);
+        }
+        /* Gradient Text */
+        .gradient-text {
+            background: linear-gradient(135deg, #007aff 0%, #34c759 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        /* Module Card Scores */
+        .score-high { color: var(--score-green); }
+        .score-medium { color: var(--score-yellow); }
+        .score-low { color: var(--score-red); }
+        /* Navigation */
+        .nav-blur {
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+        }
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: var(--background);
+        }
+        ::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--foreground);
+        }
+        /* Live Indicator */
+        @keyframes live-pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .live-dot {
+            animation: live-pulse 1.5s ease-in-out infinite;
+        }
+        /* Feature Card Hover */
+        .feature-card {
+            position: relative;
+            overflow: hidden;
+        }
+        .feature-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(0,122,255,0.1), transparent);
+            transition: left 0.5s ease;
+        }
+        .feature-card:hover::before {
+            left: 100%;
+        }
+        /* Pricing Card Popular */
+        .pricing-popular {
+            position: relative;
+        }
+        .pricing-popular::before {
+            content: 'Most Popular';
+            position: absolute;
+            top: -12px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: linear-gradient(135deg, #007aff, #34c759);
+            color: white;
+            padding: 4px 16px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body class="antialiased">
+    <!-- Navigation -->
+    <nav class="fixed top-0 left-0 right-0 z-50 nav-blur bg-white/80 dark:bg-dial-dark-bg/80 border-b border-dial-border dark:border-dial-dark-border">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <!-- Logo -->
+                <a href="index.html" class="flex items-center space-x-2">
+                    <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-dial-accent to-score-green flex items-center justify-center">
+                        <i data-lucide="gauge" class="w-5 h-5 text-white"></i>
+                    </div>
+                    <span class="text-xl font-bold text-dial-text dark:text-white">The Dial</span>
+                </a>
+                
+                <!-- Desktop Navigation -->
+                <div class="hidden md:flex items-center space-x-8">
+                    <a href="#features" class="text-sm font-medium text-dial-text/70 dark:text-dial-dark-text hover:text-dial-accent dark:hover:text-dial-accent transition-colors">Features</a>
+                    <a href="#modules" class="text-sm font-medium text-dial-text/70 dark:text-dial-dark-text hover:text-dial-accent dark:hover:text-dial-accent transition-colors">Modules</a>
+                    <a href="#pricing" class="text-sm font-medium text-dial-text/70 dark:text-dial-dark-text hover:text-dial-accent dark:hover:text-dial-accent transition-colors">Pricing</a>
+                    <a href="dashboard.html" class="text-sm font-medium text-dial-text/70 dark:text-dial-dark-text hover:text-dial-accent dark:hover:text-dial-accent transition-colors">Dashboard</a>
+                </div>
+                
+                <!-- Right Side -->
+                <div class="flex items-center space-x-4">
+                    <!-- Theme Toggle -->
+                    <button id="themeToggle" class="p-2 rounded-lg hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors" aria-label="Toggle theme">
+                        <i data-lucide="sun" class="w-5 h-5 hidden dark:block text-dial-dark-text"></i>
+                        <i data-lucide="moon" class="w-5 h-5 block dark:hidden text-dial-text"></i>
+                    </button>
+                    
+                    <!-- Login Button -->
+                    <a href="login.html" class="hidden sm:inline-flex items-center px-4 py-2 text-sm font-medium text-white bg-dial-accent rounded-lg hover:bg-dial-accent/90 transition-colors">
+                        Sign In
+                    </a>
+                    
+                    <!-- Mobile Menu Button -->
+                    <button id="mobileMenuBtn" class="md:hidden p-2 rounded-lg hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors" aria-label="Open menu">
+                        <i data-lucide="menu" class="w-6 h-6 text-dial-text dark:text-dial-dark-text"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </nav>
+    
+    <!-- Mobile Menu -->
+    <div id="mobileMenu" class="mobile-menu fixed inset-y-0 right-0 w-64 bg-white dark:bg-dial-dark-bg border-l border-dial-border dark:border-dial-dark-border z-50 md:hidden">
+        <div class="p-4">
+            <button id="closeMobileMenu" class="absolute top-4 right-4 p-2 rounded-lg hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors">
+                <i data-lucide="x" class="w-6 h-6 text-dial-text dark:text-dial-dark-text"></i>
+            </button>
+            <div class="mt-12 space-y-4">
+                <a href="#features" class="block py-2 text-dial-text dark:text-dial-dark-text hover:text-dial-accent dark:hover:text-dial-accent transition-colors">Features</a>
+                <a href="#modules" class="block py-2 text-dial-text dark:text-dial-dark-text hover:text-dial-accent dark:hover:text-dial-accent transition-colors">Modules</a>
+                <a href="#pricing" class="block py-2 text-dial-text dark:text-dial-dark-text hover:text-dial-accent dark:hover:text-dial-accent transition-colors">Pricing</a>
+                <a href="dashboard.html" class="block py-2 text-dial-text dark:text-dial-dark-text hover:text-dial-accent dark:hover:text-dial-accent transition-colors">Dashboard</a>
+                <hr class="border-dial-border dark:border-dial-dark-border">
+                <a href="login.html" class="block py-2 text-dial-accent font-medium">Sign In</a>
+                <a href="signup.html" class="block py-2 text-dial-accent font-medium">Sign Up</a>
+            </div>
+        </div>
+    </div>
+    <div id="mobileOverlay" class="fixed inset-0 bg-black/50 z-40 hidden md:hidden"></div>
+
+    <!-- Hero Section -->
+    <section class="pt-32 pb-20 px-4 sm:px-6 lg:px-8">
+        <div class="max-w-7xl mx-auto">
+            <div class="grid lg:grid-cols-2 gap-12 items-center">
+                <!-- Left Content -->
+                <div class="fade-in">
+                    <div class="inline-flex items-center px-3 py-1 rounded-full bg-dial-accent/10 text-dial-accent text-sm font-medium mb-6">
+                        <span class="w-2 h-2 rounded-full bg-dial-accent mr-2 live-dot"></span>
+                        Live Market Data
+                    </div>
+                    <h1 class="text-4xl sm:text-5xl lg:text-6xl font-bold text-dial-text dark:text-white leading-tight mb-6">
+                        Master the Markets with <span class="gradient-text">The Dial</span>
+                    </h1>
+                    <p class="text-lg text-dial-text/70 dark:text-dial-dark-text mb-8 max-w-xl">
+                        Real-time macroeconomic monitoring dashboard. Track 47 factors across 7 key modules to make informed investment decisions.
+                    </p>
+                    <div class="flex flex-wrap gap-4">
+                        <a href="dashboard.html" class="inline-flex items-center px-6 py-3 text-base font-medium text-white bg-dial-accent rounded-xl hover:bg-dial-accent/90 transition-all hover:shadow-lg hover:shadow-dial-accent/25">
+                            <i data-lucide="layout-dashboard" class="w-5 h-5 mr-2"></i>
+                            View Dashboard
+                        </a>
+                        <a href="#features" class="inline-flex items-center px-6 py-3 text-base font-medium text-dial-text dark:text-white bg-dial-border/50 dark:bg-dial-dark-border/50 rounded-xl hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors">
+                            <i data-lucide="play-circle" class="w-5 h-5 mr-2"></i>
+                            Learn More
+                        </a>
+                    </div>
+                    <div class="mt-8 flex items-center space-x-6 text-sm text-dial-text/60 dark:text-dial-dark-text/60">
+                        <div class="flex items-center">
+                            <i data-lucide="check-circle" class="w-4 h-4 mr-1 text-score-green"></i>
+                            Real-time Data
+                        </div>
+                        <div class="flex items-center">
+                            <i data-lucide="check-circle" class="w-4 h-4 mr-1 text-score-green"></i>
+                            7 Modules
+                        </div>
+                        <div class="flex items-center">
+                            <i data-lucide="check-circle" class="w-4 h-4 mr-1 text-score-green"></i>
+                            47 Factors
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Right Content - Animated Gauge -->
+                <div class="fade-in flex justify-center lg:justify-end">
+                    <div class="relative">
+                        <div class="card rounded-3xl p-8 w-full max-w-md">
+                            <div class="flex items-center justify-between mb-6">
+                                <span class="text-sm font-medium text-dial-text/60 dark:text-dial-dark-text/60">Overall Score</span>
+                                <span class="inline-flex items-center px-2 py-1 rounded-full bg-score-green/10 text-score-green text-xs font-medium">
+                                    <span class="w-1.5 h-1.5 rounded-full bg-score-green mr-1.5 live-dot"></span>
+                                    Live
+                                </span>
+                            </div>
+                            <!-- SVG Gauge -->
+                            <div class="relative w-64 h-40 mx-auto gauge-pulse">
+                                <svg viewBox="0 0 200 120" class="w-full h-full">
+                                    <!-- Background Arc -->
+                                    <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="var(--border)" stroke-width="12" stroke-linecap="round"/>
+                                    <!-- Green Zone -->
+                                    <path d="M 20 100 A 80 80 0 0 1 70 30.7" fill="none" stroke="var(--score-green)" stroke-width="12" stroke-linecap="round" opacity="0.3"/>
+                                    <!-- Yellow Zone -->
+                                    <path d="M 70 30.7 A 80 80 0 0 1 130 30.7" fill="none" stroke="var(--score-yellow)" stroke-width="12" stroke-linecap="round" opacity="0.3"/>
+                                    <!-- Red Zone -->
+                                    <path d="M 130 30.7 A 80 80 0 0 1 180 100" fill="none" stroke="var(--score-red)" stroke-width="12" stroke-linecap="round" opacity="0.3"/>
+                                    <!-- Active Arc -->
+                                    <path class="gauge-bg" d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="url(#gaugeGradient)" stroke-width="12" stroke-linecap="round"/>
+                                    <!-- Gradient Definition -->
+                                    <defs>
+                                        <linearGradient id="gaugeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                                            <stop offset="0%" stop-color="var(--score-green)"/>
+                                            <stop offset="50%" stop-color="var(--score-yellow)"/>
+                                            <stop offset="100%" stop-color="var(--score-red)"/>
+                                        </linearGradient>
+                                    </defs>
+                                    <!-- Needle -->
+                                    <g class="gauge-needle" style="transform: rotate(-90deg);" id="gaugeNeedle">
+                                        <line x1="100" y1="100" x2="100" y2="35" stroke="var(--foreground)" stroke-width="3" stroke-linecap="round"/>
+                                        <circle cx="100" cy="100" r="8" fill="var(--foreground)"/>
+                                    </g>
+                                </svg>
+                                <!-- Score Display -->
+                                <div class="absolute bottom-0 left-1/2 transform -translate-x-1/2 text-center">
+                                    <span class="text-5xl font-bold text-dial-text dark:text-white counter" data-target="48.3">0</span>
+                                    <span class="text-lg text-dial-text/60 dark:text-dial-dark-text/60">/100</span>
+                                </div>
+                            </div>
+                            <div class="mt-6 text-center">
+                                <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">Market sentiment is currently</p>
+                                <p class="text-lg font-semibold text-score-yellow">Neutral - Cautious</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Stats Section -->
+    <section class="py-16 px-4 sm:px-6 lg:px-8 border-y border-dial-border dark:border-dial-dark-border">
+        <div class="max-w-7xl mx-auto">
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-8">
+                <div class="fade-in text-center">
+                    <div class="text-3xl sm:text-4xl font-bold text-dial-text dark:text-white mb-2">
+                        <span class="counter" data-target="47">0</span>
+                    </div>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">Economic Factors</p>
+                </div>
+                <div class="fade-in text-center" style="animation-delay: 0.1s;">
+                    <div class="text-3xl sm:text-4xl font-bold text-dial-text dark:text-white mb-2">
+                        <span class="counter" data-target="7">0</span>
+                    </div>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">Core Modules</p>
+                </div>
+                <div class="fade-in text-center" style="animation-delay: 0.2s;">
+                    <div class="text-3xl sm:text-4xl font-bold text-dial-text dark:text-white mb-2">
+                        <span class="counter" data-target="24">0</span>/7
+                    </div>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">Data Updates</p>
+                </div>
+                <div class="fade-in text-center" style="animation-delay: 0.3s;">
+                    <div class="text-3xl sm:text-4xl font-bold text-dial-text dark:text-white mb-2">
+                        <span class="counter" data-target="99.9">0</span>%
+                    </div>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">Uptime</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Features Section -->
+    <section id="features" class="py-20 px-4 sm:px-6 lg:px-8">
+        <div class="max-w-7xl mx-auto">
+            <div class="text-center mb-16 fade-in">
+                <h2 class="text-3xl sm:text-4xl font-bold text-dial-text dark:text-white mb-4">Powerful Features</h2>
+                <p class="text-lg text-dial-text/70 dark:text-dial-dark-text max-w-2xl mx-auto">
+                    Everything you need to stay ahead of market movements and make data-driven decisions.
+                </p>
+            </div>
+            
+            <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <!-- Feature 1 -->
+                <div class="feature-card card rounded-2xl p-6 fade-in">
+                    <div class="w-12 h-12 rounded-xl bg-dial-accent/10 flex items-center justify-center mb-4">
+                        <i data-lucide="activity" class="w-6 h-6 text-dial-accent"></i>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-2">Real-Time Monitoring</h3>
+                    <p class="text-sm text-dial-text/70 dark:text-dial-dark-text/70">
+                        Live data feeds from global markets with sub-second updates on all key indicators.
+                    </p>
+                </div>
+                
+                <!-- Feature 2 -->
+                <div class="feature-card card rounded-2xl p-6 fade-in" style="animation-delay: 0.1s;">
+                    <div class="w-12 h-12 rounded-xl bg-score-green/10 flex items-center justify-center mb-4">
+                        <i data-lucide="bar-chart-3" class="w-6 h-6 text-score-green"></i>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-2">Advanced Analytics</h3>
+                    <p class="text-sm text-dial-text/70 dark:text-dial-dark-text/70">
+                        Historical trend analysis with predictive modeling and correlation detection.
+                    </p>
+                </div>
+                
+                <!-- Feature 3 -->
+                <div class="feature-card card rounded-2xl p-6 fade-in" style="animation-delay: 0.2s;">
+                    <div class="w-12 h-12 rounded-xl bg-score-yellow/10 flex items-center justify-center mb-4">
+                        <i data-lucide="bell" class="w-6 h-6 text-score-yellow"></i>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-2">Smart Alerts</h3>
+                    <p class="text-sm text-dial-text/70 dark:text-dial-dark-text/70">
+                        Customizable notifications for threshold breaches and significant market events.
+                    </p>
+                </div>
+                
+                <!-- Feature 4 -->
+                <div class="feature-card card rounded-2xl p-6 fade-in" style="animation-delay: 0.3s;">
+                    <div class="w-12 h-12 rounded-xl bg-score-red/10 flex items-center justify-center mb-4">
+                        <i data-lucide="shield" class="w-6 h-6 text-score-red"></i>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-2">Risk Assessment</h3>
+                    <p class="text-sm text-dial-text/70 dark:text-dial-dark-text/70">
+                        Comprehensive risk scoring across multiple dimensions with stress testing.
+                    </p>
+                </div>
+                
+                <!-- Feature 5 -->
+                <div class="feature-card card rounded-2xl p-6 fade-in" style="animation-delay: 0.4s;">
+                    <div class="w-12 h-12 rounded-xl bg-purple-500/10 flex items-center justify-center mb-4">
+                        <i data-lucide="download" class="w-6 h-6 text-purple-500"></i>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-2">Data Export</h3>
+                    <p class="text-sm text-dial-text/70 dark:text-dial-dark-text/70">
+                        Export data in multiple formats including CSV, Excel, and JSON for further analysis.
+                    </p>
+                </div>
+                
+                <!-- Feature 6 -->
+                <div class="feature-card card rounded-2xl p-6 fade-in" style="animation-delay: 0.5s;">
+                    <div class="w-12 h-12 rounded-xl bg-pink-500/10 flex items-center justify-center mb-4">
+                        <i data-lucide="smartphone" class="w-6 h-6 text-pink-500"></i>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-2">Mobile Ready</h3>
+                    <p class="text-sm text-dial-text/70 dark:text-dial-dark-text/70">
+                        Access your dashboard anywhere with our responsive mobile-first design.
+                    </p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Live Preview Section -->
+    <section class="py-20 px-4 sm:px-6 lg:px-8 bg-gradient-to-b from-transparent to-dial-border/20 dark:to-dial-dark-border/20">
+        <div class="max-w-7xl mx-auto">
+            <div class="text-center mb-12 fade-in">
+                <h2 class="text-3xl sm:text-4xl font-bold text-dial-text dark:text-white mb-4">Live Dashboard Preview</h2>
+                <p class="text-lg text-dial-text/70 dark:text-dial-dark-text">
+                    See what you'll get with The Dial
+                </p>
+            </div>
+            
+            <div class="fade-in card rounded-2xl overflow-hidden shadow-2xl">
+                <div class="bg-dial-border/50 dark:bg-dial-dark-border/50 px-4 py-3 flex items-center space-x-2">
+                    <div class="w-3 h-3 rounded-full bg-score-red"></div>
+                    <div class="w-3 h-3 rounded-full bg-score-yellow"></div>
+                    <div class="w-3 h-3 rounded-full bg-score-green"></div>
+                    <span class="ml-4 text-sm text-dial-text/60 dark:text-dial-dark-text/60">thedial.com/dashboard</span>
+                </div>
+                <div class="p-6 grid md:grid-cols-3 gap-4">
+                    <!-- Mini Cards -->
+                    <div class="card rounded-xl p-4">
+                        <div class="flex items-center justify-between mb-2">
+                            <span class="text-xs text-dial-text/60 dark:text-dial-dark-text/60">Liquidity Score</span>
+                            <i data-lucide="droplets" class="w-4 h-4 text-dial-accent"></i>
+                        </div>
+                        <div class="text-2xl font-bold text-score-green">72.4</div>
+                        <div class="text-xs text-score-green flex items-center mt-1">
+                            <i data-lucide="trending-up" class="w-3 h-3 mr-1"></i>
+                            +2.1%
+                        </div>
+                    </div>
+                    <div class="card rounded-xl p-4">
+                        <div class="flex items-center justify-between mb-2">
+                            <span class="text-xs text-dial-text/60 dark:text-dial-dark-text/60">Funding Stress</span>
+                            <i data-lucide="banknote" class="w-4 h-4 text-score-yellow"></i>
+                        </div>
+                        <div class="text-2xl font-bold text-score-yellow">45.2</div>
+                        <div class="text-xs text-score-red flex items-center mt-1">
+                            <i data-lucide="trending-down" class="w-3 h-3 mr-1"></i>
+                            -1.3%
+                        </div>
+                    </div>
+                    <div class="card rounded-xl p-4">
+                        <div class="flex items-center justify-between mb-2">
+                            <span class="text-xs text-dial-text/60 dark:text-dial-dark-text/60">Risk Index</span>
+                            <i data-lucide="alert-triangle" class="w-4 h-4 text-score-red"></i>
+                        </div>
+                        <div class="text-2xl font-bold text-score-red">38.7</div>
+                        <div class="text-xs text-score-red flex items-center mt-1">
+                            <i data-lucide="trending-down" class="w-3 h-3 mr-1"></i>
+                            -3.2%
+                        </div>
+                    </div>
+                </div>
+                <!-- Mini Chart -->
+                <div class="px-6 pb-6">
+                    <div class="card rounded-xl p-4">
+                        <canvas id="previewChart" height="100"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Modules Section -->
+    <section id="modules" class="py-20 px-4 sm:px-6 lg:px-8">
+        <div class="max-w-7xl mx-auto">
+            <div class="text-center mb-16 fade-in">
+                <h2 class="text-3xl sm:text-4xl font-bold text-dial-text dark:text-white mb-4">7 Core Modules</h2>
+                <p class="text-lg text-dial-text/70 dark:text-dial-dark-text max-w-2xl mx-auto">
+                    Comprehensive coverage of all major macroeconomic indicators that drive market movements.
+                </p>
+            </div>
+            
+            <div class="grid md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                <!-- Module 1: Liquidity -->
+                <a href="module-liquidity.html" class="card rounded-2xl p-6 fade-in group hover:no-underline">
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="w-12 h-12 rounded-xl bg-blue-500/10 flex items-center justify-center group-hover:bg-blue-500/20 transition-colors">
+                            <i data-lucide="droplets" class="w-6 h-6 text-blue-500"></i>
+                        </div>
+                        <span class="text-2xl font-bold score-high">72.4</span>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-1">Liquidity</h3>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-3">Money supply, Fed balance sheet, reverse repos</p>
+                    <div class="flex items-center text-sm text-dial-accent">
+                        <span>View Details</span>
+                        <i data-lucide="arrow-right" class="w-4 h-4 ml-1 group-hover:translate-x-1 transition-transform"></i>
+                    </div>
+                </a>
+                
+                <!-- Module 2: Funding -->
+                <a href="module-funding.html" class="card rounded-2xl p-6 fade-in group hover:no-underline" style="animation-delay: 0.1s;">
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="w-12 h-12 rounded-xl bg-green-500/10 flex items-center justify-center group-hover:bg-green-500/20 transition-colors">
+                            <i data-lucide="banknote" class="w-6 h-6 text-green-500"></i>
+                        </div>
+                        <span class="text-2xl font-bold score-medium">45.2</span>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-1">Funding</h3>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-3">SOFR, OBFR, FRA-OIS spread, TED spread</p>
+                    <div class="flex items-center text-sm text-dial-accent">
+                        <span>View Details</span>
+                        <i data-lucide="arrow-right" class="w-4 h-4 ml-1 group-hover:translate-x-1 transition-transform"></i>
+                    </div>
+                </a>
+                
+                <!-- Module 3: Treasury -->
+                <a href="module-treasury.html" class="card rounded-2xl p-6 fade-in group hover:no-underline" style="animation-delay: 0.2s;">
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="w-12 h-12 rounded-xl bg-purple-500/10 flex items-center justify-center group-hover:bg-purple-500/20 transition-colors">
+                            <i data-lucide="landmark" class="w-6 h-6 text-purple-500"></i>
+                        </div>
+                        <span class="text-2xl font-bold score-medium">58.6</span>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-1">Treasury</h3>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-3">Yield curve, TIPS spreads, term premium</p>
+                    <div class="flex items-center text-sm text-dial-accent">
+                        <span>View Details</span>
+                        <i data-lucide="arrow-right" class="w-4 h-4 ml-1 group-hover:translate-x-1 transition-transform"></i>
+                    </div>
+                </a>
+                
+                <!-- Module 4: Rates -->
+                <a href="module-rates.html" class="card rounded-2xl p-6 fade-in group hover:no-underline" style="animation-delay: 0.3s;">
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="w-12 h-12 rounded-xl bg-orange-500/10 flex items-center justify-center group-hover:bg-orange-500/20 transition-colors">
+                            <i data-lucide="percent" class="w-6 h-6 text-orange-500"></i>
+                        </div>
+                        <span class="text-2xl font-bold score-medium">52.1</span>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-1">Rates</h3>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-3">Fed policy, forward rates, real yields</p>
+                    <div class="flex items-center text-sm text-dial-accent">
+                        <span>View Details</span>
+                        <i data-lucide="arrow-right" class="w-4 h-4 ml-1 group-hover:translate-x-1 transition-transform"></i>
+                    </div>
+                </a>
+                
+                <!-- Module 5: Credit -->
+                <a href="module-credit.html" class="card rounded-2xl p-6 fade-in group hover:no-underline" style="animation-delay: 0.4s;">
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="w-12 h-12 rounded-xl bg-cyan-500/10 flex items-center justify-center group-hover:bg-cyan-500/20 transition-colors">
+                            <i data-lucide="credit-card" class="w-6 h-6 text-cyan-500"></i>
+                        </div>
+                        <span class="text-2xl font-bold score-low">41.3</span>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-1">Credit</h3>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-3">CDS spreads, high yield, investment grade</p>
+                    <div class="flex items-center text-sm text-dial-accent">
+                        <span>View Details</span>
+                        <i data-lucide="arrow-right" class="w-4 h-4 ml-1 group-hover:translate-x-1 transition-transform"></i>
+                    </div>
+                </a>
+                
+                <!-- Module 6: Risk -->
+                <a href="module-risk.html" class="card rounded-2xl p-6 fade-in group hover:no-underline" style="animation-delay: 0.5s;">
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="w-12 h-12 rounded-xl bg-red-500/10 flex items-center justify-center group-hover:bg-red-500/20 transition-colors">
+                            <i data-lucide="alert-triangle" class="w-6 h-6 text-red-500"></i>
+                        </div>
+                        <span class="text-2xl font-bold score-low">38.7</span>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-1">Risk</h3>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-3">VIX, volatility surfaces, skew metrics</p>
+                    <div class="flex items-center text-sm text-dial-accent">
+                        <span>View Details</span>
+                        <i data-lucide="arrow-right" class="w-4 h-4 ml-1 group-hover:translate-x-1 transition-transform"></i>
+                    </div>
+                </a>
+                
+                <!-- Module 7: External -->
+                <a href="module-external.html" class="card rounded-2xl p-6 fade-in group hover:no-underline" style="animation-delay: 0.6s;">
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="w-12 h-12 rounded-xl bg-indigo-500/10 flex items-center justify-center group-hover:bg-indigo-500/20 transition-colors">
+                            <i data-lucide="globe" class="w-6 h-6 text-indigo-500"></i>
+                        </div>
+                        <span class="text-2xl font-bold score-medium">55.9</span>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-1">External</h3>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-3">DXY, EM currencies, cross-border flows</p>
+                    <div class="flex items-center text-sm text-dial-accent">
+                        <span>View Details</span>
+                        <i data-lucide="arrow-right" class="w-4 h-4 ml-1 group-hover:translate-x-1 transition-transform"></i>
+                    </div>
+                </a>
+                
+                <!-- Overall Score Card -->
+                <a href="dashboard.html" class="card rounded-2xl p-6 fade-in bg-gradient-to-br from-dial-accent/10 to-score-green/10 dark:from-dial-accent/20 dark:to-score-green/20 group hover:no-underline" style="animation-delay: 0.7s;">
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="w-12 h-12 rounded-xl bg-dial-accent/20 flex items-center justify-center">
+                            <i data-lucide="gauge" class="w-6 h-6 text-dial-accent"></i>
+                        </div>
+                        <span class="text-2xl font-bold text-score-yellow">48.3</span>
+                    </div>
+                    <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-1">Overall Score</h3>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-3">Composite view of all 7 modules</p>
+                    <div class="flex items-center text-sm text-dial-accent">
+                        <span>View Dashboard</span>
+                        <i data-lucide="arrow-right" class="w-4 h-4 ml-1 group-hover:translate-x-1 transition-transform"></i>
+                    </div>
+                </a>
+            </div>
+        </div>
+    </section>
+
+    <!-- How It Works Section -->
+    <section class="py-20 px-4 sm:px-6 lg:px-8 bg-dial-border/20 dark:bg-dial-dark-border/20">
+        <div class="max-w-7xl mx-auto">
+            <div class="text-center mb-16 fade-in">
+                <h2 class="text-3xl sm:text-4xl font-bold text-dial-text dark:text-white mb-4">How It Works</h2>
+                <p class="text-lg text-dial-text/70 dark:text-dial-dark-text max-w-2xl mx-auto">
+                    Get started with The Dial in three simple steps
+                </p>
+            </div>
+            
+            <div class="grid md:grid-cols-3 gap-8">
+                <!-- Step 1 -->
+                <div class="fade-in text-center">
+                    <div class="w-16 h-16 rounded-2xl bg-dial-accent flex items-center justify-center mx-auto mb-6 text-white text-2xl font-bold">
+                        1
+                    </div>
+                    <h3 class="text-xl font-semibold text-dial-text dark:text-white mb-3">Create Account</h3>
+                    <p class="text-dial-text/70 dark:text-dial-dark-text/70">
+                        Sign up in seconds. No credit card required for the free tier.
+                    </p>
+                </div>
+                
+                <!-- Step 2 -->
+                <div class="fade-in text-center" style="animation-delay: 0.2s;">
+                    <div class="w-16 h-16 rounded-2xl bg-dial-accent flex items-center justify-center mx-auto mb-6 text-white text-2xl font-bold">
+                        2
+                    </div>
+                    <h3 class="text-xl font-semibold text-dial-text dark:text-white mb-3">Explore Dashboard</h3>
+                    <p class="text-dial-text/70 dark:text-dial-dark-text/70">
+                        Dive into real-time data across all 7 macroeconomic modules.
+                    </p>
+                </div>
+                
+                <!-- Step 3 -->
+                <div class="fade-in text-center" style="animation-delay: 0.4s;">
+                    <div class="w-16 h-16 rounded-2xl bg-dial-accent flex items-center justify-center mx-auto mb-6 text-white text-2xl font-bold">
+                        3
+                    </div>
+                    <h3 class="text-xl font-semibold text-dial-text dark:text-white mb-3">Make Decisions</h3>
+                    <p class="text-dial-text/70 dark:text-dial-dark-text/70">
+                        Use data-driven insights to inform your investment strategy.
+                    </p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Pricing Section -->
+    <section id="pricing" class="py-20 px-4 sm:px-6 lg:px-8">
+        <div class="max-w-7xl mx-auto">
+            <div class="text-center mb-16 fade-in">
+                <h2 class="text-3xl sm:text-4xl font-bold text-dial-text dark:text-white mb-4">Simple Pricing</h2>
+                <p class="text-lg text-dial-text/70 dark:text-dial-dark-text max-w-2xl mx-auto">
+                    Choose the plan that fits your needs. Upgrade or downgrade anytime.
+                </p>
+            </div>
+            
+            <div class="grid md:grid-cols-3 gap-8 max-w-5xl mx-auto">
+                <!-- Free Plan -->
+                <div class="card rounded-2xl p-8 fade-in">
+                    <h3 class="text-xl font-semibold text-dial-text dark:text-white mb-2">Free</h3>
+                    <p class="text-dial-text/60 dark:text-dial-dark-text/60 mb-6">For individual investors</p>
+                    <div class="mb-6">
+                        <span class="text-4xl font-bold text-dial-text dark:text-white">$0</span>
+                        <span class="text-dial-text/60 dark:text-dial-dark-text/60">/month</span>
+                    </div>
+                    <ul class="space-y-3 mb-8">
+                        <li class="flex items-center text-sm text-dial-text/70 dark:text-dial-dark-text/70">
+                            <i data-lucide="check" class="w-4 h-4 mr-2 text-score-green"></i>
+                            Basic dashboard access
+                        </li>
+                        <li class="flex items-center text-sm text-dial-text/70 dark:text-dial-dark-text/70">
+                            <i data-lucide="check" class="w-4 h-4 mr-2 text-score-green"></i>
+                            7 core modules
+                        </li>
+                        <li class="flex items-center text-sm text-dial-text/70 dark:text-dial-dark-text/70">
+                            <i data-lucide="check" class="w-4 h-4 mr-2 text-score-green"></i>
+                            Daily data updates
+                        </li>
+                        <li class="flex items-center text-sm text-dial-text/70 dark:text-dial-dark-text/70">
+                            <i data-lucide="check" class="w-4 h-4 mr-2 text-score-green"></i>
+                            Email support
+                        </li>
+                    </ul>
+                    <a href="signup.html" class="block w-full py-3 text-center text-dial-accent font-medium border border-dial-accent rounded-xl hover:bg-dial-accent hover:text-white transition-colors">
+                        Get Started
+                    </a>
+                </div>
+                
+                <!-- Pro Plan -->
+                <div class="pricing-popular card rounded-2xl p-8 fade-in border-2 border-dial-accent" style="animation-delay: 0.1s;">
+                    <h3 class="text-xl font-semibold text-dial-text dark:text-white mb-2">Pro</h3>
+                    <p class="text-dial-text/60 dark:text-dial-dark-text/60 mb-6">For serious traders</p>
+                    <div class="mb-6">
+                        <span class="text-4xl font-bold text-dial-text dark:text-white">$49</span>
+                        <span class="text-dial-text/60 dark:text-dial-dark-text/60">/month</span>
+                    </div>
+                    <ul class="space-y-3 mb-8">
+                        <li class="flex items-center text-sm text-dial-text/70 dark:text-dial-dark-text/70">
+                            <i data-lucide="check" class="w-4 h-4 mr-2 text-score-green"></i>
+                            Everything in Free
+                        </li>
+                        <li class="flex items-center text-sm text-dial-text/70 dark:text-dial-dark-text/70">
+                            <i data-lucide="check" class="w-4 h-4 mr-2 text-score-green"></i>
+                            Real-time data
+                        </li>
+                        <li class="flex items-center text-sm text-dial-text/70 dark:text-dial-dark-text/70">
+                            <i data-lucide="check" class="w-4 h-4 mr-2 text-score-green"></i>
+                            Advanced analytics
+                        </li>
+                        <li class="flex items-center text-sm text-dial-text/70 dark:text-dial-dark-text/70">
+                            <i data-lucide="check" class="w-4 h-4 mr-2 text-score-green"></i>
+                            Custom alerts
+                        </li>
+                        <li class="flex items-center text-sm text-dial-text/70 dark:text-dial-dark-text/70">
+                            <i data-lucide="check" class="w-4 h-4 mr-2 text-score-green"></i>
+                            Data export
+                        </li>
+                    </ul>
+                    <a href="signup.html" class="block w-full py-3 text-center text-white font-medium bg-dial-accent rounded-xl hover:bg-dial-accent/90 transition-colors">
+                        Start Free Trial
+                    </a>
+                </div>
+                
+                <!-- Enterprise Plan -->
+                <div class="card rounded-2xl p-8 fade-in" style="animation-delay: 0.2s;">
+                    <h3 class="text-xl font-semibold text-dial-text dark:text-white mb-2">Enterprise</h3>
+                    <p class="text-dial-text/60 dark:text-dial-dark-text/60 mb-6">For institutions</p>
+                    <div class="mb-6">
+                        <span class="text-4xl font-bold text-dial-text dark:text-white">Custom</span>
+                    </div>
+                    <ul class="space-y-3 mb-8">
+                        <li class="flex items-center text-sm text-dial-text/70 dark:text-dial-dark-text/70">
+                            <i data-lucide="check" class="w-4 h-4 mr-2 text-score-green"></i>
+                            Everything in Pro
+                        </li>
+                        <li class="flex items-center text-sm text-dial-text/70 dark:text-dial-dark-text/70">
+                            <i data-lucide="check" class="w-4 h-4 mr-2 text-score-green"></i>
+                            API access
+                        </li>
+                        <li class="flex items-center text-sm text-dial-text/70 dark:text-dial-dark-text/70">
+                            <i data-lucide="check" class="w-4 h-4 mr-2 text-score-green"></i>
+                            Custom integrations
+                        </li>
+                        <li class="flex items-center text-sm text-dial-text/70 dark:text-dial-dark-text/70">
+                            <i data-lucide="check" class="w-4 h-4 mr-2 text-score-green"></i>
+                            Dedicated support
+                        </li>
+                        <li class="flex items-center text-sm text-dial-text/70 dark:text-dial-dark-text/70">
+                            <i data-lucide="check" class="w-4 h-4 mr-2 text-score-green"></i>
+                            SLA guarantee
+                        </li>
+                    </ul>
+                    <a href="mailto:enterprise@thedial.com" class="block w-full py-3 text-center text-dial-accent font-medium border border-dial-accent rounded-xl hover:bg-dial-accent hover:text-white transition-colors">
+                        Contact Sales
+                    </a>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- FAQ Section -->
+    <section class="py-20 px-4 sm:px-6 lg:px-8 bg-dial-border/20 dark:bg-dial-dark-border/20">
+        <div class="max-w-3xl mx-auto">
+            <div class="text-center mb-16 fade-in">
+                <h2 class="text-3xl sm:text-4xl font-bold text-dial-text dark:text-white mb-4">Frequently Asked Questions</h2>
+                <p class="text-lg text-dial-text/70 dark:text-dial-dark-text">
+                    Everything you need to know about The Dial
+                </p>
+            </div>
+            
+            <div class="space-y-4">
+                <!-- FAQ 1 -->
+                <div class="card rounded-xl fade-in">
+                    <button class="accordion-trigger w-full px-6 py-4 flex items-center justify-between text-left">
+                        <span class="font-medium text-dial-text dark:text-white">What is The Dial?</span>
+                        <i data-lucide="chevron-down" class="accordion-icon w-5 h-5 text-dial-text/60 dark:text-dial-dark-text/60"></i>
+                    </button>
+                    <div class="accordion-content px-6">
+                        <p class="pb-4 text-dial-text/70 dark:text-dial-dark-text/70">
+                            The Dial is a comprehensive macroeconomic monitoring dashboard that tracks 47 economic factors across 7 core modules. It provides real-time data and analytics to help investors make informed decisions.
+                        </p>
+                    </div>
+                </div>
+                
+                <!-- FAQ 2 -->
+                <div class="card rounded-xl fade-in" style="animation-delay: 0.1s;">
+                    <button class="accordion-trigger w-full px-6 py-4 flex items-center justify-between text-left">
+                        <span class="font-medium text-dial-text dark:text-white">How often is the data updated?</span>
+                        <i data-lucide="chevron-down" class="accordion-icon w-5 h-5 text-dial-text/60 dark:text-dial-dark-text/60"></i>
+                    </button>
+                    <div class="accordion-content px-6">
+                        <p class="pb-4 text-dial-text/70 dark:text-dial-dark-text/70">
+                            Free tier users receive daily updates. Pro and Enterprise users get real-time data with updates as frequently as every few seconds for certain indicators.
+                        </p>
+                    </div>
+                </div>
+                
+                <!-- FAQ 3 -->
+                <div class="card rounded-xl fade-in" style="animation-delay: 0.2s;">
+                    <button class="accordion-trigger w-full px-6 py-4 flex items-center justify-between text-left">
+                        <span class="font-medium text-dial-text dark:text-white">Can I export the data?</span>
+                        <i data-lucide="chevron-down" class="accordion-icon w-5 h-5 text-dial-text/60 dark:text-dial-dark-text/60"></i>
+                    </button>
+                    <div class="accordion-content px-6">
+                        <p class="pb-4 text-dial-text/70 dark:text-dial-dark-text/70">
+                            Yes! Pro and Enterprise users can export data in CSV, Excel, and JSON formats. Enterprise users also have access to our API for programmatic data access.
+                        </p>
+                    </div>
+                </div>
+                
+                <!-- FAQ 4 -->
+                <div class="card rounded-xl fade-in" style="animation-delay: 0.3s;">
+                    <button class="accordion-trigger w-full px-6 py-4 flex items-center justify-between text-left">
+                        <span class="font-medium text-dial-text dark:text-white">Is there a mobile app?</span>
+                        <i data-lucide="chevron-down" class="accordion-icon w-5 h-5 text-dial-text/60 dark:text-dial-dark-text/60"></i>
+                    </button>
+                    <div class="accordion-content px-6">
+                        <p class="pb-4 text-dial-text/70 dark:text-dial-dark-text/70">
+                            The Dial is fully responsive and works great on mobile browsers. Native iOS and Android apps are coming soon.
+                        </p>
+                    </div>
+                </div>
+                
+                <!-- FAQ 5 -->
+                <div class="card rounded-xl fade-in" style="animation-delay: 0.4s;">
+                    <button class="accordion-trigger w-full px-6 py-4 flex items-center justify-between text-left">
+                        <span class="font-medium text-dial-text dark:text-white">What markets does The Dial cover?</span>
+                        <i data-lucide="chevron-down" class="accordion-icon w-5 h-5 text-dial-text/60 dark:text-dial-dark-text/60"></i>
+                    </button>
+                    <div class="accordion-content px-6">
+                        <p class="pb-4 text-dial-text/70 dark:text-dial-dark-text/70">
+                            The Dial primarily focuses on US macroeconomic indicators but also includes key global metrics like DXY, EM currencies, and international funding markets.
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- CTA Section -->
+    <section class="py-20 px-4 sm:px-6 lg:px-8">
+        <div class="max-w-4xl mx-auto text-center fade-in">
+            <h2 class="text-3xl sm:text-4xl font-bold text-dial-text dark:text-white mb-6">
+                Ready to Master the Markets?
+            </h2>
+            <p class="text-lg text-dial-text/70 dark:text-dial-dark-text mb-8 max-w-2xl mx-auto">
+                Join thousands of investors who use The Dial to stay ahead of market movements. Start for free today.
+            </p>
+            <div class="flex flex-wrap justify-center gap-4">
+                <a href="signup.html" class="inline-flex items-center px-8 py-4 text-base font-medium text-white bg-dial-accent rounded-xl hover:bg-dial-accent/90 transition-all hover:shadow-lg hover:shadow-dial-accent/25">
+                    Get Started Free
+                    <i data-lucide="arrow-right" class="w-5 h-5 ml-2"></i>
+                </a>
+                <a href="dashboard.html" class="inline-flex items-center px-8 py-4 text-base font-medium text-dial-text dark:text-white bg-dial-border/50 dark:bg-dial-dark-border/50 rounded-xl hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors">
+                    View Demo
+                </a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="py-12 px-4 sm:px-6 lg:px-8 border-t border-dial-border dark:border-dial-dark-border">
+        <div class="max-w-7xl mx-auto">
+            <div class="grid md:grid-cols-4 gap-8 mb-8">
+                <!-- Brand -->
+                <div class="md:col-span-1">
+                    <a href="index.html" class="flex items-center space-x-2 mb-4">
+                        <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-dial-accent to-score-green flex items-center justify-center">
+                            <i data-lucide="gauge" class="w-5 h-5 text-white"></i>
+                        </div>
+                        <span class="text-xl font-bold text-dial-text dark:text-white">The Dial</span>
+                    </a>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-4">
+                        Real-time macroeconomic monitoring for informed investment decisions.
+                    </p>
+                    <div class="flex space-x-4">
+                        <a href="#" class="text-dial-text/60 dark:text-dial-dark-text/60 hover:text-dial-accent dark:hover:text-dial-accent transition-colors">
+                            <i data-lucide="twitter" class="w-5 h-5"></i>
+                        </a>
+                        <a href="#" class="text-dial-text/60 dark:text-dial-dark-text/60 hover:text-dial-accent dark:hover:text-dial-accent transition-colors">
+                            <i data-lucide="linkedin" class="w-5 h-5"></i>
+                        </a>
+                        <a href="#" class="text-dial-text/60 dark:text-dial-dark-text/60 hover:text-dial-accent dark:hover:text-dial-accent transition-colors">
+                            <i data-lucide="github" class="w-5 h-5"></i>
+                        </a>
+                    </div>
+                </div>
+                
+                <!-- Product -->
+                <div>
+                    <h4 class="font-semibold text-dial-text dark:text-white mb-4">Product</h4>
+                    <ul class="space-y-2">
+                        <li><a href="dashboard.html" class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 hover:text-dial-accent dark:hover:text-dial-accent transition-colors">Dashboard</a></li>
+                        <li><a href="#modules" class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 hover:text-dial-accent dark:hover:text-dial-accent transition-colors">Modules</a></li>
+                        <li><a href="#pricing" class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 hover:text-dial-accent dark:hover:text-dial-accent transition-colors">Pricing</a></li>
+                        <li><a href="#" class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 hover:text-dial-accent dark:hover:text-dial-accent transition-colors">API</a></li>
+                    </ul>
+                </div>
+                
+                <!-- Resources -->
+                <div>
+                    <h4 class="font-semibold text-dial-text dark:text-white mb-4">Resources</h4>
+                    <ul class="space-y-2">
+                        <li><a href="#" class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 hover:text-dial-accent dark:hover:text-dial-accent transition-colors">Documentation</a></li>
+                        <li><a href="#" class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 hover:text-dial-accent dark:hover:text-dial-accent transition-colors">Blog</a></li>
+                        <li><a href="#" class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 hover:text-dial-accent dark:hover:text-dial-accent transition-colors">Support</a></li>
+                        <li><a href="#" class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 hover:text-dial-accent dark:hover:text-dial-accent transition-colors">Status</a></li>
+                    </ul>
+                </div>
+                
+                <!-- Legal -->
+                <div>
+                    <h4 class="font-semibold text-dial-text dark:text-white mb-4">Legal</h4>
+                    <ul class="space-y-2">
+                        <li><a href="terms.html" class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 hover:text-dial-accent dark:hover:text-dial-accent transition-colors">Terms of Service</a></li>
+                        <li><a href="privacy.html" class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 hover:text-dial-accent dark:hover:text-dial-accent transition-colors">Privacy Policy</a></li>
+                        <li><a href="disclaimer.html" class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 hover:text-dial-accent dark:hover:text-dial-accent transition-colors">Disclaimer</a></li>
+                        <li><a href="#" class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 hover:text-dial-accent dark:hover:text-dial-accent transition-colors">Cookie Policy</a></li>
+                    </ul>
+                </div>
+            </div>
+            
+            <div class="pt-8 border-t border-dial-border dark:border-dial-dark-border flex flex-col sm:flex-row justify-between items-center">
+                <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">
+                    &copy; 2024 The Dial. All rights reserved.
+                </p>
+                <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mt-2 sm:mt-0">
+                    Data provided for informational purposes only.
+                </p>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        // Initialize Lucide Icons
+        document.addEventListener('DOMContentLoaded', function() {
+            lucide.createIcons();
+            
+            // Theme Toggle
+            const themeToggle = document.getElementById('themeToggle');
+            const html = document.documentElement;
+            
+            // Check for saved theme preference
+            const savedTheme = localStorage.getItem('theme');
+            if (savedTheme === 'dark' || (!savedTheme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+                html.classList.add('dark');
+            }
+            
+            themeToggle.addEventListener('click', () => {
+                html.classList.toggle('dark');
+                localStorage.setItem('theme', html.classList.contains('dark') ? 'dark' : 'light');
+            });
+            
+            // Mobile Menu
+            const mobileMenuBtn = document.getElementById('mobileMenuBtn');
+            const closeMobileMenu = document.getElementById('closeMobileMenu');
+            const mobileMenu = document.getElementById('mobileMenu');
+            const mobileOverlay = document.getElementById('mobileOverlay');
+            
+            function openMobileMenu() {
+                mobileMenu.classList.add('open');
+                mobileOverlay.classList.remove('hidden');
+                document.body.style.overflow = 'hidden';
+            }
+            
+            function closeMobileMenuFn() {
+                mobileMenu.classList.remove('open');
+                mobileOverlay.classList.add('hidden');
+                document.body.style.overflow = '';
+            }
+            
+            mobileMenuBtn.addEventListener('click', openMobileMenu);
+            closeMobileMenu.addEventListener('click', closeMobileMenuFn);
+            mobileOverlay.addEventListener('click', closeMobileMenuFn);
+            
+            // Scroll Animations
+            const fadeElements = document.querySelectorAll('.fade-in');
+            
+            const observer = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        entry.target.classList.add('visible');
+                    }
+                });
+            }, {
+                threshold: 0.1,
+                rootMargin: '0px 0px -50px 0px'
+            });
+            
+            fadeElements.forEach(el => observer.observe(el));
+            
+            // Counter Animation
+            const counters = document.querySelectorAll('.counter');
+            
+            const counterObserver = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        const counter = entry.target;
+                        const target = parseFloat(counter.getAttribute('data-target'));
+                        const duration = 2000;
+                        const start = 0;
+                        const startTime = performance.now();
+                        
+                        function updateCounter(currentTime) {
+                            const elapsed = currentTime - startTime;
+                            const progress = Math.min(elapsed / duration, 1);
+                            const easeOut = 1 - Math.pow(1 - progress, 3);
+                            const current = start + (target - start) * easeOut;
+                            
+                            if (target % 1 !== 0) {
+                                counter.textContent = current.toFixed(1);
+                            } else {
+                                counter.textContent = Math.floor(current);
+                            }
+                            
+                            if (progress < 1) {
+                                requestAnimationFrame(updateCounter);
+                            }
+                        }
+                        
+                        requestAnimationFrame(updateCounter);
+                        counterObserver.unobserve(counter);
+                    }
+                });
+            }, { threshold: 0.5 });
+            
+            counters.forEach(counter => counterObserver.observe(counter));
+            
+            // Gauge Animation
+            setTimeout(() => {
+                const needle = document.getElementById('gaugeNeedle');
+                if (needle) {
+                    // 48.3 score = -13.7 degrees (neutral position)
+                    needle.style.transform = 'rotate(-13.7deg)';
+                }
+            }, 500);
+            
+            // Accordion
+            const accordionTriggers = document.querySelectorAll('.accordion-trigger');
+            
+            accordionTriggers.forEach(trigger => {
+                trigger.addEventListener('click', () => {
+                    const content = trigger.nextElementSibling;
+                    const icon = trigger.querySelector('.accordion-icon');
+                    
+                    content.classList.toggle('open');
+                    icon.classList.toggle('open');
+                });
+            });
+            
+            // Preview Chart
+            const previewCtx = document.getElementById('previewChart');
+            if (previewCtx) {
+                new Chart(previewCtx, {
+                    type: 'line',
+                    data: {
+                        labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+                        datasets: [{
+                            label: 'Overall Score',
+                            data: [45.2, 46.1, 47.8, 46.5, 48.3, 47.9, 48.3],
+                            borderColor: '#007aff',
+                            backgroundColor: 'rgba(0, 122, 255, 0.1)',
+                            fill: true,
+                            tension: 0.4,
+                            pointRadius: 0,
+                            pointHoverRadius: 4,
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { display: false }
+                        },
+                        scales: {
+                            x: {
+                                display: false
+                            },
+                            y: {
+                                display: false,
+                                min: 40,
+                                max: 55
+                            }
+                        },
+                        interaction: {
+                            intersect: false,
+                            mode: 'index'
+                        }
+                    }
+                });
+            }
+        });
+    </script>
+</body>
+</html>

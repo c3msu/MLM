@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Terms of Service - The Dial</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script>tailwind.config={darkMode:'class',theme:{extend:{colors:{'dial-bg':'#fafafc','dial-dark-bg':'#1c1c1e','dial-card':'#ffffff','dial-dark-card':'#2c2c2e','dial-border':'#e5e5e7','dial-dark-border':'#3a3a3c','dial-text':'#3c3c43','dial-dark-text':'#aeaeb2','score-green':'#34c759','score-yellow':'#ff9500','score-red':'#ff3b30','dial-accent':'#007aff'},fontFamily:{sans:['Inter','system-ui','sans-serif']}}}}</script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>:root{--background:#fafafc;--foreground:#3c3c43;--card:#ffffff;--border:#e5e5e7;--accent:#007aff}.dark{--background:#1c1c1e;--foreground:#aeaeb2;--card:#2c2c2e;--border:#3a3a3c}body{font-family:'Inter',system-ui,sans-serif;background-color:var(--background);color:var(--foreground);transition:background-color 0.3s ease,color 0.3s ease}.card{background-color:var(--card);border:1px solid var(--border)}.nav-blur{backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}</style>
+</head>
+<body class="antialiased">
+    <nav class="fixed top-0 left-0 right-0 z-50 nav-blur bg-white/80 dark:bg-dial-dark-bg/80 border-b border-dial-border dark:border-dial-dark-border">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <a href="index.html" class="flex items-center space-x-2">
+                    <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-dial-accent to-score-green flex items-center justify-center"><i data-lucide="gauge" class="w-5 h-5 text-white"></i></div>
+                    <span class="text-xl font-bold text-dial-text dark:text-white">The Dial</span>
+                </a>
+                <div class="flex items-center space-x-4">
+                    <a href="login.html" class="hidden sm:inline-flex items-center px-4 py-2 text-sm font-medium text-white bg-dial-accent rounded-lg hover:bg-dial-accent/90 transition-colors">Sign In</a>
+                    <button id="themeToggle" class="p-2 rounded-lg hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors"><i data-lucide="sun" class="w-5 h-5 hidden dark:block text-dial-dark-text"></i><i data-lucide="moon" class="w-5 h-5 block dark:hidden text-dial-text"></i></button>
+                </div>
+            </div>
+        </div>
+    </nav>
+    <main class="pt-24 pb-16 px-4 sm:px-6 lg:px-8">
+        <div class="max-w-3xl mx-auto">
+            <div class="card rounded-2xl p-8">
+                <h1 class="text-3xl font-bold text-dial-text dark:text-white mb-6">Terms of Service</h1>
+                <p class="text-dial-text/70 dark:text-dial-dark-text/70 mb-6">Last updated: January 2024</p>
+                <div class="prose dark:prose-invert max-w-none">
+                    <h2 class="text-xl font-semibold text-dial-text dark:text-white mt-8 mb-4">1. Acceptance of Terms</h2>
+                    <p class="text-dial-text/70 dark:text-dial-dark-text/70 mb-4">By accessing or using The Dial ("Service"), you agree to be bound by these Terms of Service. If you do not agree to these terms, please do not use the Service.</p>
+                    <h2 class="text-xl font-semibold text-dial-text dark:text-white mt-8 mb-4">2. Description of Service</h2>
+                    <p class="text-dial-text/70 dark:text-dial-dark-text/70 mb-4">The Dial provides macroeconomic data visualization and analysis tools for informational purposes. The Service includes access to dashboards, charts, and economic indicators.</p>
+                    <h2 class="text-xl font-semibold text-dial-text dark:text-white mt-8 mb-4">3. User Accounts</h2>
+                    <p class="text-dial-text/70 dark:text-dial-dark-text/70 mb-4">To access certain features, you must create an account. You are responsible for maintaining the confidentiality of your account credentials and for all activities under your account.</p>
+                    <h2 class="text-xl font-semibold text-dial-text dark:text-white mt-8 mb-4">4. Subscription and Billing</h2>
+                    <p class="text-dial-text/70 dark:text-dial-dark-text/70 mb-4">Some features require a paid subscription. Payments are processed securely. You may cancel your subscription at any time, but refunds are provided only in accordance with our refund policy.</p>
+                    <h2 class="text-xl font-semibold text-dial-text dark:text-white mt-8 mb-4">5. Data Usage</h2>
+                    <p class="text-dial-text/70 dark:text-dial-dark-text/70 mb-4">All data provided through the Service is for informational purposes only and should not be construed as investment advice. Past performance does not guarantee future results.</p>
+                    <h2 class="text-xl font-semibold text-dial-text dark:text-white mt-8 mb-4">6. Intellectual Property</h2>
+                    <p class="text-dial-text/70 dark:text-dial-dark-text/70 mb-4">All content, trademarks, and data on the Service are the property of The Dial or its licensors. You may not reproduce, distribute, or create derivative works without permission.</p>
+                    <h2 class="text-xl font-semibold text-dial-text dark:text-white mt-8 mb-4">7. Limitation of Liability</h2>
+                    <p class="text-dial-text/70 dark:text-dial-dark-text/70 mb-4">The Dial shall not be liable for any indirect, incidental, special, or consequential damages arising from your use of the Service. This includes any losses related to investment decisions.</p>
+                    <h2 class="text-xl font-semibold text-dial-text dark:text-white mt-8 mb-4">8. Termination</h2>
+                    <p class="text-dial-text/70 dark:text-dial-dark-text/70 mb-4">We reserve the right to terminate or suspend your account at any time for violations of these terms or for any other reason at our discretion.</p>
+                    <h2 class="text-xl font-semibold text-dial-text dark:text-white mt-8 mb-4">9. Changes to Terms</h2>
+                    <p class="text-dial-text/70 dark:text-dial-dark-text/70 mb-4">We may modify these terms at any time. Continued use of the Service after changes constitutes acceptance of the new terms.</p>
+                    <h2 class="text-xl font-semibold text-dial-text dark:text-white mt-8 mb-4">10. Contact</h2>
+                    <p class="text-dial-text/70 dark:text-dial-dark-text/70 mb-4">For questions about these terms, please contact us at legal@thedial.com.</p>
+                </div>
+            </div>
+        </div>
+    </main>
+    <footer class="py-8 px-4 sm:px-6 lg:px-8 border-t border-dial-border dark:border-dial-dark-border">
+        <div class="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-center">
+            <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">&copy; 2024 The Dial. All rights reserved.</p>
+            <div class="flex space-x-6 mt-4 sm:mt-0">
+                <a href="terms.html" class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 hover:text-dial-accent">Terms</a>
+                <a href="privacy.html" class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 hover:text-dial-accent">Privacy</a>
+                <a href="disclaimer.html" class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 hover:text-dial-accent">Disclaimer</a>
+            </div>
+        </div>
+    </footer>
+    <script>
+        document.addEventListener('DOMContentLoaded',function(){lucide.createIcons();const themeToggle=document.getElementById('themeToggle'),html=document.documentElement,savedTheme=localStorage.getItem('theme');if(savedTheme==='dark'||(!savedTheme&&window.matchMedia('(prefers-color-scheme: dark)').matches))html.classList.add('dark');themeToggle.addEventListener('click',()=>{html.classList.toggle('dark');localStorage.setItem('theme',html.classList.contains('dark')?'dark':'light')});});
+    </script>
+</body>
+</html>

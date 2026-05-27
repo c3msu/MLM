@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Treasury Module - The Dial</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>tailwind.config={darkMode:'class',theme:{extend:{colors:{'dial-bg':'#fafafc','dial-dark-bg':'#1c1c1e','dial-card':'#ffffff','dial-dark-card':'#2c2c2e','dial-border':'#e5e5e7','dial-dark-border':'#3a3a3c','dial-text':'#3c3c43','dial-dark-text':'#aeaeb2','score-green':'#34c759','score-yellow':'#ff9500','score-red':'#ff3b30','dial-accent':'#007aff'},fontFamily:{sans:['Inter','system-ui','sans-serif']}}}}</script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>:root{--background:#fafafc;--foreground:#3c3c43;--card:#ffffff;--border:#e5e5e7;--score-green:#34c759;--score-yellow:#ff9500;--score-red:#ff3b30;--accent:#007aff}.dark{--background:#1c1c1e;--foreground:#aeaeb2;--card:#2c2c2e;--border:#3a3a3c}body{font-family:'Inter',system-ui,sans-serif;background-color:var(--background);color:var(--foreground);transition:background-color 0.3s ease,color 0.3s ease}.card{background-color:var(--card);border:1px solid var(--border);transition:background-color 0.3s ease,border-color 0.3s ease}.sidebar{background-color:var(--card);border-right:1px solid var(--border)}.nav-item{transition:all 0.2s ease}.nav-item:hover,.nav-item.active{background-color:var(--accent);color:white}.nav-item.active svg,.nav-item:hover svg{color:white}.score-high{color:var(--score-green)}.score-medium{color:var(--score-yellow)}.score-low{color:var(--score-red)}.nav-blur{backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:var(--background)}::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}@keyframes live-pulse{0%,100%{opacity:1}50%{opacity:0.5}}.live-dot{animation:live-pulse 1.5s ease-in-out infinite}.tab-btn{transition:all 0.2s ease}.tab-btn.active{background-color:var(--accent);color:white}.tab-content{display:none}.tab-content.active{display:block}</style>
+</head>
+<body class="antialiased">
+    <div class="flex h-screen overflow-hidden">
+        <aside class="sidebar w-64 flex-shrink-0 hidden lg:flex flex-col">
+            <div class="p-6 border-b border-dial-border dark:border-dial-dark-border"><a href="index.html" class="flex items-center space-x-2"><div class="w-8 h-8 rounded-lg bg-gradient-to-br from-dial-accent to-score-green flex items-center justify-center"><i data-lucide="gauge" class="w-5 h-5 text-white"></i></div><span class="text-xl font-bold text-dial-text dark:text-white">The Dial</span></a></div>
+            <nav class="flex-1 overflow-y-auto p-4 space-y-1">
+                <a href="dashboard.html" class="nav-item flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-medium text-dial-text/70 dark:text-dial-dark-text/70"><i data-lucide="layout-dashboard" class="w-5 h-5"></i><span>Dashboard</span></a>
+                <a href="module-liquidity.html" class="nav-item flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-medium text-dial-text/70 dark:text-dial-dark-text/70"><i data-lucide="droplets" class="w-5 h-5"></i><span>Liquidity</span></a>
+                <a href="module-funding.html" class="nav-item flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-medium text-dial-text/70 dark:text-dial-dark-text/70"><i data-lucide="banknote" class="w-5 h-5"></i><span>Funding</span></a>
+                <a href="module-treasury.html" class="nav-item active flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-medium"><i data-lucide="landmark" class="w-5 h-5"></i><span>Treasury</span></a>
+                <a href="module-rates.html" class="nav-item flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-medium text-dial-text/70 dark:text-dial-dark-text/70"><i data-lucide="percent" class="w-5 h-5"></i><span>Rates</span></a>
+                <a href="module-credit.html" class="nav-item flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-medium text-dial-text/70 dark:text-dial-dark-text/70"><i data-lucide="credit-card" class="w-5 h-5"></i><span>Credit</span></a>
+                <a href="module-risk.html" class="nav-item flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-medium text-dial-text/70 dark:text-dial-dark-text/70"><i data-lucide="alert-triangle" class="w-5 h-5"></i><span>Risk</span></a>
+                <a href="module-external.html" class="nav-item flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-medium text-dial-text/70 dark:text-dial-dark-text/70"><i data-lucide="globe" class="w-5 h-5"></i><span>External</span></a>
+            </nav>
+            <div class="p-4 border-t border-dial-border dark:border-dial-dark-border">
+                <a href="login.html" class="flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-medium text-dial-text/70 dark:text-dial-dark-text/70 hover:bg-dial-border/50 dark:hover:bg-dial-dark-border/50 transition-colors"><i data-lucide="user" class="w-5 h-5"></i><span>Account</span></a>
+                <a href="index.html" class="flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-medium text-dial-text/70 dark:text-dial-dark-text/70 hover:bg-dial-border/50 dark:hover:bg-dial-dark-border/50 transition-colors"><i data-lucide="log-out" class="w-5 h-5"></i><span>Logout</span></a>
+            </div>
+        </aside>
+        <main class="flex-1 overflow-y-auto">
+            <header class="sticky top-0 z-30 nav-blur bg-white/80 dark:bg-dial-dark-bg/80 border-b border-dial-border dark:border-dial-dark-border">
+                <div class="flex items-center justify-between h-16 px-4 sm:px-6 lg:px-8">
+                    <div class="flex items-center">
+                        <button id="mobileMenuBtn" class="lg:hidden p-2 mr-4 rounded-lg hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors"><i data-lucide="menu" class="w-6 h-6 text-dial-text dark:text-dial-dark-text"></i></button>
+                        <div><h1 class="text-xl font-semibold text-dial-text dark:text-white">Treasury</h1><p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60">Yield Curve & Bond Markets</p></div>
+                    </div>
+                    <div class="flex items-center space-x-4">
+                        <span class="hidden sm:inline-flex items-center px-3 py-1 rounded-full bg-score-yellow/10 text-score-yellow text-sm"><span class="w-2 h-2 rounded-full bg-score-yellow mr-2 live-dot"></span>Stable</span>
+                        <button id="themeToggle" class="p-2 rounded-lg hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors"><i data-lucide="sun" class="w-5 h-5 hidden dark:block text-dial-dark-text"></i><i data-lucide="moon" class="w-5 h-5 block dark:hidden text-dial-text"></i></button>
+                    </div>
+                </div>
+            </header>
+            <div class="p-4 sm:p-6 lg:p-8">
+                <div class="card rounded-2xl p-6 mb-6">
+                    <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                        <div class="flex items-center space-x-4">
+                            <div class="w-16 h-16 rounded-2xl bg-purple-500/10 flex items-center justify-center"><i data-lucide="landmark" class="w-8 h-8 text-purple-500"></i></div>
+                            <div><h2 class="text-2xl font-bold text-dial-text dark:text-white">Treasury Score</h2><p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">Based on 8 key indicators</p></div>
+                        </div>
+                        <div class="flex items-center space-x-6">
+                            <div class="text-center"><div class="text-4xl font-bold score-medium">58.6</div><div class="text-sm text-score-green flex items-center justify-center mt-1"><i data-lucide="trending-up" class="w-4 h-4 mr-1"></i>+0.3%</div></div>
+                            <div class="h-12 w-px bg-dial-border dark:bg-dial-dark-border"></div>
+                            <div class="text-center"><div class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">Last Updated</div><div class="text-sm font-medium text-dial-text dark:text-white">3 min ago</div></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex space-x-2 mb-6 overflow-x-auto">
+                    <button class="tab-btn active px-4 py-2 rounded-lg text-sm font-medium" data-tab="overview">Overview</button>
+                    <button class="tab-btn px-4 py-2 rounded-lg text-sm font-medium text-dial-text/70 dark:text-dial-dark-text/70 hover:bg-dial-border/50 dark:hover:bg-dial-dark-border/50" data-tab="yieldcurve">Yield Curve</button>
+                    <button class="tab-btn px-4 py-2 rounded-lg text-sm font-medium text-dial-text/70 dark:text-dial-dark-text/70 hover:bg-dial-border/50 dark:hover:bg-dial-dark-border/50" data-tab="indicators">Indicators</button>
+                </div>
+                <div id="overview" class="tab-content active">
+                    <div class="grid lg:grid-cols-3 gap-6 mb-6">
+                        <div class="card rounded-2xl p-6 lg:col-span-2">
+                            <div class="flex items-center justify-between mb-4"><h3 class="text-lg font-semibold text-dial-text dark:text-white">Treasury Trend</h3><div class="flex space-x-2"><button class="px-3 py-1 text-xs font-medium rounded-lg bg-dial-accent text-white">1M</button><button class="px-3 py-1 text-xs font-medium rounded-lg bg-dial-border/50 dark:bg-dial-dark-border/50 text-dial-text/70 dark:text-dial-dark-text/70">3M</button></div></div>
+                            <canvas id="treasuryChart" height="200"></canvas>
+                        </div>
+                        <div class="space-y-4">
+                            <div class="card rounded-xl p-4"><div class="flex items-center justify-between mb-2"><span class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">10Y Yield</span><i data-lucide="trending-up" class="w-4 h-4 text-purple-500"></i></div><div class="text-2xl font-bold text-dial-text dark:text-white">4.21%</div><div class="text-xs text-score-green flex items-center mt-1"><i data-lucide="trending-down" class="w-3 h-3 mr-1"></i>-0.05%</div></div>
+                            <div class="card rounded-xl p-4"><div class="flex items-center justify-between mb-2"><span class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">2Y Yield</span><i data-lucide="percent" class="w-4 h-4 text-yellow-500"></i></div><div class="text-2xl font-bold text-dial-text dark:text-white">4.35%</div><div class="text-xs text-score-red flex items-center mt-1"><i data-lucide="trending-up" class="w-3 h-3 mr-1"></i>+0.02%</div></div>
+                            <div class="card rounded-xl p-4"><div class="flex items-center justify-between mb-2"><span class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">10Y-2Y Spread</span><i data-lucide="activity" class="w-4 h-4 text-red-500"></i></div><div class="text-2xl font-bold text-dial-text dark:text-white">-14 bps</div><div class="text-xs text-score-red flex items-center mt-1"><i data-lucide="trending-down" class="w-3 h-3 mr-1"></i>-7 bps</div></div>
+                        </div>
+                    </div>
+                    <div class="card rounded-2xl p-6">
+                        <h3 class="text-lg font-semibold text-dial-text dark:text-white mb-3">About This Module</h3>
+                        <p class="text-dial-text/70 dark:text-dial-dark-text/70 mb-4">The Treasury module tracks US government bond markets, yield curve dynamics, and inflation expectations through TIPS spreads. The yield curve shape provides insights into market expectations for growth and monetary policy.</p>
+                        <div class="flex flex-wrap gap-2"><span class="px-3 py-1 rounded-full bg-purple-500/10 text-purple-500 text-xs font-medium">Yield Curve</span><span class="px-3 py-1 rounded-full bg-orange-500/10 text-orange-500 text-xs font-medium">TIPS</span><span class="px-3 py-1 rounded-full bg-blue-500/10 text-blue-500 text-xs font-medium">Term Premium</span><span class="px-3 py-1 rounded-full bg-green-500/10 text-green-500 text-xs font-medium">Breakeven</span></div>
+                    </div>
+                </div>
+                <div id="yieldcurve" class="tab-content">
+                    <div class="card rounded-2xl p-6"><h3 class="text-lg font-semibold text-dial-text dark:text-white mb-4">Yield Curve</h3><canvas id="yieldCurveChart" height="300"></canvas></div>
+                </div>
+                <div id="indicators" class="tab-content">
+                    <div class="card rounded-2xl overflow-hidden">
+                        <table class="w-full">
+                            <thead class="bg-dial-border/50 dark:bg-dial-dark-border/50"><tr><th class="px-6 py-3 text-left text-xs font-medium text-dial-text/60 dark:text-dial-dark-text/60 uppercase">Maturity</th><th class="px-6 py-3 text-left text-xs font-medium text-dial-text/60 dark:text-dial-dark-text/60 uppercase">Yield</th><th class="px-6 py-3 text-left text-xs font-medium text-dial-text/60 dark:text-dial-dark-text/60 uppercase">Change</th><th class="px-6 py-3 text-left text-xs font-medium text-dial-text/60 dark:text-dial-dark-text/60 uppercase">Status</th></tr></thead>
+                            <tbody class="divide-y divide-dial-border dark:divide-dial-dark-border">
+                                <tr class="hover:bg-dial-border/20 dark:hover:bg-dial-dark-border/20"><td class="px-6 py-4 text-sm font-medium text-dial-text dark:text-white">3-Month</td><td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">5.24%</td><td class="px-6 py-4 text-sm text-dial-text/40 dark:text-dial-dark-text/40">0.00%</td><td class="px-6 py-4"><span class="px-2 py-1 rounded-full bg-score-green/10 text-score-green text-xs">Stable</span></td></tr>
+                                <tr class="hover:bg-dial-border/20 dark:hover:bg-dial-dark-border/20"><td class="px-6 py-4 text-sm font-medium text-dial-text dark:text-white">2-Year</td><td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">4.35%</td><td class="px-6 py-4 text-sm text-score-red">+0.02%</td><td class="px-6 py-4"><span class="px-2 py-1 rounded-full bg-score-yellow/10 text-score-yellow text-xs">Rising</span></td></tr>
+                                <tr class="hover:bg-dial-border/20 dark:hover:bg-dial-dark-border/20"><td class="px-6 py-4 text-sm font-medium text-dial-text dark:text-white">5-Year</td><td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">4.12%</td><td class="px-6 py-4 text-sm text-score-green">-0.03%</td><td class="px-6 py-4"><span class="px-2 py-1 rounded-full bg-score-green/10 text-score-green text-xs">Falling</span></td></tr>
+                                <tr class="hover:bg-dial-border/20 dark:hover:bg-dial-dark-border/20"><td class="px-6 py-4 text-sm font-medium text-dial-text dark:text-white">10-Year</td><td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">4.21%</td><td class="px-6 py-4 text-sm text-score-green">-0.05%</td><td class="px-6 py-4"><span class="px-2 py-1 rounded-full bg-score-green/10 text-score-green text-xs">Falling</span></td></tr>
+                                <tr class="hover:bg-dial-border/20 dark:hover:bg-dial-dark-border/20"><td class="px-6 py-4 text-sm font-medium text-dial-text dark:text-white">30-Year</td><td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">4.38%</td><td class="px-6 py-4 text-sm text-score-green">-0.04%</td><td class="px-6 py-4"><span class="px-2 py-1 rounded-full bg-score-green/10 text-score-green text-xs">Falling</span></td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    <div id="mobileOverlay" class="fixed inset-0 bg-black/50 z-40 hidden lg:hidden"></div>
+    <div id="mobileSidebar" class="fixed inset-y-0 left-0 w-64 sidebar z-50 transform -translate-x-full transition-transform duration-300 lg:hidden">
+        <div class="p-4">
+            <button id="closeMobileMenu" class="absolute top-4 right-4 p-2 rounded-lg hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors"><i data-lucide="x" class="w-6 h-6 text-dial-text dark:text-dial-dark-text"></i></button>
+            <div class="mt-12 space-y-1">
+                <a href="dashboard.html" class="flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-medium text-dial-text/70 dark:text-dial-dark-text/70 hover:bg-dial-border/50 dark:hover:bg-dial-dark-border/50"><i data-lucide="layout-dashboard" class="w-5 h-5"></i><span>Dashboard</span></a>
+                <a href="module-liquidity.html" class="flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-medium text-dial-text/70 dark:text-dial-dark-text/70 hover:bg-dial-border/50 dark:hover:bg-dial-dark-border/50"><i data-lucide="droplets" class="w-5 h-5"></i><span>Liquidity</span></a>
+                <a href="module-funding.html" class="flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-medium text-dial-text/70 dark:text-dial-dark-text/70 hover:bg-dial-border/50 dark:hover:bg-dial-dark-border/50"><i data-lucide="banknote" class="w-5 h-5"></i><span>Funding</span></a>
+                <a href="module-treasury.html" class="flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-medium bg-dial-accent text-white"><i data-lucide="landmark" class="w-5 h-5"></i><span>Treasury</span></a>
+                <a href="module-rates.html" class="flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-medium text-dial-text/70 dark:text-dial-dark-text/70 hover:bg-dial-border/50 dark:hover:bg-dial-dark-border/50"><i data-lucide="percent" class="w-5 h-5"></i><span>Rates</span></a>
+                <a href="module-credit.html" class="flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-medium text-dial-text/70 dark:text-dial-dark-text/70 hover:bg-dial-border/50 dark:hover:bg-dial-dark-border/50"><i data-lucide="credit-card" class="w-5 h-5"></i><span>Credit</span></a>
+                <a href="module-risk.html" class="flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-medium text-dial-text/70 dark:text-dial-dark-text/70 hover:bg-dial-border/50 dark:hover:bg-dial-dark-border/50"><i data-lucide="alert-triangle" class="w-5 h-5"></i><span>Risk</span></a>
+                <a href="module-external.html" class="flex items-center space-x-3 px-4 py-3 rounded-xl text-sm font-medium text-dial-text/70 dark:text-dial-dark-text/70 hover:bg-dial-border/50 dark:hover:bg-dial-dark-border/50"><i data-lucide="globe" class="w-5 h-5"></i><span>External</span></a>
+            </div>
+        </div>
+    </div>
+    <script>
+        document.addEventListener('DOMContentLoaded',function(){lucide.createIcons();const themeToggle=document.getElementById('themeToggle'),html=document.documentElement,savedTheme=localStorage.getItem('theme');if(savedTheme==='dark'||(!savedTheme&&window.matchMedia('(prefers-color-scheme: dark)').matches))html.classList.add('dark');themeToggle.addEventListener('click',()=>{html.classList.toggle('dark');localStorage.setItem('theme',html.classList.contains('dark')?'dark':'light')});
+        const mobileMenuBtn=document.getElementById('mobileMenuBtn'),closeMobileMenu=document.getElementById('closeMobileMenu'),mobileSidebar=document.getElementById('mobileSidebar'),mobileOverlay=document.getElementById('mobileOverlay');
+        function openMobileMenu(){mobileSidebar.classList.remove('-translate-x-full');mobileOverlay.classList.remove('hidden');document.body.style.overflow='hidden'}
+        function closeMobileMenuFn(){mobileSidebar.classList.add('-translate-x-full');mobileOverlay.classList.add('hidden');document.body.style.overflow=''}
+        mobileMenuBtn.addEventListener('click',openMobileMenu);closeMobileMenu.addEventListener('click',closeMobileMenuFn);mobileOverlay.addEventListener('click',closeMobileMenuFn);
+        document.querySelectorAll('.tab-btn').forEach(btn=>btn.addEventListener('click',()=>{const tabId=btn.getAttribute('data-tab');document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));btn.classList.add('active');document.getElementById(tabId).classList.add('active')}));
+        const treasuryCtx=document.getElementById('treasuryChart');if(treasuryCtx)new Chart(treasuryCtx,{type:'line',data:{labels:['Week 1','Week 2','Week 3','Week 4'],datasets:[{label:'Treasury Score',data:[57.2,57.8,58.1,58.6],borderColor:'#a855f7',backgroundColor:'rgba(168,85,247,0.1)',fill:true,tension:0.4,pointRadius:4}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{grid:{color:'var(--border)',drawBorder:false},ticks:{color:'var(--foreground)'}},y:{min:55,max:60,grid:{color:'var(--border)',drawBorder:false},ticks:{color:'var(--foreground)'}}}}});
+        const yieldCurveCtx=document.getElementById('yieldCurveChart');if(yieldCurveCtx)new Chart(yieldCurveCtx,{type:'line',data:{labels:['3M','2Y','5Y','10Y','30Y'],datasets:[{label:'Current',data:[5.24,4.35,4.12,4.21,4.38],borderColor:'#a855f7',backgroundColor:'rgba(168,85,247,0.1)',fill:false,tension:0.4,pointRadius:6},{label:'1 Month Ago',data:[5.32,4.28,4.15,4.28,4.42],borderColor:'#9ca3af',borderDash:[5,5],fill:false,tension:0.4,pointRadius:4}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:true}},scales:{x:{grid:{color:'var(--border)',drawBorder:false},ticks:{color:'var(--foreground)'}},y:{grid:{color:'var(--border)',drawBorder:false},ticks:{color:'var(--foreground)',callback:v=>v+'%'}}}}});});
+    </script>
+</body>
+</html>

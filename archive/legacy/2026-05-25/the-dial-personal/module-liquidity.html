@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>流动性 - The Dial</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        'dial-bg': '#fafafc',
+                        'dial-dark-bg': '#1c1c1e',
+                        'dial-card': '#ffffff',
+                        'dial-dark-card': '#2c2c2e',
+                        'dial-border': '#e5e5e7',
+                        'dial-dark-border': '#3a3a3c',
+                        'dial-text': '#3c3c43',
+                        'dial-dark-text': '#aeaeb2',
+                        'score-green': '#34c759',
+                        'score-yellow': '#ff9500',
+                        'score-red': '#ff3b30',
+                        'dial-accent': '#007aff',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        :root {
+            --background: #fafafc;
+            --foreground: #3c3c43;
+            --card: #ffffff;
+            --border: #e5e5e7;
+            --score-green: #34c759;
+            --score-yellow: #ff9500;
+            --score-red: #ff3b30;
+            --accent: #007aff;
+        }
+        .dark {
+            --background: #1c1c1e;
+            --foreground: #aeaeb2;
+            --card: #2c2c2e;
+            --border: #3a3a3c;
+        }
+        body {
+            font-family: 'Inter', system-ui, sans-serif;
+            background-color: var(--background);
+            color: var(--foreground);
+        }
+        .card {
+            background-color: var(--card);
+            border: 1px solid var(--border);
+        }
+        .nav-blur {
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+        }
+        .score-high { color: var(--score-green); }
+        .score-medium { color: var(--score-yellow); }
+        .score-low { color: var(--score-red); }
+        .sidebar-link {
+            transition: all 0.2s ease;
+        }
+        .sidebar-link:hover, .sidebar-link.active {
+            background-color: var(--accent);
+            color: white;
+        }
+    </style>
+</head>
+<body class="antialiased">
+    <!-- Navigation -->
+    <nav class="fixed top-0 left-0 right-0 z-50 nav-blur bg-white/80 dark:bg-dial-dark-bg/80 border-b border-dial-border dark:border-dial-dark-border">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <a href="index.html" class="flex items-center space-x-2">
+                    <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-dial-accent to-score-green flex items-center justify-center">
+                        <i data-lucide="gauge" class="w-5 h-5 text-white"></i>
+                    </div>
+                    <span class="text-xl font-bold text-dial-text dark:text-white">The Dial</span>
+                </a>
+
+                <div class="flex items-center space-x-4">
+                    <button id="themeToggle" class="p-2 rounded-lg hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors">
+                        <i data-lucide="sun" class="w-5 h-5 hidden dark:block text-dial-dark-text"></i>
+                        <i data-lucide="moon" class="w-5 h-5 block dark:hidden text-dial-text"></i>
+                    </button>
+                    <a href="dashboard.html" class="text-sm font-medium text-dial-text/70 dark:text-dial-dark-text hover:text-dial-accent transition-colors">
+                        返回仪表盘
+                    </a>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="flex pt-16 min-h-screen">
+        <!-- Sidebar -->
+        <aside class="w-64 fixed left-0 top-16 bottom-0 bg-dial-card dark:bg-dial-dark-card border-r border-dial-border dark:border-dial-dark-border overflow-y-auto hidden lg:block">
+            <div class="p-4">
+                <div class="mb-6">
+                    <p class="text-xs font-medium text-dial-text/40 dark:text-dial-dark-text/40 uppercase tracking-wider mb-2">模块</p>
+                    <nav class="space-y-1">
+                        <a href="module-liquidity.html" class="sidebar-link flex items-center px-3 py-2 rounded-lg text-sm font-medium text-dial-text dark:text-dial-dark-text active">
+            <i data-lucide="droplets" class="w-4 h-4 mr-3"></i>
+            流动性
+            <span class="ml-auto text-xs score-medium">52.4</span>
+        </a>
+<a href="module-funding.html" class="sidebar-link flex items-center px-3 py-2 rounded-lg text-sm font-medium text-dial-text dark:text-dial-dark-text ">
+            <i data-lucide="banknote" class="w-4 h-4 mr-3"></i>
+            融资
+            <span class="ml-auto text-xs score-high">61.2</span>
+        </a>
+<a href="module-treasury.html" class="sidebar-link flex items-center px-3 py-2 rounded-lg text-sm font-medium text-dial-text dark:text-dial-dark-text ">
+            <i data-lucide="landmark" class="w-4 h-4 mr-3"></i>
+            国债
+            <span class="ml-auto text-xs score-medium">48.7</span>
+        </a>
+<a href="module-rates.html" class="sidebar-link flex items-center px-3 py-2 rounded-lg text-sm font-medium text-dial-text dark:text-dial-dark-text ">
+            <i data-lucide="percent" class="w-4 h-4 mr-3"></i>
+            利率
+            <span class="ml-auto text-xs score-low">42.1</span>
+        </a>
+<a href="module-credit.html" class="sidebar-link flex items-center px-3 py-2 rounded-lg text-sm font-medium text-dial-text dark:text-dial-dark-text ">
+            <i data-lucide="credit-card" class="w-4 h-4 mr-3"></i>
+            信用
+            <span class="ml-auto text-xs score-low">38.9</span>
+        </a>
+<a href="module-risk.html" class="sidebar-link flex items-center px-3 py-2 rounded-lg text-sm font-medium text-dial-text dark:text-dial-dark-text ">
+            <i data-lucide="alert-triangle" class="w-4 h-4 mr-3"></i>
+            风险
+            <span class="ml-auto text-xs score-medium">45.6</span>
+        </a>
+<a href="module-external.html" class="sidebar-link flex items-center px-3 py-2 rounded-lg text-sm font-medium text-dial-text dark:text-dial-dark-text ">
+            <i data-lucide="globe" class="w-4 h-4 mr-3"></i>
+            外部
+            <span class="ml-auto text-xs score-high">58.3</span>
+        </a>
+                    </nav>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="flex-1 lg:ml-64 p-6">
+            <div class="max-w-6xl mx-auto">
+                <!-- Header -->
+                <div class="mb-8">
+                    <div class="flex items-center mb-4">
+                        <div class="w-12 h-12 rounded-xl bg-blue-500/10 flex items-center justify-center mr-4">
+                            <i data-lucide="droplets" class="w-6 h-6 text-blue-500"></i>
+                        </div>
+                        <div>
+                            <h1 class="text-2xl font-bold text-dial-text dark:text-white">流动性</h1>
+                            <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">Liquidity · 8个因子</p>
+                        </div>
+                        <div class="ml-auto text-right">
+                            <span class="text-3xl font-bold score-medium">52.4</span>
+                            <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60">模块评分</p>
+                        </div>
+                    </div>
+                    <p class="text-dial-text/70 dark:text-dial-dark-text">衡量金融系统中资金的可用性和流动。追踪美联储资产负债表动态、银行准备金、净流动性动量、TGA偏差和ON RRP缓冲耗尽风险。</p>
+                </div>
+
+                <!-- Key Metrics -->
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+                    <div class="card rounded-xl p-4">
+                        <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-1">当前评分</p>
+                        <p class="text-2xl font-bold score-medium">52.4</p>
+                        <p class="text-xs text-dial-text/40 dark:text-dial-dark-text/40">较上周 -1.2</p>
+                    </div>
+                    <div class="card rounded-xl p-4">
+                        <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-1">5年百分位</p>
+                        <p class="text-2xl font-bold score-medium">52%</p>
+                        <p class="text-xs text-dial-text/40 dark:text-dial-dark-text/40">历史位置</p>
+                    </div>
+                    <div class="card rounded-xl p-4">
+                        <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-1">趋势</p>
+                        <p class="text-2xl font-bold score-low">下降</p>
+                        <p class="text-xs text-dial-text/40 dark:text-dial-dark-text/40">近30天</p>
+                    </div>
+                    <div class="card rounded-xl p-4">
+                        <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-1">数据点</p>
+                        <p class="text-2xl font-bold text-dial-accent">1,247</p>
+                        <p class="text-xs text-dial-text/40 dark:text-dial-dark-text/40">已存储</p>
+                    </div>
+                </div>
+
+                <!-- Chart -->
+                <div class="card rounded-2xl p-6 mb-8">
+                    <h2 class="text-lg font-semibold text-dial-text dark:text-white mb-4">历史趋势（2年）</h2>
+                    <canvas id="moduleChart" height="300"></canvas>
+                </div>
+
+                <!-- Factors Table -->
+                <div class="card rounded-2xl overflow-hidden">
+                    <div class="p-6 border-b border-dial-border dark:border-dial-dark-border">
+                        <h2 class="text-lg font-semibold text-dial-text dark:text-white">因子详情</h2>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full">
+                            <thead class="bg-dial-bg dark:bg-dial-dark-bg">
+                                <tr>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-dial-text/60 dark:text-dial-dark-text/60 uppercase">因子名称</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-dial-text/60 dark:text-dial-dark-text/60 uppercase">当前值</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-dial-text/60 dark:text-dial-dark-text/60 uppercase">变化</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-dial-text/60 dark:text-dial-dark-text/60 uppercase">5年百分位</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-dial-text/60 dark:text-dial-dark-text/60 uppercase">状态</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-dial-border dark:divide-dial-dark-border">
+                                <tr>
+            <td class="px-6 py-4 text-sm font-medium text-dial-text dark:text-dial-dark-text">净流动性</td>
+            <td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">3.42T</td>
+            <td class="px-6 py-4 text-sm score-high">-2.1%</td>
+            <td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">45%</td>
+            <td class="px-6 py-4 text-sm"><span class="score-medium">中性</span></td>
+        </tr>
+<tr>
+            <td class="px-6 py-4 text-sm font-medium text-dial-text dark:text-dial-dark-text">银行准备金</td>
+            <td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">2.89T</td>
+            <td class="px-6 py-4 text-sm score-high">-1.5%</td>
+            <td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">52%</td>
+            <td class="px-6 py-4 text-sm"><span class="score-medium">中性</span></td>
+        </tr>
+<tr>
+            <td class="px-6 py-4 text-sm font-medium text-dial-text dark:text-dial-dark-text">流动性动量</td>
+            <td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">-12.4B</td>
+            <td class="px-6 py-4 text-sm score-high">-8.2%</td>
+            <td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">38%</td>
+            <td class="px-6 py-4 text-sm"><span class="score-low">限制性</span></td>
+        </tr>
+<tr>
+            <td class="px-6 py-4 text-sm font-medium text-dial-text dark:text-dial-dark-text">TGA偏差</td>
+            <td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">485B</td>
+            <td class="px-6 py-4 text-sm score-low">+15.3%</td>
+            <td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">68%</td>
+            <td class="px-6 py-4 text-sm"><span class="score-high">支持性</span></td>
+        </tr>
+<tr>
+            <td class="px-6 py-4 text-sm font-medium text-dial-text dark:text-dial-dark-text">ON RRP风险</td>
+            <td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">523B</td>
+            <td class="px-6 py-4 text-sm score-high">-5.2%</td>
+            <td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">72%</td>
+            <td class="px-6 py-4 text-sm"><span class="score-high">支持性</span></td>
+        </tr>
+<tr>
+            <td class="px-6 py-4 text-sm font-medium text-dial-text dark:text-dial-dark-text">美联储资产负债表</td>
+            <td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">7.24T</td>
+            <td class="px-6 py-4 text-sm score-high">-0.8%</td>
+            <td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">35%</td>
+            <td class="px-6 py-4 text-sm"><span class="score-low">限制性</span></td>
+        </tr>
+<tr>
+            <td class="px-6 py-4 text-sm font-medium text-dial-text dark:text-dial-dark-text">货币供应量M2</td>
+            <td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">20.8T</td>
+            <td class="px-6 py-4 text-sm score-low">+0.3%</td>
+            <td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">28%</td>
+            <td class="px-6 py-4 text-sm"><span class="score-low">限制性</span></td>
+        </tr>
+<tr>
+            <td class="px-6 py-4 text-sm font-medium text-dial-text dark:text-dial-dark-text">超额准备金率</td>
+            <td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">4.65%</td>
+            <td class="px-6 py-4 text-sm score-medium">0.0%</td>
+            <td class="px-6 py-4 text-sm text-dial-text dark:text-dial-dark-text">85%</td>
+            <td class="px-6 py-4 text-sm"><span class="score-high">支持性</span></td>
+        </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        lucide.createIcons();
+
+        const themeToggle = document.getElementById('themeToggle');
+        const html = document.documentElement;
+
+        if (localStorage.getItem('theme') === 'dark' || (!localStorage.getItem('theme') && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+            html.classList.add('dark');
+        }
+
+        themeToggle.addEventListener('click', () => {
+            html.classList.toggle('dark');
+            localStorage.setItem('theme', html.classList.contains('dark') ? 'dark' : 'light');
+        });
+
+        // Module Chart
+        const ctx = document.getElementById('moduleChart').getContext('2d');
+        new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: ["2024-01", "2024-02", "2024-03", "2024-04", "2024-05", "2024-06", "2024-07", "2024-08", "2024-09", "2024-10", "2024-11", "2024-12", "2025-01", "2025-02", "2025-03", "2025-04", "2025-05", "2025-06", "2025-07", "2025-08", "2025-09", "2025-10", "2025-11", "2025-12"],
+                datasets: [{
+                    label: '流动性评分',
+                    data: [53.8, 49.0, 46.8, 44.0, 46.4, 48.2, 52.1, 47.9, 47.2, 42.5, 39.7, 39.7, 35.0, 32.0, 33.5, 33.9, 31.1, 32.0, 35.1, 30.2, 33.2, 35.2, 33.6, 30.2],
+                    borderColor: '#007aff',
+                    backgroundColor: 'rgba(0, 122, 255, 0.1)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.4
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false }
+                },
+                scales: {
+                    y: {
+                        min: 0,
+                        max: 100,
+                        grid: { color: 'rgba(0,0,0,0.05)' }
+                    },
+                    x: {
+                        grid: { display: false }
+                    }
+                }
+            }
+        });
+    </script>
+</body>
+</html>

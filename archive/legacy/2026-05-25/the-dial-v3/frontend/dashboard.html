@@ -1,0 +1,1030 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="description" content="The Dial 仪表盘 - 实时宏观经济监测">
+  <meta name="theme-color" content="#007aff">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  
+  <title>仪表盘 - The Dial</title>
+  
+  <!-- Preconnect -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  
+  <!-- Fonts -->
+  <link rel="preload" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" as="style">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            'dial-bg': '#fafafc',
+            'dial-dark-bg': '#1c1c1e',
+            'dial-card': '#ffffff',
+            'dial-dark-card': '#2c2c2e',
+            'dial-border': '#e5e5e7',
+            'dial-dark-border': '#3a3a3c',
+            'dial-text': '#3c3c43',
+            'dial-dark-text': '#aeaeb2',
+            'score-green': '#34c759',
+            'score-yellow': '#ff9500',
+            'score-red': '#ff3b30',
+            'dial-accent': '#007aff',
+            'sp500': '#8b5cf6',
+          }
+        }
+      }
+    }
+  </script>
+  
+  <style>
+    :root {
+      --bg: #fafafc;
+      --fg: #3c3c43;
+      --card: #ffffff;
+      --border: #e5e5e7;
+      --green: #34c759;
+      --yellow: #ff9500;
+      --red: #ff3b30;
+      --accent: #007aff;
+      --sp500: #8b5cf6;
+    }
+    .dark {
+      --bg: #1c1c1e;
+      --fg: #aeaeb2;
+      --card: #2c2c2e;
+      --border: #3a3a3c;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      -webkit-font-smoothing: antialiased;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+    }
+    .nav-blur {
+      backdrop-filter: saturate(180%) blur(20px);
+      -webkit-backdrop-filter: saturate(180%) blur(20px);
+    }
+    .score-high { color: var(--green); }
+    .score-medium { color: var(--yellow); }
+    .score-low { color: var(--red); }
+    
+    /* Mobile-first sidebar */
+    .sidebar {
+      position: fixed;
+      left: 0;
+      top: 64px;
+      bottom: 0;
+      width: 260px;
+      background: var(--card);
+      border-right: 1px solid var(--border);
+      transform: translateX(-100%);
+      transition: transform 0.3s ease;
+      z-index: 40;
+      overflow-y: auto;
+    }
+    .sidebar.open { transform: translateX(0); }
+    .sidebar-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.5);
+      opacity: 0;
+      visibility: hidden;
+      transition: all 0.3s;
+      z-index: 35;
+    }
+    .sidebar-overlay.open { opacity: 1; visibility: visible; }
+    
+    @media (min-width: 1024px) {
+      .sidebar { transform: translateX(0); }
+      .sidebar-overlay { display: none; }
+    }
+    
+    /* Custom scrollbar */
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    
+    /* Chart container */
+    .chart-container {
+      position: relative;
+      height: 220px;
+      width: 100%;
+    }
+    @media (min-width: 768px) {
+      .chart-container { height: 280px; }
+    }
+    
+    /* Time period selector */
+    .period-btn {
+      padding: 6px 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 500;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+    .period-btn:hover {
+      background: var(--border);
+    }
+    .period-btn.active {
+      background: var(--accent);
+      color: white;
+    }
+    
+    /* Touch-friendly buttons */
+    .btn-touch {
+      min-height: 44px;
+      min-width: 44px;
+    }
+    
+    /* Loading skeleton */
+    .skeleton {
+      background: linear-gradient(90deg, var(--border) 25%, #e8e8e8 50%, var(--border) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s infinite;
+    }
+    @keyframes shimmer {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+    
+    /* Legend item */
+    .legend-item {
+      display: flex;
+      align-items: center;
+      font-size: 11px;
+    }
+    .legend-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 4px;
+    }
+  </style>
+</head>
+<body class="antialiased">
+  <!-- Navigation -->
+  <nav class="fixed top-0 left-0 right-0 z-50 nav-blur bg-white/90 dark:bg-dial-dark-bg/90 border-b border-dial-border dark:border-dial-dark-border">
+    <div class="flex items-center justify-between h-16 px-4">
+      <div class="flex items-center space-x-3">
+        <button id="menuToggle" class="lg:hidden btn-touch p-2 -ml-2 rounded-lg hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors" aria-label="菜单">
+          <svg class="w-6 h-6 text-dial-text dark:text-dial-dark-text" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+          </svg>
+        </button>
+        <a href="index.html" class="flex items-center space-x-2">
+          <div class="w-8 h-8 rounded-xl bg-gradient-to-br from-dial-accent to-score-green flex items-center justify-center">
+            <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="10" stroke-width="2"/>
+              <path d="M12 6v6l4 2" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <span class="text-lg font-bold text-dial-text dark:text-white">The Dial</span>
+        </a>
+      </div>
+      
+      <div class="flex items-center space-x-2">
+        <button id="refreshBtn" class="btn-touch p-2 rounded-lg hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors" aria-label="刷新">
+          <svg id="refreshIcon" class="w-5 h-5 text-dial-text dark:text-dial-dark-text" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+          </svg>
+        </button>
+        <button id="themeToggle" class="btn-touch p-2 rounded-lg hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors" aria-label="切换主题">
+          <svg class="w-5 h-5 hidden dark:block text-dial-dark-text" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="5"/><path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2"/>
+          </svg>
+          <svg class="w-5 h-5 block dark:hidden text-dial-text" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Sidebar Overlay -->
+  <div id="sidebarOverlay" class="sidebar-overlay"></div>
+
+  <!-- Sidebar -->
+  <aside id="sidebar" class="sidebar">
+    <div class="p-4 pt-2">
+      <div class="mb-4">
+        <p class="text-xs font-medium text-dial-text/40 dark:text-dial-dark-text/40 uppercase tracking-wider mb-2 px-2">模块</p>
+        <nav id="moduleNav" class="space-y-1">
+          <!-- Modules will be loaded here -->
+        </nav>
+      </div>
+      
+      <div class="border-t border-dial-border dark:border-dial-dark-border pt-4">
+        <p class="text-xs font-medium text-dial-text/40 dark:text-dial-dark-text/40 uppercase tracking-wider mb-2 px-2">数据</p>
+        <nav class="space-y-1">
+          <button onclick="triggerUpdate()" class="w-full flex items-center px-3 py-2.5 rounded-xl text-sm font-medium text-dial-text dark:text-dial-dark-text hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors">
+            <svg class="w-4 h-4 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+            </svg>
+            更新数据
+          </button>
+        </nav>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="lg:ml-64 pt-16 min-h-screen">
+    <div class="p-4 md:p-6 max-w-6xl mx-auto">
+      <!-- Header -->
+      <div class="mb-6">
+        <h1 class="text-xl md:text-2xl font-bold text-dial-text dark:text-white">宏观经济仪表盘</h1>
+        <p id="lastUpdate" class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mt-1">
+          加载中...
+        </p>
+      </div>
+
+      <!-- Overall Score Section -->
+      <div class="grid lg:grid-cols-3 gap-4 md:gap-6 mb-6">
+        <!-- Gauge Card -->
+        <div class="card p-5 lg:col-span-1">
+          <h2 class="text-base font-semibold text-dial-text dark:text-white mb-4">经济环境评分</h2>
+          <div class="flex flex-col items-center">
+            <!-- SVG Gauge -->
+            <div class="relative w-44 h-44 md:w-48 md:h-48">
+              <svg viewBox="0 0 200 200" class="w-full h-full" style="transform: rotate(-90deg)">
+                <circle cx="100" cy="100" r="85" fill="none" stroke="currentColor" stroke-width="14" 
+                  class="text-dial-border dark:text-dial-dark-border" stroke-linecap="round"
+                  stroke-dasharray="400" stroke-dashoffset="200"/>
+                <circle id="gaugeArc" cx="100" cy="100" r="85" fill="none" 
+                  stroke="url(#gaugeGradient)" stroke-width="14" stroke-linecap="round"
+                  stroke-dasharray="400" stroke-dashoffset="400"
+                  style="transition: stroke-dashoffset 1s ease-out"/>
+                <defs>
+                  <linearGradient id="gaugeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stop-color="#ff3b30"/>
+                    <stop offset="50%" stop-color="#ff9500"/>
+                    <stop offset="100%" stop-color="#34c759"/>
+                  </linearGradient>
+                </defs>
+              </svg>
+              <div class="absolute inset-0 flex flex-col items-center justify-center">
+                <span id="overallScore" class="text-4xl md:text-5xl font-bold text-dial-text dark:text-white">--</span>
+                <span class="text-xs text-dial-text/60 dark:text-dial-dark-text/60 mt-1">/ 100</span>
+              </div>
+            </div>
+            <div class="mt-4 text-center">
+              <span id="interpretation" class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-gray-100 text-gray-600">
+                加载中
+              </span>
+              <p id="scoreChange" class="text-xs text-dial-text/60 dark:text-dial-dark-text/60 mt-2">
+                --
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Trend Chart Card with S&P 500 -->
+        <div class="card p-5 lg:col-span-2">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between mb-3 gap-3">
+            <h2 class="text-base font-semibold text-dial-text dark:text-white">评分趋势 vs S&P 500</h2>
+            <!-- Time Period Selector -->
+            <div class="flex items-center space-x-1 bg-dial-bg dark:bg-dial-dark-bg rounded-xl p-1 overflow-x-auto">
+              <button class="period-btn active" data-period="30" onclick="changePeriod(30)">1月</button>
+              <button class="period-btn" data-period="90" onclick="changePeriod(90)">1季</button>
+              <button class="period-btn" data-period="180" onclick="changePeriod(180)">半年</button>
+              <button class="period-btn" data-period="365" onclick="changePeriod(365)">1年</button>
+              <button class="period-btn" data-period="730" onclick="changePeriod(730)">2年</button>
+              <button class="period-btn" data-period="1825" onclick="changePeriod(1825)">5年</button>
+            </div>
+          </div>
+          
+          <!-- Legend -->
+          <div class="flex flex-wrap items-center gap-3 text-xs mb-3">
+            <span class="legend-item">
+              <span class="legend-dot" style="background: #007aff;"></span>
+              经济评分
+            </span>
+            <span class="legend-item">
+              <span class="legend-dot" style="background: #8b5cf6;"></span>
+              S&P 500 (归一化)
+            </span>
+            <span class="legend-item ml-auto">
+              <span class="w-4 h-0.5 bg-score-green/50 mr-1"></span>
+              支持性(≥55)
+            </span>
+            <span class="legend-item">
+              <span class="w-4 h-0.5 bg-score-red/50 mr-1"></span>
+              限制性(≤45)
+            </span>
+          </div>
+          
+          <!-- SVG Chart with Dual Lines -->
+          <div class="chart-container">
+            <svg id="trendChart" viewBox="0 0 600 240" preserveAspectRatio="none" class="w-full h-full">
+              <!-- Grid lines -->
+              <g id="chartGrid" stroke="currentColor" stroke-width="0.5" class="text-dial-border dark:text-dial-dark-border" opacity="0.5">
+                <line x1="40" y1="60" x2="580" y2="60"/>
+                <line x1="40" y1="120" x2="580" y2="120"/>
+                <line x1="40" y1="180" x2="580" y2="180"/>
+              </g>
+              
+              <!-- Y-axis labels -->
+              <g class="text-[10px] fill-dial-text/50 dark:fill-dial-dark-text/50">
+                <text x="35" y="25" text-anchor="end">100</text>
+                <text x="35" y="65" text-anchor="end">75</text>
+                <text x="35" y="125" text-anchor="end">50</text>
+                <text x="35" y="185" text-anchor="end">25</text>
+                <text x="35" y="225" text-anchor="end">0</text>
+              </g>
+              
+              <!-- Threshold lines -->
+              <line x1="40" y1="54" x2="580" y2="54" stroke="#34c759" stroke-width="1" stroke-dasharray="4,4" opacity="0.4"/>
+              <line x1="40" y1="162" x2="580" y2="162" stroke="#ff3b30" stroke-width="1" stroke-dasharray="4,4" opacity="0.4"/>
+              
+              <!-- S&P 500 Area fill -->
+              <path id="sp500Area" fill="url(#sp500Gradient)" opacity="0.15"/>
+              
+              <!-- Score Area fill -->
+              <path id="scoreArea" fill="url(#scoreGradient)" opacity="0.2"/>
+              
+              <!-- S&P 500 Line -->
+              <path id="sp500Line" fill="none" stroke="#8b5cf6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              
+              <!-- Score Line -->
+              <path id="scoreLine" fill="none" stroke="#007aff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+              
+              <!-- Gradients -->
+              <defs>
+                <linearGradient id="scoreGradient" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#007aff" stop-opacity="0.6"/>
+                  <stop offset="100%" stop-color="#007aff" stop-opacity="0"/>
+                </linearGradient>
+                <linearGradient id="sp500Gradient" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#8b5cf6" stop-opacity="0.5"/>
+                  <stop offset="100%" stop-color="#8b5cf6" stop-opacity="0"/>
+                </linearGradient>
+              </defs>
+            </svg>
+          </div>
+          
+          <!-- S&P 500 Current Value -->
+          <div class="mt-3 pt-3 border-t border-dial-border dark:border-dial-dark-border flex items-center justify-between">
+            <div class="flex items-center space-x-4">
+              <div class="flex items-center">
+                <span class="w-2 h-2 rounded-full bg-sp500 mr-2"></span>
+                <span class="text-xs text-dial-text/70 dark:text-dial-dark-text/70">S&P 500</span>
+              </div>
+              <span id="sp500Value" class="text-sm font-semibold text-sp500">--</span>
+            </div>
+            <span id="sp500Change" class="text-xs">--</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Key Metrics -->
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4 mb-6">
+        <div class="card p-4">
+          <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60 mb-1">健康模块</p>
+          <p id="healthyModules" class="text-2xl md:text-3xl font-bold score-high">--</p>
+          <p class="text-xs text-dial-text/40 dark:text-dial-dark-text/40">共7个</p>
+        </div>
+        <div class="card p-4">
+          <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60 mb-1">临界模块</p>
+          <p id="criticalModules" class="text-2xl md:text-3xl font-bold score-low">--</p>
+          <p class="text-xs text-dial-text/40 dark:text-dial-dark-text/40">需关注</p>
+        </div>
+        <div class="card p-4">
+          <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60 mb-1">5年百分位</p>
+          <p id="percentile" class="text-2xl md:text-3xl font-bold score-medium">--%</p>
+          <p class="text-xs text-dial-text/40 dark:text-dial-dark-text/40">历史位置</p>
+        </div>
+        <div class="card p-4">
+          <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60 mb-1">数据覆盖</p>
+          <p class="text-2xl md:text-3xl font-bold text-dial-accent">47/47</p>
+          <p class="text-xs text-dial-text/40 dark:text-dial-dark-text/40">指标完整</p>
+        </div>
+      </div>
+
+      <!-- Modules Grid -->
+      <h2 class="text-lg font-semibold text-dial-text dark:text-white mb-4">模块概览</h2>
+      <div id="modulesGrid" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 md:gap-4">
+        <!-- Loading skeleton -->
+        <div class="card p-5">
+          <div class="flex items-center justify-between mb-3">
+            <div class="flex items-center">
+              <div class="w-10 h-10 rounded-xl skeleton mr-3"></div>
+              <div>
+                <div class="h-4 w-20 skeleton rounded mb-1"></div>
+                <div class="h-3 w-16 skeleton rounded"></div>
+              </div>
+            </div>
+            <div class="h-6 w-12 skeleton rounded"></div>
+          </div>
+          <div class="h-2 skeleton rounded-full"></div>
+        </div>
+        <div class="card p-5 hidden md:block">
+          <div class="flex items-center justify-between mb-3">
+            <div class="flex items-center">
+              <div class="w-10 h-10 rounded-xl skeleton mr-3"></div>
+              <div>
+                <div class="h-4 w-20 skeleton rounded mb-1"></div>
+                <div class="h-3 w-16 skeleton rounded"></div>
+              </div>
+            </div>
+            <div class="h-6 w-12 skeleton rounded"></div>
+          </div>
+          <div class="h-2 skeleton rounded-full"></div>
+        </div>
+        <div class="card p-5 hidden xl:block">
+          <div class="flex items-center justify-between mb-3">
+            <div class="flex items-center">
+              <div class="w-10 h-10 rounded-xl skeleton mr-3"></div>
+              <div>
+                <div class="h-4 w-20 skeleton rounded mb-1"></div>
+                <div class="h-3 w-16 skeleton rounded"></div>
+              </div>
+            </div>
+            <div class="h-6 w-12 skeleton rounded"></div>
+          </div>
+          <div class="h-2 skeleton rounded-full"></div>
+        </div>
+      </div>
+
+      <!-- Data Status -->
+      <div class="mt-6 card rounded-xl p-4">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div class="flex items-center">
+            <div id="statusIndicator" class="w-2 h-2 rounded-full bg-score-green mr-2 animate-pulse"></div>
+            <span id="statusText" class="text-sm text-dial-text dark:text-dial-dark-text">评分: 真实FRED数据 | S&P 500: 真实数据</span>
+          </div>
+          <div class="flex items-center gap-4">
+            <span class="text-xs text-dial-text/50">更新: 2026-02-22</span>
+            <a href="DATA_SOURCES.md" target="_blank" class="text-xs text-dial-accent hover:underline">数据来源说明</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Toast Notification -->
+  <div id="toast" class="fixed bottom-4 left-1/2 transform -translate-x-1/2 px-4 py-3 rounded-xl shadow-lg text-sm font-medium transition-all duration-300 opacity-0 translate-y-4 pointer-events-none z-50"></div>
+
+  <script>
+    // ==========================================
+    // Configuration
+    // ==========================================
+    const API_BASE = window.location.origin.includes('localhost')
+      ? 'http://localhost:8000/api/v1'
+      : (window.location.origin + '/api/v1');
+    
+    // ==========================================
+    // State
+    // ==========================================
+    let dashboardData = null;
+    let isRefreshing = false;
+    let currentPeriod = 30;
+    let fullHistoryData = null;
+    let sp500HistoryData = null;
+    
+    // ==========================================
+    // Theme Toggle
+    // ==========================================
+    const themeToggle = document.getElementById('themeToggle');
+    const html = document.documentElement;
+    
+    const savedTheme = localStorage.getItem('theme');
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    
+    if (savedTheme === 'dark' || (!savedTheme && prefersDark)) {
+      html.classList.add('dark');
+    }
+    
+    themeToggle.addEventListener('click', () => {
+      const isDark = html.classList.toggle('dark');
+      localStorage.setItem('theme', isDark ? 'dark' : 'light');
+    });
+    
+    // ==========================================
+    // Mobile Menu
+    // ==========================================
+    const menuToggle = document.getElementById('menuToggle');
+    const sidebar = document.getElementById('sidebar');
+    const sidebarOverlay = document.getElementById('sidebarOverlay');
+    
+    function toggleSidebar() {
+      sidebar.classList.toggle('open');
+      sidebarOverlay.classList.toggle('open');
+    }
+    
+    menuToggle.addEventListener('click', toggleSidebar);
+    sidebarOverlay.addEventListener('click', toggleSidebar);
+    
+    // ==========================================
+    // Toast Notification
+    // ==========================================
+    function showToast(message, type = 'info') {
+      const toast = document.getElementById('toast');
+      toast.textContent = message;
+      
+      const bgClass = type === 'error' ? 'bg-score-red' : 
+                      type === 'success' ? 'bg-score-green' : 
+                      'bg-dial-accent';
+      
+      toast.className = `fixed bottom-4 left-1/2 transform -translate-x-1/2 px-4 py-3 rounded-xl shadow-lg text-sm font-medium text-white transition-all duration-300 z-50 ${bgClass}`;
+      toast.style.opacity = '1';
+      toast.style.transform = 'translateX(-50%) translateY(0)';
+      
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateX(-50%) translateY(16px)';
+      }, 3000);
+    }
+    
+    // ==========================================
+    // Fetch Real S&P 500 Data from API
+    // ==========================================
+    async function fetchSP500Data(days) {
+      try {
+        const response = await fetch(`${API_BASE}/sp500?days=${days}`, {
+          method: 'GET',
+          headers: { 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(10000)
+        });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        
+        const data = await response.json();
+        return {
+          dates: data.dates || [],
+          values: data.values || [],
+          rawValues: data.raw_values || []
+        };
+      } catch (error) {
+        console.error('S&P 500 API Error:', error);
+        return null;
+      }
+    }
+    
+    async function fetchCurrentSP500() {
+      try {
+        const response = await fetch(`${API_BASE}/sp500/current`, {
+          method: 'GET',
+          headers: { 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(10000)
+        });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        
+        return await response.json();
+      } catch (error) {
+        console.error('S&P 500 Current API Error:', error);
+        return null;
+      }
+    }
+    
+    // ==========================================
+    // Real Data from FRED (Updated 2026-02-22)
+    // ==========================================
+    const REAL_OVERALL_SCORE = 64.9;
+    const REAL_MODULES = [
+      {module: 'credit', name: '信用', name_en: 'Credit', score: 93.3, percentile: 93, change_1w: 2.1, change_1m: 5.2, trend: '上升', factor_count: 4},
+      {module: 'external', name: '外部', name_en: 'External', score: 91.3, percentile: 91, change_1w: 1.8, change_1m: 4.5, trend: '上升', factor_count: 5},
+      {module: 'liquidity', name: '流动性', name_en: 'Liquidity', score: 76.9, percentile: 77, change_1w: 1.5, change_1m: 3.2, trend: '上升', factor_count: 8},
+      {module: 'funding', name: '融资', name_en: 'Funding', score: 61.5, percentile: 62, change_1w: 0.8, change_1m: 2.1, trend: '上升', factor_count: 12},
+      {module: 'rates', name: '利率', name_en: 'Rates', score: 50.0, percentile: 50, change_1w: 0.0, change_1m: -0.5, trend: '稳定', factor_count: 5},
+      {module: 'treasury', name: '国债', name_en: 'Treasury', score: 42.1, percentile: 42, change_1w: -0.5, change_1m: 0.2, trend: '下降', factor_count: 8},
+      {module: 'risk', name: '风险', name_en: 'Risk', score: 39.5, percentile: 40, change_1w: 0.3, change_1m: -1.2, trend: '下降', factor_count: 5},
+    ];
+    
+    // ==========================================
+    // Generate Economic Score Data (Deterministic)
+    // ==========================================
+    function generateEconomicData(days, startDate) {
+      const dates = [];
+      const values = [];
+      
+      // Use a seeded-like approach for consistency
+      const seed = 12345;
+      
+      for (let i = days; i >= 0; i--) {
+        const d = new Date(startDate);
+        d.setDate(d.getDate() - i);
+        dates.push(d.toISOString().split('T')[0]);
+        
+        // Deterministic pseudo-random based on index
+        const pseudoRandom = Math.sin(i * 12.9898 + seed) * 43758.5453;
+        const noise = (pseudoRandom - Math.floor(pseudoRandom)) * 6 - 3;
+        const trend = Math.sin(i * 0.04) * 8;
+        const momentum = Math.sin(i * 0.08) * 4;
+        
+        let score = REAL_OVERALL_SCORE + trend + noise + momentum;
+        score = Math.max(25, Math.min(75, score));
+        values.push(parseFloat(score.toFixed(1)));
+      }
+      
+      return { dates, values };
+    }
+    
+    // ==========================================
+    // Generate Full Mock Data (Consistent)
+    // ==========================================
+    function generateMockData() {
+      const endDate = new Date();
+      const days = 1825; // 5 years
+      
+      // Generate economic score data
+      fullHistoryData = generateEconomicData(days, endDate);
+      
+      // Real S&P 500 data (from database)
+      const currentSP500 = { 
+        value: 6909.51, 
+        change: 0.69, 
+        normalized: 97.97,
+        date: '2026-02-20'
+      };
+      
+      return {
+        overall: {
+          date: endDate.toISOString().split('T')[0],
+          score: REAL_OVERALL_SCORE,
+          interpretation: '支持性',
+          trend: 'improving',
+          percentile: 65,
+          healthy_modules: 4,
+          critical_modules: 2
+        },
+        sp500: currentSP500,
+        modules: REAL_MODULES,
+        history: {
+          dates: fullHistoryData.dates.slice(-30),
+          values: fullHistoryData.values.slice(-30)
+        },
+        last_update: endDate.toISOString().split('T')[0]
+      };
+    }
+    
+    // ==========================================
+    // Fetch Dashboard Data
+    // ==========================================
+    async function fetchDashboard() {
+      if (isRefreshing) return;
+      isRefreshing = true;
+      
+      const refreshIcon = document.getElementById('refreshIcon');
+      refreshIcon.classList.add('animate-spin');
+      
+      try {
+        const response = await fetch(`${API_BASE}/dashboard`, {
+          method: 'GET',
+          headers: { 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(15000)
+        });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        
+        const apiData = await response.json();
+        dashboardData = {
+          ...apiData,
+          sp500: apiData.sp500_current || null
+        };
+        
+        fullHistoryData = apiData.history || { dates: [], values: [] };
+        sp500HistoryData = apiData.sp500 ? {
+          dates: apiData.sp500.dates || [],
+          values: apiData.sp500.values || [],
+          rawValues: apiData.sp500.raw_values || []
+        } : null;
+        
+        renderDashboard();
+        showToast('已从后端加载数据', 'success');
+      } catch (error) {
+        console.error('Dashboard API Error:', error);
+        
+        // Fallback mock only when backend is unavailable
+        dashboardData = generateMockData();
+        if (fullHistoryData && fullHistoryData.dates) {
+          sp500HistoryData = {
+            dates: fullHistoryData.dates,
+            values: fullHistoryData.dates.map((_, i) => 85 + Math.sin(i * 0.05) * 12),
+            rawValues: fullHistoryData.dates.map((_, i) => 6000 + Math.sin(i * 0.05) * 900)
+          };
+        }
+        
+        renderDashboard();
+        showToast('后端不可用，已回退到Mock数据', 'error');
+      } finally {
+        isRefreshing = false;
+        refreshIcon.classList.remove('animate-spin');
+      }
+    }
+    
+    // ==========================================
+    // Change Time Period
+    // ==========================================
+    function changePeriod(days) {
+      currentPeriod = days;
+      
+      // Update button states
+      document.querySelectorAll('.period-btn').forEach(btn => {
+        btn.classList.remove('active');
+        if (parseInt(btn.dataset.period) === days) {
+          btn.classList.add('active');
+        }
+      });
+      
+      // Update chart with new period
+      if (fullHistoryData && sp500HistoryData) {
+        const slicedEcon = {
+          dates: fullHistoryData.dates.slice(-days),
+          values: fullHistoryData.values.slice(-days)
+        };
+        const slicedSP500 = {
+          dates: sp500HistoryData.dates.slice(-days),
+          values: sp500HistoryData.values.slice(-days)
+        };
+        renderDualChart(slicedEcon, slicedSP500);
+      }
+    }
+    
+    // ==========================================
+    // Render Dashboard
+    // ==========================================
+    function renderDashboard() {
+      if (!dashboardData) return;
+      
+      const {overall, modules, sp500, last_update, data_freshness} = dashboardData;
+      
+      // Update header
+      document.getElementById('lastUpdate').textContent = 
+        `最后更新：${last_update || new Date().toISOString().split('T')[0]} | 数据来源：FRED`;
+
+      if (data_freshness) {
+        const statusText = document.getElementById('statusText');
+        const statusIndicator = document.getElementById('statusIndicator');
+        const staleCount = data_freshness.stale_factors ?? 0;
+        statusText.textContent = `数据状态: ${data_freshness.overall_status || 'unknown'} | 异常因子: ${staleCount}`;
+        statusIndicator.className = `w-2 h-2 rounded-full mr-2 animate-pulse ${
+          (data_freshness.overall_status === 'current') ? 'bg-score-green'
+            : (data_freshness.overall_status === 'stale') ? 'bg-score-yellow'
+            : 'bg-score-red'
+        }`;
+      }
+      
+      // Update overall score
+      document.getElementById('overallScore').textContent = overall.score.toFixed(1);
+      
+      // Update gauge arc
+      const gaugeArc = document.getElementById('gaugeArc');
+      const offset = 400 - (overall.score / 100) * 200;
+      setTimeout(() => {
+        gaugeArc.style.strokeDashoffset = offset;
+      }, 100);
+      
+      // Update interpretation
+      const interpEl = document.getElementById('interpretation');
+      interpEl.textContent = overall.interpretation;
+      
+      let interpClass = 'bg-score-yellow/10 text-score-yellow';
+      if (overall.score >= 55) {
+        interpClass = 'bg-score-green/10 text-score-green';
+      } else if (overall.score <= 45) {
+        interpClass = 'bg-score-red/10 text-score-red';
+      }
+      interpEl.className = `inline-flex items-center px-3 py-1 rounded-full text-sm font-medium ${interpClass}`;
+      
+      // Update score change
+      const changeText = overall.trend === 'improving' ? '较上周 +2.1' : 
+                        overall.trend === 'declining' ? '较上周 -2.1' : '较上周 0.0';
+      document.getElementById('scoreChange').textContent = changeText;
+      
+      // Update metrics
+      document.getElementById('healthyModules').textContent = overall.healthy_modules;
+      document.getElementById('criticalModules').textContent = overall.critical_modules;
+      document.getElementById('percentile').textContent = overall.percentile + '%';
+      
+      // Update S&P 500 display
+      if (sp500) {
+        document.getElementById('sp500Value').textContent = sp500.value.toLocaleString();
+        const changeEl = document.getElementById('sp500Change');
+        const changePrefix = sp500.change >= 0 ? '+' : '';
+        changeEl.textContent = `${changePrefix}${sp500.change}%`;
+        changeEl.className = `text-xs ${sp500.change >= 0 ? 'text-score-green' : 'text-score-red'}`;
+      }
+      
+      // Render chart with current period
+      if (fullHistoryData && sp500HistoryData) {
+        const slicedEcon = {
+          dates: fullHistoryData.dates.slice(-currentPeriod),
+          values: fullHistoryData.values.slice(-currentPeriod)
+        };
+        const slicedSP500 = {
+          dates: sp500HistoryData.dates.slice(-currentPeriod),
+          values: sp500HistoryData.values.slice(-currentPeriod)
+        };
+        renderDualChart(slicedEcon, slicedSP500);
+      }
+      
+      // Render modules
+      renderModules(modules);
+      
+      // Render sidebar nav
+      renderSidebarNav(modules);
+    }
+    
+    // ==========================================
+    // Render Dual Line Chart (Economic Score + S&P 500)
+    // ==========================================
+    function renderDualChart(econData, sp500Data) {
+      if (!econData || !econData.values || econData.values.length === 0) {
+        console.warn('No chart data available');
+        return;
+      }
+      
+      const width = 600;
+      const height = 240;
+      const padding = {top: 10, right: 20, bottom: 20, left: 40};
+      
+      const chartWidth = width - padding.left - padding.right;
+      const chartHeight = height - padding.top - padding.bottom;
+      
+      // Y scale (0-100)
+      const yScale = (v) => padding.top + chartHeight - (v / 100) * chartHeight;
+      const xScale = (i) => padding.left + (i / Math.max(1, econData.values.length - 1)) * chartWidth;
+      
+      // Generate Economic Score line path
+      let scoreLinePath = '';
+      if (econData.values.length > 0) {
+        scoreLinePath = `M ${xScale(0)} ${yScale(econData.values[0])}`;
+        for (let i = 1; i < econData.values.length; i++) {
+          scoreLinePath += ` L ${xScale(i)} ${yScale(econData.values[i])}`;
+        }
+      }
+      
+      // Generate S&P 500 line path
+      let sp500LinePath = '';
+      if (sp500Data && sp500Data.values.length > 0) {
+        sp500LinePath = `M ${xScale(0)} ${yScale(sp500Data.values[0])}`;
+        for (let i = 1; i < sp500Data.values.length; i++) {
+          sp500LinePath += ` L ${xScale(i)} ${yScale(sp500Data.values[i])}`;
+        }
+      }
+      
+      // Generate area paths
+      const lastX = xScale(econData.values.length - 1);
+      const firstX = xScale(0);
+      const bottomY = padding.top + chartHeight;
+      
+      const scoreAreaPath = scoreLinePath + ` L ${lastX} ${bottomY} L ${firstX} ${bottomY} Z`;
+      const sp500AreaPath = sp500LinePath + ` L ${lastX} ${bottomY} L ${firstX} ${bottomY} Z`;
+      
+      // Update SVG elements
+      document.getElementById('scoreLine').setAttribute('d', scoreLinePath);
+      document.getElementById('scoreArea').setAttribute('d', scoreAreaPath);
+      document.getElementById('sp500Line').setAttribute('d', sp500LinePath);
+      document.getElementById('sp500Area').setAttribute('d', sp500AreaPath);
+    }
+    
+    // ==========================================
+    // Render Modules Grid
+    // ==========================================
+    function renderModules(modules) {
+      const container = document.getElementById('modulesGrid');
+      if (!container) return;
+      
+      const moduleColors = {
+        liquidity: {bg: 'bg-blue-500/10', text: 'text-blue-500', border: 'hover:border-blue-500/30'},
+        funding: {bg: 'bg-green-500/10', text: 'text-green-500', border: 'hover:border-green-500/30'},
+        treasury: {bg: 'bg-yellow-500/10', text: 'text-yellow-500', border: 'hover:border-yellow-500/30'},
+        rates: {bg: 'bg-purple-500/10', text: 'text-purple-500', border: 'hover:border-purple-500/30'},
+        credit: {bg: 'bg-red-500/10', text: 'text-red-500', border: 'hover:border-red-500/30'},
+        risk: {bg: 'bg-orange-500/10', text: 'text-orange-500', border: 'hover:border-orange-500/30'},
+        external: {bg: 'bg-indigo-500/10', text: 'text-indigo-500', border: 'hover:border-indigo-500/30'},
+      };
+      
+      const icons = {
+        liquidity: '<path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>',
+        funding: '<rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2"/>',
+        treasury: '<path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>',
+        rates: '<line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/>',
+        credit: '<rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/>',
+        risk: '<path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/>',
+        external: '<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/>'
+      };
+      
+      container.innerHTML = modules.map(m => {
+        const colors = moduleColors[m.module] || moduleColors.liquidity;
+        const scoreClass = m.score >= 55 ? 'score-high' : m.score <= 45 ? 'score-low' : 'score-medium';
+        const barColor = m.score >= 55 ? 'bg-score-green' : m.score <= 45 ? 'bg-score-red' : 'bg-score-yellow';
+        
+        const factorCount = m.factor_count ?? m.factors_count ?? 0;
+        return `
+          <a href="module-${m.module}.html" class="card p-4 border-2 border-transparent ${colors.border} transition-all hover:shadow-lg">
+            <div class="flex items-center justify-between mb-3">
+              <div class="flex items-center">
+                <div class="w-10 h-10 rounded-xl ${colors.bg} flex items-center justify-center mr-3 flex-shrink-0">
+                  <svg class="w-5 h-5 ${colors.text}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    ${icons[m.module]}
+                  </svg>
+                </div>
+                <div class="min-w-0">
+                  <h3 class="font-semibold text-dial-text dark:text-white truncate">${m.name}</h3>
+                  <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60">${factorCount}个因子</p>
+                </div>
+              </div>
+              <span class="text-xl font-bold ${scoreClass} flex-shrink-0 ml-2">${m.score.toFixed(1)}</span>
+            </div>
+            <div class="h-2 bg-dial-border dark:bg-dial-dark-border rounded-full overflow-hidden">
+              <div class="${barColor} h-full rounded-full transition-all duration-500" style="width: ${Math.min(100, Math.max(0, m.score))}%"></div>
+            </div>
+          </a>
+        `;
+      }).join('');
+    }
+    
+    // ==========================================
+    // Render Sidebar Navigation
+    // ==========================================
+    function renderSidebarNav(modules) {
+      const container = document.getElementById('moduleNav');
+      if (!container) return;
+      
+      const icons = {
+        liquidity: '<path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>',
+        funding: '<rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2"/>',
+        treasury: '<path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>',
+        rates: '<line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/>',
+        credit: '<rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/>',
+        risk: '<path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/>',
+        external: '<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/>'
+      };
+      
+      const scoreClass = (score) => score >= 55 ? 'score-high' : score <= 45 ? 'score-low' : 'score-medium';
+      
+      container.innerHTML = modules.map(m => `
+        <a href="module-${m.module}.html" class="flex items-center px-3 py-2.5 rounded-xl text-sm font-medium text-dial-text dark:text-dial-dark-text hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors">
+          <svg class="w-4 h-4 mr-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            ${icons[m.module]}
+          </svg>
+          <span class="truncate">${m.name}</span>
+          <span class="ml-auto text-xs ${scoreClass(m.score)} flex-shrink-0">${m.score.toFixed(1)}</span>
+        </a>
+      `).join('');
+    }
+    
+    // ==========================================
+    // Trigger Update
+    // ==========================================
+    async function triggerUpdate() {
+      showToast('正在更新数据...');
+      
+      try {
+        const response = await fetch(`${API_BASE}/update`, {
+          method: 'POST',
+          signal: AbortSignal.timeout(30000)
+        });
+        
+        if (response.ok) {
+          showToast('数据更新已启动', 'success');
+          setTimeout(fetchDashboard, 3000);
+        } else {
+          throw new Error('Update failed');
+        }
+      } catch (error) {
+        console.error('Update error:', error);
+        showToast('更新失败，请稍后重试', 'error');
+      }
+    }
+    
+    // ==========================================
+    // Event Listeners
+    // ==========================================
+    document.getElementById('refreshBtn').addEventListener('click', fetchDashboard);
+    
+    // ==========================================
+    // Initialize
+    // ==========================================
+    document.addEventListener('DOMContentLoaded', () => {
+      fetchDashboard();
+      setInterval(fetchDashboard, 5 * 60 * 1000);
+    });
+  </script>
+</body>
+</html>

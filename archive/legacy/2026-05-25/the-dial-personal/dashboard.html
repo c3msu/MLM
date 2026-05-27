@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>仪表盘 - The Dial</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        'dial-bg': '#fafafc',
+                        'dial-dark-bg': '#1c1c1e',
+                        'dial-card': '#ffffff',
+                        'dial-dark-card': '#2c2c2e',
+                        'dial-border': '#e5e5e7',
+                        'dial-dark-border': '#3a3a3c',
+                        'dial-text': '#3c3c43',
+                        'dial-dark-text': '#aeaeb2',
+                        'score-green': '#34c759',
+                        'score-yellow': '#ff9500',
+                        'score-red': '#ff3b30',
+                        'dial-accent': '#007aff',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        :root {
+            --background: #fafafc;
+            --foreground: #3c3c43;
+            --card: #ffffff;
+            --border: #e5e5e7;
+            --score-green: #34c759;
+            --score-yellow: #ff9500;
+            --score-red: #ff3b30;
+            --accent: #007aff;
+        }
+        .dark {
+            --background: #1c1c1e;
+            --foreground: #aeaeb2;
+            --card: #2c2c2e;
+            --border: #3a3a3c;
+        }
+        body {
+            font-family: 'Inter', system-ui, sans-serif;
+            background-color: var(--background);
+            color: var(--foreground);
+        }
+        .card {
+            background-color: var(--card);
+            border: 1px solid var(--border);
+        }
+        .nav-blur {
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+        }
+        .score-high { color: var(--score-green); }
+        .score-medium { color: var(--score-yellow); }
+        .score-low { color: var(--score-red); }
+        .sidebar-link {
+            transition: all 0.2s ease;
+        }
+        .sidebar-link:hover, .sidebar-link.active {
+            background-color: var(--accent);
+            color: white;
+        }
+    </style>
+</head>
+<body class="antialiased">
+    <!-- Navigation -->
+    <nav class="fixed top-0 left-0 right-0 z-50 nav-blur bg-white/80 dark:bg-dial-dark-bg/80 border-b border-dial-border dark:border-dial-dark-border">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <a href="index.html" class="flex items-center space-x-2">
+                    <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-dial-accent to-score-green flex items-center justify-center">
+                        <i data-lucide="gauge" class="w-5 h-5 text-white"></i>
+                    </div>
+                    <span class="text-xl font-bold text-dial-text dark:text-white">The Dial</span>
+                </a>
+
+                <div class="flex items-center space-x-4">
+                    <button id="themeToggle" class="p-2 rounded-lg hover:bg-dial-border dark:hover:bg-dial-dark-border transition-colors">
+                        <i data-lucide="sun" class="w-5 h-5 hidden dark:block text-dial-dark-text"></i>
+                        <i data-lucide="moon" class="w-5 h-5 block dark:hidden text-dial-text"></i>
+                    </button>
+                    <a href="index.html" class="text-sm font-medium text-dial-text/70 dark:text-dial-dark-text hover:text-dial-accent transition-colors">
+                        返回首页
+                    </a>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="flex pt-16 min-h-screen">
+        <!-- Sidebar -->
+        <aside class="w-64 fixed left-0 top-16 bottom-0 bg-dial-card dark:bg-dial-dark-card border-r border-dial-border dark:border-dial-dark-border overflow-y-auto hidden lg:block">
+            <div class="p-4">
+                <div class="mb-6">
+                    <p class="text-xs font-medium text-dial-text/40 dark:text-dial-dark-text/40 uppercase tracking-wider mb-2">模块</p>
+                    <nav class="space-y-1">
+                        <a href="module-liquidity.html" class="sidebar-link flex items-center px-3 py-2 rounded-lg text-sm font-medium text-dial-text dark:text-dial-dark-text">
+                            <i data-lucide="droplets" class="w-4 h-4 mr-3"></i>
+                            流动性
+                            <span class="ml-auto text-xs score-medium">52.4</span>
+                        </a>
+                        <a href="module-funding.html" class="sidebar-link flex items-center px-3 py-2 rounded-lg text-sm font-medium text-dial-text dark:text-dial-dark-text">
+                            <i data-lucide="banknote" class="w-4 h-4 mr-3"></i>
+                            融资
+                            <span class="ml-auto text-xs score-high">61.2</span>
+                        </a>
+                        <a href="module-treasury.html" class="sidebar-link flex items-center px-3 py-2 rounded-lg text-sm font-medium text-dial-text dark:text-dial-dark-text">
+                            <i data-lucide="landmark" class="w-4 h-4 mr-3"></i>
+                            国债
+                            <span class="ml-auto text-xs score-medium">48.7</span>
+                        </a>
+                        <a href="module-rates.html" class="sidebar-link flex items-center px-3 py-2 rounded-lg text-sm font-medium text-dial-text dark:text-dial-dark-text">
+                            <i data-lucide="percent" class="w-4 h-4 mr-3"></i>
+                            利率
+                            <span class="ml-auto text-xs score-low">42.1</span>
+                        </a>
+                        <a href="module-credit.html" class="sidebar-link flex items-center px-3 py-2 rounded-lg text-sm font-medium text-dial-text dark:text-dial-dark-text">
+                            <i data-lucide="credit-card" class="w-4 h-4 mr-3"></i>
+                            信用
+                            <span class="ml-auto text-xs score-low">38.9</span>
+                        </a>
+                        <a href="module-risk.html" class="sidebar-link flex items-center px-3 py-2 rounded-lg text-sm font-medium text-dial-text dark:text-dial-dark-text">
+                            <i data-lucide="alert-triangle" class="w-4 h-4 mr-3"></i>
+                            风险
+                            <span class="ml-auto text-xs score-medium">45.6</span>
+                        </a>
+                        <a href="module-external.html" class="sidebar-link flex items-center px-3 py-2 rounded-lg text-sm font-medium text-dial-text dark:text-dial-dark-text">
+                            <i data-lucide="globe" class="w-4 h-4 mr-3"></i>
+                            外部
+                            <span class="ml-auto text-xs score-high">58.3</span>
+                        </a>
+                    </nav>
+                </div>
+
+                <div>
+                    <p class="text-xs font-medium text-dial-text/40 dark:text-dial-dark-text/40 uppercase tracking-wider mb-2">数据</p>
+                    <nav class="space-y-1">
+                        <a href="#" class="sidebar-link flex items-center px-3 py-2 rounded-lg text-sm font-medium text-dial-text dark:text-dial-dark-text" onclick="alert('数据更新功能需要Python后端支持')">
+                            <i data-lucide="refresh-cw" class="w-4 h-4 mr-3"></i>
+                            更新数据
+                        </a>
+                        <a href="#" class="sidebar-link flex items-center px-3 py-2 rounded-lg text-sm font-medium text-dial-text dark:text-dial-dark-text" onclick="alert('导出功能需要Python后端支持')">
+                            <i data-lucide="download" class="w-4 h-4 mr-3"></i>
+                            导出数据
+                        </a>
+                    </nav>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="flex-1 lg:ml-64 p-6">
+            <div class="max-w-6xl mx-auto">
+                <!-- Header -->
+                <div class="mb-8">
+                    <h1 class="text-2xl font-bold text-dial-text dark:text-white mb-2">宏观经济仪表盘</h1>
+                    <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">
+                        最后更新：2026年2月22日 | 数据来源：FRED
+                    </p>
+                </div>
+
+                <!-- Overall Score -->
+                <div class="grid lg:grid-cols-3 gap-6 mb-8">
+                    <div class="card rounded-2xl p-6 lg:col-span-1">
+                        <h2 class="text-lg font-semibold text-dial-text dark:text-white mb-4">经济环境评分</h2>
+                        <div class="flex flex-col items-center">
+                            <div class="relative w-48 h-48">
+                                <svg viewBox="0 0 200 200" class="w-full h-full transform -rotate-90">
+                                    <circle cx="100" cy="100" r="90" fill="none" stroke="currentColor" stroke-width="12" class="text-dial-border dark:text-dial-dark-border" stroke-linecap="round"/>
+                                    <circle cx="100" cy="100" r="90" fill="none" stroke="url(#gradient)" stroke-width="12" stroke-linecap="round" stroke-dasharray="283" stroke-dashoffset="146"/>
+                                    <defs>
+                                        <linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                                            <stop offset="0%" stop-color="#ff3b30"/>
+                                            <stop offset="50%" stop-color="#ff9500"/>
+                                            <stop offset="100%" stop-color="#34c759"/>
+                                        </linearGradient>
+                                    </defs>
+                                </svg>
+                                <div class="absolute inset-0 flex flex-col items-center justify-center">
+                                    <span class="text-4xl font-bold text-dial-text dark:text-white">48.3</span>
+                                    <span class="text-xs text-dial-text/60 dark:text-dial-dark-text/60 mt-1">/ 100</span>
+                                </div>
+                            </div>
+                            <div class="mt-4 text-center">
+                                <span class="inline-flex items-center px-3 py-1 rounded-full bg-score-yellow/10 text-score-yellow text-sm font-medium">
+                                    中性偏紧
+                                </span>
+                                <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60 mt-2">
+                                    较上周 -2.1
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card rounded-2xl p-6 lg:col-span-2">
+                        <h2 class="text-lg font-semibold text-dial-text dark:text-white mb-4">评分趋势（30天）</h2>
+                        <canvas id="trendChart" height="200"></canvas>
+                    </div>
+                </div>
+
+                <!-- Key Metrics -->
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+                    <div class="card rounded-xl p-4">
+                        <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-1">健康模块</p>
+                        <p class="text-2xl font-bold score-high">3</p>
+                        <p class="text-xs text-dial-text/40 dark:text-dial-dark-text/40">共7个</p>
+                    </div>
+                    <div class="card rounded-xl p-4">
+                        <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-1">临界模块</p>
+                        <p class="text-2xl font-bold score-low">2</p>
+                        <p class="text-xs text-dial-text/40 dark:text-dial-dark-text/40">需关注</p>
+                    </div>
+                    <div class="card rounded-xl p-4">
+                        <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-1">5年百分位</p>
+                        <p class="text-2xl font-bold score-medium">42%</p>
+                        <p class="text-xs text-dial-text/40 dark:text-dial-dark-text/40">历史中位</p>
+                    </div>
+                    <div class="card rounded-xl p-4">
+                        <p class="text-sm text-dial-text/60 dark:text-dial-dark-text/60 mb-1">数据覆盖</p>
+                        <p class="text-2xl font-bold text-dial-accent">47/47</p>
+                        <p class="text-xs text-dial-text/40 dark:text-dial-dark-text/40">指标完整</p>
+                    </div>
+                </div>
+
+                <!-- Modules Grid -->
+                <h2 class="text-xl font-semibold text-dial-text dark:text-white mb-4">模块概览</h2>
+                <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <a href="module-liquidity.html" class="card rounded-xl p-4 hover:border-dial-accent/50 transition-colors">
+                        <div class="flex items-center justify-between mb-2">
+                            <div class="flex items-center">
+                                <div class="w-10 h-10 rounded-lg bg-blue-500/10 flex items-center justify-center mr-3">
+                                    <i data-lucide="droplets" class="w-5 h-5 text-blue-500"></i>
+                                </div>
+                                <div>
+                                    <h3 class="font-semibold text-dial-text dark:text-white">流动性</h3>
+                                    <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60">8个因子</p>
+                                </div>
+                            </div>
+                            <span class="text-xl font-bold score-medium">52.4</span>
+                        </div>
+                        <div class="w-full bg-dial-border dark:bg-dial-dark-border rounded-full h-2">
+                            <div class="bg-score-yellow h-2 rounded-full" style="width: 52.4%"></div>
+                        </div>
+                    </a>
+
+                    <a href="module-funding.html" class="card rounded-xl p-4 hover:border-dial-accent/50 transition-colors">
+                        <div class="flex items-center justify-between mb-2">
+                            <div class="flex items-center">
+                                <div class="w-10 h-10 rounded-lg bg-green-500/10 flex items-center justify-center mr-3">
+                                    <i data-lucide="banknote" class="w-5 h-5 text-green-500"></i>
+                                </div>
+                                <div>
+                                    <h3 class="font-semibold text-dial-text dark:text-white">融资</h3>
+                                    <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60">12个因子</p>
+                                </div>
+                            </div>
+                            <span class="text-xl font-bold score-high">61.2</span>
+                        </div>
+                        <div class="w-full bg-dial-border dark:bg-dial-dark-border rounded-full h-2">
+                            <div class="bg-score-green h-2 rounded-full" style="width: 61.2%"></div>
+                        </div>
+                    </a>
+
+                    <a href="module-treasury.html" class="card rounded-xl p-4 hover:border-dial-accent/50 transition-colors">
+                        <div class="flex items-center justify-between mb-2">
+                            <div class="flex items-center">
+                                <div class="w-10 h-10 rounded-lg bg-yellow-500/10 flex items-center justify-center mr-3">
+                                    <i data-lucide="landmark" class="w-5 h-5 text-yellow-500"></i>
+                                </div>
+                                <div>
+                                    <h3 class="font-semibold text-dial-text dark:text-white">国债</h3>
+                                    <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60">8个因子</p>
+                                </div>
+                            </div>
+                            <span class="text-xl font-bold score-medium">48.7</span>
+                        </div>
+                        <div class="w-full bg-dial-border dark:bg-dial-dark-border rounded-full h-2">
+                            <div class="bg-score-yellow h-2 rounded-full" style="width: 48.7%"></div>
+                        </div>
+                    </a>
+
+                    <a href="module-rates.html" class="card rounded-xl p-4 hover:border-dial-accent/50 transition-colors">
+                        <div class="flex items-center justify-between mb-2">
+                            <div class="flex items-center">
+                                <div class="w-10 h-10 rounded-lg bg-purple-500/10 flex items-center justify-center mr-3">
+                                    <i data-lucide="percent" class="w-5 h-5 text-purple-500"></i>
+                                </div>
+                                <div>
+                                    <h3 class="font-semibold text-dial-text dark:text-white">利率</h3>
+                                    <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60">5个因子</p>
+                                </div>
+                            </div>
+                            <span class="text-xl font-bold score-low">42.1</span>
+                        </div>
+                        <div class="w-full bg-dial-border dark:bg-dial-dark-border rounded-full h-2">
+                            <div class="bg-score-red h-2 rounded-full" style="width: 42.1%"></div>
+                        </div>
+                    </a>
+
+                    <a href="module-credit.html" class="card rounded-xl p-4 hover:border-dial-accent/50 transition-colors">
+                        <div class="flex items-center justify-between mb-2">
+                            <div class="flex items-center">
+                                <div class="w-10 h-10 rounded-lg bg-red-500/10 flex items-center justify-center mr-3">
+                                    <i data-lucide="credit-card" class="w-5 h-5 text-red-500"></i>
+                                </div>
+                                <div>
+                                    <h3 class="font-semibold text-dial-text dark:text-white">信用</h3>
+                                    <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60">4个因子</p>
+                                </div>
+                            </div>
+                            <span class="text-xl font-bold score-low">38.9</span>
+                        </div>
+                        <div class="w-full bg-dial-border dark:bg-dial-dark-border rounded-full h-2">
+                            <div class="bg-score-red h-2 rounded-full" style="width: 38.9%"></div>
+                        </div>
+                    </a>
+
+                    <a href="module-risk.html" class="card rounded-xl p-4 hover:border-dial-accent/50 transition-colors">
+                        <div class="flex items-center justify-between mb-2">
+                            <div class="flex items-center">
+                                <div class="w-10 h-10 rounded-lg bg-orange-500/10 flex items-center justify-center mr-3">
+                                    <i data-lucide="alert-triangle" class="w-5 h-5 text-orange-500"></i>
+                                </div>
+                                <div>
+                                    <h3 class="font-semibold text-dial-text dark:text-white">风险</h3>
+                                    <p class="text-xs text-dial-text/60 dark:text-dial-dark-text/60">5个因子</p>
+                                </div>
+                            </div>
+                            <span class="text-xl font-bold score-medium">45.6</span>
+                        </div>
+                        <div class="w-full bg-dial-border dark:bg-dial-dark-border rounded-full h-2">
+                            <div class="bg-score-yellow h-2 rounded-full" style="width: 45.6%"></div>
+                        </div>
+                    </a>
+                </div>
+
+                <!-- Data Status -->
+                <div class="mt-8 card rounded-xl p-4">
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center">
+                            <div class="w-2 h-2 rounded-full bg-score-green mr-2 animate-pulse"></div>
+                            <span class="text-sm text-dial-text dark:text-dial-dark-text">数据状态正常</span>
+                        </div>
+                        <div class="text-sm text-dial-text/60 dark:text-dial-dark-text/60">
+                            SQLite数据库 · 本地存储 · 上次更新：2026-02-22
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        lucide.createIcons();
+
+        // Theme toggle
+        const themeToggle = document.getElementById('themeToggle');
+        const html = document.documentElement;
+
+        if (localStorage.getItem('theme') === 'dark' || (!localStorage.getItem('theme') && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+            html.classList.add('dark');
+        }
+
+        themeToggle.addEventListener('click', () => {
+            html.classList.toggle('dark');
+            localStorage.setItem('theme', html.classList.contains('dark') ? 'dark' : 'light');
+        });
+
+        // Trend Chart
+        const ctx = document.getElementById('trendChart').getContext('2d');
+        new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: ['1/23', '1/24', '1/25', '1/26', '1/27', '1/28', '1/29', '1/30', '1/31', '2/1', '2/2', '2/3', '2/4', '2/5', '2/6', '2/7', '2/8', '2/9', '2/10', '2/11', '2/12', '2/13', '2/14', '2/15', '2/16', '2/17', '2/18', '2/19', '2/20', '2/21'],
+                datasets: [{
+                    label: '经济环境评分',
+                    data: [52.1, 51.8, 51.5, 51.2, 50.9, 50.6, 50.3, 50.0, 49.7, 49.4, 49.1, 48.8, 48.5, 48.2, 47.9, 47.6, 47.3, 47.0, 46.7, 46.4, 46.1, 45.8, 45.5, 45.2, 44.9, 44.6, 44.3, 44.0, 43.7, 43.4],
+                    borderColor: '#007aff',
+                    backgroundColor: 'rgba(0, 122, 255, 0.1)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.4
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        display: false
+                    }
+                },
+                scales: {
+                    y: {
+                        min: 0,
+                        max: 100,
+                        grid: {
+                            color: 'rgba(0,0,0,0.05)'
+                        }
+                    },
+                    x: {
+                        grid: {
+                            display: false
+                        }
+                    }
+                }
+            }
+        });
+    </script>
+</body>
+</html>
