@@ -71,6 +71,52 @@ This overlay is deliberately separate from the Treasury trade rule direction.
 It can provide risk-context for SPY/SPX exposure, but it does not flip duration,
 curve, front-end, or breakeven views.
 
+## SPY Early Warning Index
+
+`spyEarlyWarning` is the dashboard's equity-risk overlay. It is generated from
+the existing Conditions Score components and `macroLiquidityEquity.currentSignal`
+instead of adding a new data feed. The 0-100 score reads higher as greater
+SPY/SPX drawdown risk.
+
+Sleeves:
+
+- Macro level: low Conditions Score creates a risk floor.
+- Macro deterioration: 3-month Conditions Score declines, especially from a
+  high-score state, raise warning risk.
+- Liquidity, funding, rates/curve, credit/volatility, and external-shock
+  sleeves: existing component scores are inverted into risk pressure.
+- Nonlinear calibration: the weighted sleeve `baseScore` is scaled by 1.08x;
+  explicit `amplifiers` are added for severe 3-month deterioration, high-score
+  rollover, low-score fragility without clear improvement, low-score
+  improvement stall, rally fragility, and a narrow strong-rally rollover
+  confirmation; explicit `dampeners` subtract stale post-selloff warning noise.
+  This keeps the current improving 2026-06-01 snapshot Neutral while moving
+  2022-style sharp rollovers, the 2023-07 strong-rally rollover, and stalled
+  2025 low-score recoveries into Caution/De-risk.
+
+Empirical calibration:
+
+- The target is 3-month S&P 500 price-index drawdown and negative forward-return
+  warning, not raw return maximization.
+- The initial diagnostics used the existing 5-year monthly lead-study sample.
+  High VIX, CP-TBill, curve inversion, WTI/oil-volatility shock, NFCI, and
+  high-score environments rolling over were the most useful warning families.
+- The nonlinear layer was added after the first continuous score compressed the
+  usable forward-tested history into 37.1-58.9. The revised score spans
+  40.1-81.6 on the same sample and better separates 2022-03/04 deep-drawdown
+  warnings from ordinary Neutral readings.
+- The second pass added post-selloff dampening. On the same 57 usable
+  forward-tested rows, `>=60` keeps 8 true drawdown warnings while reducing
+  false positives from 16 to 12.
+- The third pass added strong-rally rollover confirmation. On the same sample,
+  `>=60` catches 9 true drawdown warnings while false positives stay at 12.
+- The fourth pass added low-score improvement-stall confirmation. On the same
+  sample, `>=60` catches 11 true drawdown warnings while false positives stay
+  at 12.
+- The output maps to allocation guidance: constructive, neutral, caution, and
+  de-risk. It can guide SPY/SPX exposure sizing or hedging, but it remains a
+  risk-control overlay and not a standalone forecast.
+
 If `content/overrides.json` supplies `ideas`, those manual cards replace the
 generated section-09 payload as supplied. The API will not invent
 `confidence*` or `equityImpact` fields for manual overrides. The browser still

@@ -54,6 +54,10 @@ history, and optional daily background updates.
   from `conclusionAudit` so weaker evidence is visible beside the trade view,
   plus a historical S&P 500 price-index proxy for SPY impact block based on
   matching Conditions Score level and 3-month score-change buckets.
+- SPY Early Warning Index: an equity-specific 0-100 drawdown-warning overlay
+  that reuses the existing Conditions Score components plus 3-month score
+  deterioration. High values mean greater SPY/SPX drawdown risk and map to
+  equity allocation guidance from constructive through de-risk.
 - Local REST API routes when using `scripts/serve.py`.
 - Daily background update entrypoints through the local Python server or macOS
   LaunchAgent.
@@ -168,6 +172,12 @@ Current real public sources:
   machinery across 30 scored factors and 7 bhadial modules. High funding,
   credit, volatility, dollar, and energy stress are inverse-scored or
   shock-scored when high values indicate a less supportive backdrop.
+- The SPY Early Warning Index is separate from the headline Conditions Score.
+  It converts the same component scores into risk sleeves for macro level,
+  macro deterioration, liquidity, funding, rates/curve, credit/volatility, and
+  external shocks. It is calibrated against the existing monthly S&P 500
+  lead-study diagnostics and should be read as a risk-control overlay, not a
+  standalone return forecast.
 - The duration/curve conclusion audit uses the editable scorecard, not the
   0-100 Conditions Score. Individual factor contribution is `factor score *
   normalized module weight / factor count`; source modes then discount evidence
@@ -243,6 +253,7 @@ REST slices:
 - `/api/events`
 - `/api/news`
 - `/api/ideas`
+- `/api/spy_early_warning`
 - `/api/source_status`
 - `/api/source-status`
 - `/api/history`

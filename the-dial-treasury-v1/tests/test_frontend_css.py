@@ -179,6 +179,18 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn(".macro-liquidity-hover-guide", css)
         self.assertIn(".macro-trend-modal-chart", css)
 
+    def test_macro_liquidity_trend_chart_includes_spy_early_warning_overlay(self):
+        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn("spyWarningTrendPanel", app_js)
+        self.assertIn("prepareMacroLiquidityComparisonSeries(trend, options.equity || macroLiquidityEquityPanel(), options.warning || spyWarningTrendPanel())", app_js)
+        self.assertIn("macro-liquidity-spy-warning-line", app_js)
+        self.assertIn("SPY Early Warning", app_js)
+        self.assertIn("spyWarning", app_js)
+        self.assertIn(".macro-liquidity-spy-warning-line", css)
+        self.assertIn(".macro-liquidity-spy-warning-dot", css)
+
     def test_macro_liquidity_equity_lead_panel_is_mounted(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
         app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
@@ -205,6 +217,10 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn("renderLiquidityLeadLag", app_js)
         self.assertIn("renderLiquidityChangeBuckets", app_js)
         self.assertIn("macroLiquidityEquity", app_js)
+        self.assertIn("baseScore", app_js)
+        self.assertIn("风险放大", app_js)
+        self.assertIn("dampeners", app_js)
+        self.assertIn("风险降噪", app_js)
         self.assertIn(".liquidity-equity-panel", css)
         self.assertIn(".liquidity-equity-signal", css)
         self.assertIn(".liquidity-state-grid", css)

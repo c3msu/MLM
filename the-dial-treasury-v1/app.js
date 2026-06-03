@@ -89,6 +89,21 @@ const DEFAULT_DATA = {
     buckets: [],
     series: []
   },
+  spyEarlyWarning: {
+    available: false,
+    title: "SPY Early Warning Index",
+    score: null,
+    baseScore: null,
+    regime: "Unavailable",
+    regimeCn: "不可用",
+    summary: "HTTP模式读取 data/dashboard.json 后显示SPY预警指标。",
+    allocation: { stance: "等待", equityExposure: "不调整", hedgeAction: "等待更多数据", tone: "neutral" },
+    amplifiers: [],
+    dampeners: [],
+    sleeves: [],
+    drivers: [],
+    backtest: { target: "3M SPX drawdown and negative forward-return warning", sampleSize: 0 }
+  },
   groups: [
     {
       id: "g1",
@@ -1382,9 +1397,13 @@ function renderMacroLiquidityScore() {
   const trendChartNode = $("#macroLiquidityTrendChart");
   const equityPanel = macroLiquidityEquityPanel();
   if (trendChartNode) {
-    trendChartNode.innerHTML = renderMacroLiquidityTrendChart(panel.trend || {}, { equity: equityPanel });
+    trendChartNode.innerHTML = renderMacroLiquidityTrendChart(panel.trend || {}, {
+      equity: equityPanel,
+      warning: spyWarningTrendPanel(),
+    });
     bindMacroLiquidityTrendInteractions(trendChartNode, panel.trend || {}, {
       equity: equityPanel,
+      warning: spyWarningTrendPanel(),
       tooltipSelector: "#macroLiquidityTrendTooltip",
     });
   }
@@ -1454,6 +1473,8 @@ function renderMacroLiquidityEquityLead() {
   }
   const read = $("#liquidityEquityRead");
   if (read) read.textContent = panel.conclusion || "暂无历史领先性检验。";
+  const warningNode = $("#spyEarlyWarning");
+  if (warningNode) warningNode.innerHTML = renderSpyEarlyWarning(state.spyEarlyWarning || DEFAULT_DATA.spyEarlyWarning);
   const signalNode = $("#liquidityEquitySignal");
   if (signalNode) signalNode.innerHTML = renderLiquidityCurrentSignal(panel.currentSignal || {});
   const stateGridNode = $("#liquidityEquityStateGrid");
@@ -1491,6 +1512,79 @@ function renderMacroLiquidityEquityLead() {
   if (changeNode) changeNode.innerHTML = renderLiquidityChangeBuckets(panel.changeBuckets || []);
   const rollingNode = $("#liquidityEquityRolling");
   if (rollingNode) rollingNode.innerHTML = renderLiquidityRolling(panel.rollingCorrelation || {}, panel.drawdownRisk || {});
+}
+
+function renderSpyEarlyWarning(warning) {
+  const item = warning && typeof warning === "object" ? warning : DEFAULT_DATA.spyEarlyWarning;
+  if (!item.available) {
+    return `<div class="empty-state compact">${escapeHtml(item.summary || "暂无SPY预警指标")}</div>`;
+  }
+  const score = Number(item.score);
+  const baseScore = Number(item.baseScore);
+  const riskClass = spyWarningClass(score);
+  const allocation = item.allocation && typeof item.allocation === "object" ? item.allocation : {};
+  const amplifiers = Array.isArray(item.amplifiers) ? item.amplifiers : [];
+  const dampeners = Array.isArray(item.dampeners) ? item.dampeners : [];
+  const amplifierText = amplifiers.length ? amplifiers.map((amplifier) => {
+    const label = escapeHtml(amplifier && (amplifier.label || amplifier.key) ? amplifier.label || amplifier.key : "风险放大");
+    const boost = Number(amplifier && amplifier.scoreBoost);
+    return `${label}${Number.isFinite(boost) ? ` +${boost.toFixed(0)}` : ""}`;
+  }).join(" · ") : "无";
+  const dampenerText = dampeners.length ? dampeners.map((dampener) => {
+    const label = escapeHtml(dampener && (dampener.label || dampener.key) ? dampener.label || dampener.key : "风险降噪");
+    const offset = Number(dampener && dampener.scoreOffset);
+    return `${label}${Number.isFinite(offset) ? ` ${offset.toFixed(0)}` : ""}`;
+  }).join(" · ") : "无";
+  const sleeves = Array.isArray(item.sleeves) ? item.sleeves : [];
+  const drivers = Array.isArray(item.drivers) ? item.drivers : [];
+  const backtest = item.backtest && typeof item.backtest === "object" ? item.backtest : {};
+  return `
+    <div class="spy-warning-head ${riskClass}">
+      <div>
+        <span>SPY Early Warning</span>
+        <strong>${Number.isFinite(score) ? score.toFixed(1) : "--"}</strong>
+      </div>
+      <div>
+        <b>${escapeHtml(item.regimeCn || item.regime || "--")}</b>
+        <small>${escapeHtml(allocation.stance || "--")} · ${escapeHtml(allocation.equityExposure || "--")}</small>
+      </div>
+    </div>
+    <p class="spy-warning-summary">${escapeHtml(item.summary || "")}</p>
+    <div class="spy-warning-calibration">
+      <span><b>基础分</b><strong>${Number.isFinite(baseScore) ? baseScore.toFixed(1) : "--"}</strong></span>
+      <span><b>风险放大</b><strong>${amplifierText}</strong></span>
+      <span><b>风险降噪</b><strong>${dampenerText}</strong></span>
+    </div>
+    <div class="spy-warning-sleeves">
+      ${sleeves.map((sleeve) => {
+        const sleeveScore = Number(sleeve.score);
+        return `
+          <div class="spy-warning-sleeve ${spyWarningClass(sleeveScore)}">
+            <span>${escapeHtml(sleeve.label || sleeve.key || "")}</span>
+            <strong>${Number.isFinite(sleeveScore) ? sleeveScore.toFixed(0) : "--"}</strong>
+          </div>
+        `;
+      }).join("")}
+    </div>
+    <div class="spy-warning-drivers">
+      <span>主要驱动</span>
+      ${drivers.length ? drivers.slice(0, 4).map((driver) => `
+        <b>${escapeHtml(driver.name || "")}<small>${escapeHtml(driver.sleeve || "")} · ${Number.isFinite(Number(driver.riskScore)) ? Number(driver.riskScore).toFixed(0) : "--"}</small></b>
+      `).join("") : `<em>暂无高风险驱动</em>`}
+    </div>
+    <div class="spy-warning-foot">
+      <span>${escapeHtml(allocation.hedgeAction || "")}</span>
+      <em>${Number(backtest.sampleSize) || 0} obs · ${escapeHtml(backtest.target || "3M warning test")}</em>
+    </div>
+  `;
+}
+
+function spyWarningClass(score) {
+  const numeric = Number(score);
+  if (!Number.isFinite(numeric)) return "neutral";
+  if (numeric >= 60) return "restrictive";
+  if (numeric >= 40) return "neutral";
+  return "supportive";
 }
 
 function renderLiquidityCurrentSignal(signal) {
@@ -1696,7 +1790,7 @@ function renderMacroLiquidityTrend(trend) {
 }
 
 function renderMacroLiquidityTrendChart(trend, options = {}) {
-  const prepared = prepareMacroLiquidityComparisonSeries(trend, options.equity || macroLiquidityEquityPanel());
+  const prepared = prepareMacroLiquidityComparisonSeries(trend, options.equity || macroLiquidityEquityPanel(), options.warning || spyWarningTrendPanel());
   const series = prepared.series;
   if (series.length < 2) return `<div class="empty-state compact">综合评分历史趋势样本不足</div>`;
   const scale = macroLiquidityComparisonScale(series, options);
@@ -1705,12 +1799,16 @@ function renderMacroLiquidityTrendChart(trend, options = {}) {
   const areaPath = `${liquidityPath} L${x(series[series.length - 1].time).toFixed(1)},${yPercentile(0).toFixed(1)} L${x(series[0].time).toFixed(1)},${yPercentile(0).toFixed(1)} Z`;
   const spxSeries = series.filter((point) => Number.isFinite(point.spxIndexed));
   const spxPath = spxSeries.length >= 2 ? macroLiquidityPath(spxSeries, x, ySpx, "spxIndexed") : "";
+  const warningSeries = series.filter((point) => Number.isFinite(point.spyWarning));
+  const warningPath = warningSeries.length >= 2 ? macroLiquidityPath(warningSeries, x, yPercentile, "spyWarning") : "";
   const latest = series[series.length - 1];
   const latestSpx = [...spxSeries].reverse().find((point) => point.time <= latest.time) || spxSeries[spxSeries.length - 1];
+  const latestWarning = [...warningSeries].reverse().find((point) => point.time <= latest.time) || warningSeries[warningSeries.length - 1];
   const dateTicks = buildDateTicks(series, options.large ? 7 : 5);
   const spxLabel = spxSeries.length >= 2 ? `S&P 500 indexed ${latestSpx?.spxIndexed?.toFixed(0) || "--"}` : "S&P 500 indexed --";
+  const warningLabel = warningSeries.length >= 2 ? `SPY Early Warning ${latestWarning?.spyWarning?.toFixed(0) || "--"}` : "SPY Early Warning --";
   return `
-    <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Conditions score historical percentile trend versus S&P 500" data-macro-liquidity-chart>
+    <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Conditions score historical percentile trend versus S&P 500 and SPY Early Warning" data-macro-liquidity-chart>
       <rect x="0" y="0" width="${W}" height="${H}" fill="transparent"></rect>
       ${[20, 50, 80].map((tick) => `
         <line x1="${pad.l}" x2="${W - pad.r}" y1="${yPercentile(tick).toFixed(1)}" y2="${yPercentile(tick).toFixed(1)}"></line>
@@ -1721,14 +1819,18 @@ function renderMacroLiquidityTrendChart(trend, options = {}) {
       `).join("")}
       <path d="${areaPath}" class="macro-liquidity-trend-area"></path>
       ${spxPath ? `<path d="${spxPath}" class="macro-liquidity-spx-line"></path>` : ""}
+      ${warningPath ? `<path d="${warningPath}" class="macro-liquidity-spy-warning-line"></path>` : ""}
       <path d="${liquidityPath}" class="macro-liquidity-trend-line"></path>
       <line class="macro-liquidity-hover-guide" x1="${pad.l}" x2="${pad.l}" y1="${pad.t}" y2="${H - pad.b}"></line>
       <circle class="macro-liquidity-hover-dot liquidity" cx="${pad.l}" cy="${pad.t}" r="${options.large ? "5.2" : "4.2"}"></circle>
       <circle class="macro-liquidity-hover-dot spx" cx="${pad.l}" cy="${pad.t}" r="${options.large ? "5.0" : "4.0"}"></circle>
+      <circle class="macro-liquidity-hover-dot spy-warning" cx="${pad.l}" cy="${pad.t}" r="${options.large ? "5.0" : "4.0"}"></circle>
       <circle class="macro-liquidity-trend-dot" cx="${x(latest.time).toFixed(1)}" cy="${yPercentile(latest.percentile).toFixed(1)}" r="${options.large ? "5.0" : "4.2"}"></circle>
       ${latestSpx ? `<circle class="macro-liquidity-spx-dot" cx="${x(latestSpx.time).toFixed(1)}" cy="${ySpx(latestSpx.spxIndexed).toFixed(1)}" r="${options.large ? "4.8" : "3.8"}"></circle>` : ""}
+      ${latestWarning ? `<circle class="macro-liquidity-spy-warning-dot" cx="${x(latestWarning.time).toFixed(1)}" cy="${yPercentile(latestWarning.spyWarning).toFixed(1)}" r="${options.large ? "4.8" : "3.8"}"></circle>` : ""}
       <text x="${W - pad.r}" y="16" text-anchor="end">综合评分历史分位 · ${series.length} obs</text>
       <text x="${W - pad.r}" y="31" text-anchor="end" class="macro-liquidity-spx-label">${spxLabel}</text>
+      <text x="${W - pad.r}" y="46" text-anchor="end" class="macro-liquidity-spy-warning-label">${warningLabel}</text>
       <text x="${W - 8}" y="${ySpx(scale.spxHigh).toFixed(1) + 4}" text-anchor="end" class="macro-liquidity-spx-axis">${scale.spxHigh.toFixed(0)}</text>
       <text x="${W - 8}" y="${ySpx(scale.spxLow).toFixed(1) + 4}" text-anchor="end" class="macro-liquidity-spx-axis">${scale.spxLow.toFixed(0)}</text>
       <text x="${x(latest.time).toFixed(1) - 8}" y="${Math.max(16, yPercentile(latest.percentile) - 8).toFixed(1)}" text-anchor="end">p${latest.percentile.toFixed(0)}</text>
@@ -1740,7 +1842,11 @@ function macroLiquidityEquityPanel() {
   return state.macroLiquidityEquity || DEFAULT_DATA.macroLiquidityEquity || {};
 }
 
-function prepareMacroLiquidityComparisonSeries(trend, equityPanel = {}) {
+function spyWarningTrendPanel() {
+  return state.spyEarlyWarning || DEFAULT_DATA.spyEarlyWarning || {};
+}
+
+function prepareMacroLiquidityComparisonSeries(trend, equityPanel = {}, warningPanel = {}) {
   const equityRows = Array.isArray(equityPanel.series) ? equityPanel.series : [];
   const spxByMonth = new Map();
   equityRows.forEach((point) => {
@@ -1753,11 +1859,24 @@ function prepareMacroLiquidityComparisonSeries(trend, equityPanel = {}) {
       trailing3m: Number(point.sp500Trailing3m),
     });
   });
+  const warningRows = Array.isArray(warningPanel?.trend?.points) ? warningPanel.trend.points : [];
+  const warningByMonth = new Map();
+  warningRows.forEach((point) => {
+    const time = Date.parse(point.date);
+    const score = Number(point.score);
+    if (!Number.isFinite(time) || !Number.isFinite(score)) return;
+    warningByMonth.set(monthKeyFromTime(time), {
+      score: Math.max(0, Math.min(100, score)),
+      regime: point.regime || "",
+      regimeCn: point.regimeCn || "",
+    });
+  });
   const points = Array.isArray(trend?.points) ? trend.points : [];
   const series = points
     .map((point) => {
       const time = Date.parse(point.date);
       const spx = Number.isFinite(time) ? spxByMonth.get(monthKeyFromTime(time)) : null;
+      const warning = Number.isFinite(time) ? warningByMonth.get(monthKeyFromTime(time)) : null;
       return {
         time,
         date: point.date,
@@ -1766,10 +1885,17 @@ function prepareMacroLiquidityComparisonSeries(trend, equityPanel = {}) {
         spxIndexed: spx?.spxIndexed,
         sp500: spx?.sp500,
         sp500Trailing3m: spx?.trailing3m,
+        spyWarning: warning?.score,
+        spyWarningRegime: warning?.regime,
+        spyWarningRegimeCn: warning?.regimeCn,
       };
     })
     .filter((point) => Number.isFinite(point.time) && Number.isFinite(point.percentile));
-  return { series, hasSpx: series.some((point) => Number.isFinite(point.spxIndexed)) };
+  return {
+    series,
+    hasSpx: series.some((point) => Number.isFinite(point.spxIndexed)),
+    hasSpyWarning: series.some((point) => Number.isFinite(point.spyWarning)),
+  };
 }
 
 function monthKeyFromTime(time) {
@@ -1806,12 +1932,13 @@ function bindMacroLiquidityTrendInteractions(chartNode, trend, options = {}) {
   const svg = chartNode?.querySelector("[data-macro-liquidity-chart]");
   const tooltip = $(options.tooltipSelector || "#macroLiquidityTrendTooltip");
   if (!svg || !tooltip) return;
-  const prepared = prepareMacroLiquidityComparisonSeries(trend, options.equity || macroLiquidityEquityPanel());
+  const prepared = prepareMacroLiquidityComparisonSeries(trend, options.equity || macroLiquidityEquityPanel(), options.warning || spyWarningTrendPanel());
   if (prepared.series.length < 2) return;
   const scale = macroLiquidityComparisonScale(prepared.series, options);
   const guide = svg.querySelector(".macro-liquidity-hover-guide");
   const liquidityDot = svg.querySelector(".macro-liquidity-hover-dot.liquidity");
   const spxDot = svg.querySelector(".macro-liquidity-hover-dot.spx");
+  const spyWarningDot = svg.querySelector(".macro-liquidity-hover-dot.spy-warning");
   svg.addEventListener("mousemove", (event) => {
     const rect = svg.getBoundingClientRect();
     const svgX = ((event.clientX - rect.left) / Math.max(1, rect.width)) * scale.W;
@@ -1831,12 +1958,20 @@ function bindMacroLiquidityTrendInteractions(chartNode, trend, options = {}) {
     } else {
       spxDot?.setAttribute("opacity", "0");
     }
+    if (Number.isFinite(point.spyWarning)) {
+      spyWarningDot?.setAttribute("cx", pointX.toFixed(1));
+      spyWarningDot?.setAttribute("cy", scale.yPercentile(point.spyWarning).toFixed(1));
+      spyWarningDot?.setAttribute("opacity", "1");
+    } else {
+      spyWarningDot?.setAttribute("opacity", "0");
+    }
     renderMacroLiquidityComparisonTooltip(tooltip, chartNode, event, point);
   });
   svg.addEventListener("mouseleave", () => {
     guide?.setAttribute("stroke-opacity", "0");
     liquidityDot?.setAttribute("opacity", "0");
     spxDot?.setAttribute("opacity", "0");
+    spyWarningDot?.setAttribute("opacity", "0");
     tooltip.hidden = true;
   });
 }
@@ -1856,11 +1991,14 @@ function nearestMacroLiquidityPoint(points, svgX, scale) {
 
 function renderMacroLiquidityComparisonTooltip(tooltip, chartNode, event, point) {
   const spxText = Number.isFinite(point.spxIndexed) ? `S&P 500 indexed ${point.spxIndexed.toFixed(1)}` : "S&P 500 indexed --";
+  const warningText = Number.isFinite(point.spyWarning)
+    ? `SPY Early Warning ${point.spyWarning.toFixed(1)}${point.spyWarningRegimeCn ? ` · ${point.spyWarningRegimeCn}` : ""}`
+    : "SPY Early Warning --";
   const trailing = Number.isFinite(point.sp500Trailing3m) ? ` · 3M ${formatSignedMetric(point.sp500Trailing3m, 2)}%` : "";
   tooltip.innerHTML = `
     <b>${escapeHtml(point.date)} · p${point.percentile.toFixed(0)}</b>
     <span>综合评分 ${Number.isFinite(point.score) ? point.score.toFixed(1) : "--"} · ${escapeHtml(spxText)}</span>
-    <small>${Number.isFinite(point.sp500) ? `SPX ${point.sp500.toFixed(2)}` : "SPX --"}${trailing}</small>
+    <small>${escapeHtml(warningText)} · ${Number.isFinite(point.sp500) ? `SPX ${point.sp500.toFixed(2)}` : "SPX --"}${trailing}</small>
   `;
   const parentRect = (tooltip.offsetParent || chartNode).getBoundingClientRect();
   tooltip.hidden = false;
@@ -1891,9 +2029,11 @@ function renderMacroLiquidityTrendModalChart() {
   if (!node) return;
   const panel = state.macroLiquidity || DEFAULT_DATA.macroLiquidity || {};
   const equityPanel = macroLiquidityEquityPanel();
-  node.innerHTML = renderMacroLiquidityTrendChart(panel.trend || {}, { equity: equityPanel, large: true });
+  const warningPanel = spyWarningTrendPanel();
+  node.innerHTML = renderMacroLiquidityTrendChart(panel.trend || {}, { equity: equityPanel, warning: warningPanel, large: true });
   bindMacroLiquidityTrendInteractions(node, panel.trend || {}, {
     equity: equityPanel,
+    warning: warningPanel,
     large: true,
     tooltipSelector: "#macroLiquidityTrendModalTooltip",
   });

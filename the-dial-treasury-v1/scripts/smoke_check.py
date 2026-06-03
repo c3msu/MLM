@@ -68,6 +68,8 @@ def validate_dashboard(dashboard: dict[str, Any]) -> list[str]:
         issues.append("missing cross-market history series")
     if not ideas_have_investment_contract(dashboard.get("ideas", [])):
         issues.append("investment ideas missing confidence/equityImpact contract")
+    if not has_spy_early_warning_contract(dashboard.get("spyEarlyWarning")):
+        issues.append("missing SPY early-warning contract")
     return issues
 
 
@@ -133,6 +135,78 @@ def ideas_have_investment_contract(ideas: Any) -> bool:
             return False
         if not isinstance(impact.get("sampleSize"), int):
             return False
+    return True
+
+
+def has_spy_early_warning_contract(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("available") is not True:
+        return False
+    score = payload.get("score")
+    if not isinstance(score, (int, float)) or not 0 <= float(score) <= 100:
+        return False
+    base_score = payload.get("baseScore")
+    if not isinstance(base_score, (int, float)) or not 0 <= float(base_score) <= 100:
+        return False
+    amplifiers = payload.get("amplifiers")
+    if not isinstance(amplifiers, list):
+        return False
+    for amplifier in amplifiers:
+        if not isinstance(amplifier, dict):
+            return False
+        if not isinstance(amplifier.get("key"), str) or not amplifier.get("key"):
+            return False
+        if not isinstance(amplifier.get("label"), str) or not amplifier.get("label"):
+            return False
+        if not isinstance(amplifier.get("scoreBoost"), (int, float)):
+            return False
+    dampeners = payload.get("dampeners")
+    if not isinstance(dampeners, list):
+        return False
+    for dampener in dampeners:
+        if not isinstance(dampener, dict):
+            return False
+        if not isinstance(dampener.get("key"), str) or not dampener.get("key"):
+            return False
+        if not isinstance(dampener.get("label"), str) or not dampener.get("label"):
+            return False
+        if not isinstance(dampener.get("scoreOffset"), (int, float)):
+            return False
+    for key in ("regime", "summary"):
+        if not isinstance(payload.get(key), str) or not payload.get(key):
+            return False
+    allocation = payload.get("allocation")
+    if not isinstance(allocation, dict):
+        return False
+    for key in ("stance", "equityExposure", "hedgeAction"):
+        if not isinstance(allocation.get(key), str) or not allocation.get(key):
+            return False
+    if not isinstance(payload.get("sleeves"), list) or not payload["sleeves"]:
+        return False
+    if not isinstance(payload.get("drivers"), list):
+        return False
+    trend = payload.get("trend")
+    if not isinstance(trend, dict) or trend.get("available") is not True:
+        return False
+    points = trend.get("points")
+    if not isinstance(points, list) or not points:
+        return False
+    for point in points:
+        if not isinstance(point, dict):
+            return False
+        if not parse_iso_date(point.get("date")):
+            return False
+        point_score = point.get("score")
+        if not isinstance(point_score, (int, float)) or not 0 <= float(point_score) <= 100:
+            return False
+    backtest = payload.get("backtest")
+    if not isinstance(backtest, dict):
+        return False
+    if backtest.get("target") != "3M SPX drawdown and negative forward-return warning":
+        return False
+    if not isinstance(backtest.get("sampleSize"), int):
+        return False
     return True
 
 

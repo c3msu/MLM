@@ -1,6 +1,6 @@
 import unittest
 
-from scripts.smoke_check import validate_dashboard
+from scripts.smoke_check import has_spy_early_warning_contract, validate_dashboard
 
 
 class SmokeCheckTests(unittest.TestCase):
@@ -60,6 +60,37 @@ class SmokeCheckTests(unittest.TestCase):
                     },
                 }
             ],
+            "spyEarlyWarning": {
+                "available": True,
+                "score": 52.4,
+                "baseScore": 48.0,
+                "regime": "Neutral",
+                "summary": "SPY预警52.4,处于中性: 宏观评分改善,但外部冲击仍需跟踪。",
+                "allocation": {
+                    "stance": "持有/控仓",
+                    "equityExposure": "维持核心仓位,避免追高",
+                    "hedgeAction": "等待信用/波动或评分转弱确认",
+                },
+                "amplifiers": [
+                    {"key": "rallyFragility", "label": "上涨后宏观转弱", "scoreBoost": 6.0},
+                ],
+                "dampeners": [
+                    {"key": "postSelloffExhaustion", "label": "深跌后降噪", "scoreOffset": -10.0},
+                ],
+                "sleeves": [{"key": "macroDeterioration", "score": 12.0}],
+                "drivers": [{"name": "WTI原油冲击", "riskScore": 94.0}],
+                "trend": {
+                    "available": True,
+                    "points": [
+                        {"date": "2026-04-30", "score": 48.2, "regime": "Neutral"},
+                        {"date": "2026-05-29", "score": 52.4, "regime": "Neutral"},
+                    ],
+                },
+                "backtest": {
+                    "target": "3M SPX drawdown and negative forward-return warning",
+                    "sampleSize": 54,
+                },
+            },
         }
 
         self.assertEqual(validate_dashboard(dashboard), [])
@@ -85,6 +116,97 @@ class SmokeCheckTests(unittest.TestCase):
         self.assertIn("missing gold spot cross-market row", issues)
         self.assertIn("missing cross-market history series", issues)
         self.assertIn("investment ideas missing confidence/equityImpact contract", issues)
+        self.assertIn("missing SPY early-warning contract", issues)
+
+    def test_spy_early_warning_contract_requires_chart_trend(self):
+        payload = {
+            "available": True,
+            "score": 52.4,
+            "baseScore": 48.0,
+            "regime": "Neutral",
+            "summary": "SPY预警52.4,处于中性。",
+            "allocation": {
+                "stance": "持有/控仓",
+                "equityExposure": "维持核心仓位",
+                "hedgeAction": "等待确认",
+            },
+            "amplifiers": [],
+            "dampeners": [],
+            "sleeves": [{"key": "macroDeterioration", "score": 12.0}],
+            "drivers": [],
+            "backtest": {
+                "target": "3M SPX drawdown and negative forward-return warning",
+                "sampleSize": 54,
+            },
+        }
+
+        self.assertFalse(has_spy_early_warning_contract(payload))
+
+    def test_spy_early_warning_contract_requires_calibration_layer(self):
+        payload = {
+            "available": True,
+            "score": 52.4,
+            "regime": "Neutral",
+            "summary": "SPY预警52.4,处于中性。",
+            "allocation": {
+                "stance": "持有/控仓",
+                "equityExposure": "维持核心仓位",
+                "hedgeAction": "等待确认",
+            },
+            "sleeves": [{"key": "macroDeterioration", "score": 12.0}],
+            "drivers": [],
+            "trend": {
+                "available": True,
+                "points": [
+                    {"date": "2026-05-29", "score": 52.4, "regime": "Neutral"},
+                ],
+            },
+            "backtest": {
+                "target": "3M SPX drawdown and negative forward-return warning",
+                "sampleSize": 54,
+            },
+        }
+
+        self.assertFalse(has_spy_early_warning_contract(payload))
+
+        payload["baseScore"] = 48.0
+        payload["amplifiers"] = [{"key": "rallyFragility", "label": "上涨后宏观转弱", "scoreBoost": 6.0}]
+        payload["dampeners"] = [{"key": "postSelloffExhaustion", "label": "深跌后降噪", "scoreOffset": -10.0}]
+
+        self.assertTrue(has_spy_early_warning_contract(payload))
+
+    def test_spy_early_warning_contract_requires_dampeners_layer(self):
+        payload = {
+            "available": True,
+            "score": 52.4,
+            "baseScore": 48.0,
+            "regime": "Neutral",
+            "summary": "SPY预警52.4,处于中性。",
+            "allocation": {
+                "stance": "持有/控仓",
+                "equityExposure": "维持核心仓位",
+                "hedgeAction": "等待确认",
+            },
+            "amplifiers": [],
+            "sleeves": [{"key": "macroDeterioration", "score": 12.0}],
+            "drivers": [],
+            "trend": {
+                "available": True,
+                "points": [
+                    {"date": "2026-05-29", "score": 52.4, "regime": "Neutral"},
+                ],
+            },
+            "backtest": {
+                "target": "3M SPX drawdown and negative forward-return warning",
+                "sampleSize": 54,
+            },
+        }
+
+        self.assertFalse(has_spy_early_warning_contract(payload))
+
+        payload["dampeners"] = []
+
+        self.assertTrue(has_spy_early_warning_contract(payload))
 
 
 if __name__ == "__main__":

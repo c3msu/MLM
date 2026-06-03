@@ -59,6 +59,7 @@ class RepoDocsTests(unittest.TestCase):
             "/api/events",
             "/api/news",
             "/api/ideas",
+            "/api/spy_early_warning",
             "/api/source_status",
             "/api/source-status",
             "/api/history",

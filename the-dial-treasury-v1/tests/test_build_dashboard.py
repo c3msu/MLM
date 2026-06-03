@@ -207,6 +207,265 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(impact["sampleSize"], 0)
         self.assertIn("样本不足", impact["summary"])
 
+    def test_build_spy_early_warning_de_risks_when_high_score_environment_rolls_over(self):
+        macro_liquidity = {
+            "score": 58.0,
+            "components": [
+                {"id": "fed_net_liquidity", "module": "Liquidity", "name": "净流动性", "score": 35.0, "value": "$5.60T"},
+                {"id": "bank_reserves", "module": "Liquidity", "name": "银行准备金", "score": 42.0, "value": "$3.00T"},
+                {"id": "cp_tbill_spread", "module": "Funding", "name": "商票-TBill利差", "score": 18.0, "value": "+55bp"},
+                {"id": "dgs10_vol_21d", "module": "Treasury", "name": "10Y收益率波动率(21D)", "score": 25.0, "value": "120bp ann."},
+                {"id": "real_rate_level", "module": "Rates", "name": "真实利率水平", "score": 30.0, "value": "2.10%"},
+                {"id": "nfci", "module": "Credit", "name": "金融条件指数(NFCI)", "score": 12.0, "value": "+0.20"},
+                {"id": "vix", "module": "Risk", "name": "VIX", "score": 20.0, "value": "31.0"},
+                {"id": "dxy", "module": "External", "name": "美元广义指数", "score": 28.0, "value": "126.0"},
+                {"id": "wti", "module": "External", "name": "WTI原油冲击", "score": 15.0, "value": "$108.0"},
+            ],
+        }
+        macro_liquidity_equity = {
+            "available": True,
+            "observationCount": 54,
+            "currentSignal": {
+                "date": "2026-02-27",
+                "score": 58.0,
+                "score3mChange": -7.5,
+                "levelBucket": "高评分",
+                "changeBucket": "评分下行",
+                "expectedForward3m": -4.73,
+                "expectedDrawdown3m": -9.22,
+                "hitRate": 14,
+                "confidence": "medium",
+            },
+        }
+
+        warning = dashboard_builder.build_spy_early_warning(macro_liquidity, macro_liquidity_equity)
+
+        self.assertTrue(warning["available"])
+        self.assertGreaterEqual(warning["score"], 75)
+        self.assertEqual(warning["regime"], "De-risk")
+        self.assertEqual(warning["allocation"]["stance"], "减仓/保护")
+        self.assertIn("高评分环境转弱", warning["summary"])
+        self.assertTrue(any(item["key"] == "macroDeterioration" and item["score"] >= 75 for item in warning["sleeves"]))
+        self.assertTrue(any("VIX" in item["name"] for item in warning["drivers"]))
+        self.assertEqual(warning["backtest"]["target"], "3M SPX drawdown and negative forward-return warning")
+
+    def test_build_spy_early_warning_stays_neutral_when_low_score_environment_is_improving(self):
+        macro_liquidity = {
+            "score": 42.2,
+            "components": [
+                {"id": "fed_net_liquidity", "module": "Liquidity", "name": "净流动性", "score": 12.0, "value": "$5.87T"},
+                {"id": "bank_reserves", "module": "Liquidity", "name": "银行准备金", "score": 17.0, "value": "$3.07T"},
+                {"id": "cp_tbill_spread", "module": "Funding", "name": "商票-TBill利差", "score": 28.0, "value": "+15bp"},
+                {"id": "dgs30_dgs10", "module": "Treasury", "name": "30Y-10Y期限溢价", "score": 5.0, "value": "52bp"},
+                {"id": "real_rate_level", "module": "Rates", "name": "真实利率水平", "score": 29.0, "value": "1.79%"},
+                {"id": "nfci", "module": "Credit", "name": "金融条件指数(NFCI)", "score": 74.0, "value": "-0.51"},
+                {"id": "vix", "module": "Risk", "name": "VIX", "score": 77.0, "value": "15.32"},
+                {"id": "dxy", "module": "External", "name": "美元广义指数", "score": 74.0, "value": "118.88"},
+                {"id": "wti", "module": "External", "name": "WTI原油冲击", "score": 6.0, "value": "$97.63"},
+                {"id": "ovx_dev", "module": "External", "name": "原油波动偏离", "score": 9.0, "value": "20.09"},
+            ],
+        }
+        macro_liquidity_equity = {
+            "available": True,
+            "observationCount": 54,
+            "currentSignal": {
+                "date": "2026-06-01",
+                "score": 42.2,
+                "score3mChange": 6.7,
+                "levelBucket": "中位评分",
+                "changeBucket": "评分上行",
+                "expectedForward3m": 5.24,
+                "expectedDrawdown3m": -3.69,
+                "hitRate": 89,
+                "confidence": "medium",
+            },
+        }
+
+        warning = dashboard_builder.build_spy_early_warning(macro_liquidity, macro_liquidity_equity)
+
+        self.assertTrue(warning["available"])
+        self.assertLess(warning["score"], 60)
+        self.assertEqual(warning["regime"], "Neutral")
+        self.assertEqual(warning["allocation"]["stance"], "持有/控仓")
+        self.assertIn("改善", warning["summary"])
+        self.assertTrue(any(item["key"] == "macroDeterioration" and item["score"] <= 25 for item in warning["sleeves"]))
+        self.assertTrue(any(item["key"] == "externalShock" and item["score"] >= 60 for item in warning["sleeves"]))
+
+    def test_build_spy_early_warning_amplifies_severe_three_month_rollover(self):
+        macro_liquidity = {
+            "score": 45.3,
+            "components": [
+                {"id": "fed_net_liquidity", "module": "Liquidity", "name": "净流动性", "score": 50.0, "value": "$6.00T"},
+                {"id": "cp_tbill_spread", "module": "Funding", "name": "商票-TBill利差", "score": 50.0, "value": "+20bp"},
+                {"id": "real_rate_level", "module": "Rates", "name": "真实利率水平", "score": 50.0, "value": "1.75%"},
+                {"id": "vix", "module": "Risk", "name": "VIX", "score": 50.0, "value": "22.0"},
+                {"id": "dxy", "module": "External", "name": "美元广义指数", "score": 50.0, "value": "120.0"},
+            ],
+        }
+        macro_liquidity_equity = {
+            "available": True,
+            "observationCount": 54,
+            "currentSignal": {
+                "date": "2022-03-31",
+                "score": 45.3,
+                "score3mChange": -14.3,
+                "levelBucket": "中位评分",
+                "changeBucket": "评分下行",
+                "expectedForward3m": None,
+                "expectedDrawdown3m": None,
+                "confidence": "history",
+            },
+        }
+
+        warning = dashboard_builder.build_spy_early_warning(macro_liquidity, macro_liquidity_equity)
+
+        self.assertTrue(warning["available"])
+        self.assertGreaterEqual(warning["score"], 65)
+        self.assertIn(warning["regime"], {"Caution", "De-risk"})
+        self.assertIn("amplifiers", warning)
+        self.assertTrue(any(item["key"] == "severeDeterioration" for item in warning["amplifiers"]))
+
+    def test_build_spy_early_warning_dampens_post_selloff_non_severe_low_score(self):
+        macro_liquidity = {
+            "score": 40.6,
+            "components": [
+                {"id": "fed_net_liquidity", "module": "Liquidity", "name": "净流动性", "score": 50.0, "value": "$6.00T"},
+                {"id": "cp_tbill_spread", "module": "Funding", "name": "商票-TBill利差", "score": 50.0, "value": "+20bp"},
+                {"id": "real_rate_level", "module": "Rates", "name": "真实利率水平", "score": 50.0, "value": "1.75%"},
+                {"id": "vix", "module": "Risk", "name": "VIX", "score": 50.0, "value": "22.0"},
+                {"id": "dxy", "module": "External", "name": "美元广义指数", "score": 50.0, "value": "120.0"},
+            ],
+        }
+        macro_liquidity_equity = {
+            "available": True,
+            "observationCount": 54,
+            "currentSignal": {
+                "date": "2022-06-30",
+                "score": 40.6,
+                "score3mChange": -4.7,
+                "sp500Trailing3m": -16.45,
+                "levelBucket": "低评分",
+                "changeBucket": "评分下行",
+                "expectedForward3m": None,
+                "expectedDrawdown3m": None,
+                "confidence": "history",
+            },
+        }
+
+        warning = dashboard_builder.build_spy_early_warning(macro_liquidity, macro_liquidity_equity)
+
+        self.assertTrue(warning["available"])
+        self.assertLess(warning["score"], 60)
+        self.assertEqual(warning["regime"], "Neutral")
+        self.assertIn("dampeners", warning)
+        self.assertTrue(any(item["key"] == "postSelloffExhaustion" for item in warning["dampeners"]))
+        self.assertTrue(any(item["key"] == "fragileLowScore" for item in warning["amplifiers"]))
+
+    def test_build_spy_early_warning_keeps_severe_deterioration_after_selloff(self):
+        macro_liquidity = {
+            "score": 38.9,
+            "components": [
+                {"id": "fed_net_liquidity", "module": "Liquidity", "name": "净流动性", "score": 50.0, "value": "$6.00T"},
+                {"id": "cp_tbill_spread", "module": "Funding", "name": "商票-TBill利差", "score": 50.0, "value": "+20bp"},
+                {"id": "real_rate_level", "module": "Rates", "name": "真实利率水平", "score": 50.0, "value": "1.75%"},
+                {"id": "vix", "module": "Risk", "name": "VIX", "score": 50.0, "value": "22.0"},
+                {"id": "dxy", "module": "External", "name": "美元广义指数", "score": 50.0, "value": "120.0"},
+            ],
+        }
+        macro_liquidity_equity = {
+            "available": True,
+            "observationCount": 54,
+            "currentSignal": {
+                "date": "2022-04-29",
+                "score": 38.9,
+                "score3mChange": -11.8,
+                "sp500Trailing3m": -8.5,
+                "levelBucket": "低评分",
+                "changeBucket": "评分下行",
+                "expectedForward3m": None,
+                "expectedDrawdown3m": None,
+                "confidence": "history",
+            },
+        }
+
+        warning = dashboard_builder.build_spy_early_warning(macro_liquidity, macro_liquidity_equity)
+
+        self.assertTrue(warning["available"])
+        self.assertGreaterEqual(warning["score"], 75)
+        self.assertEqual(warning["regime"], "De-risk")
+        self.assertTrue(any(item["key"] == "severeDeterioration" for item in warning["amplifiers"]))
+        self.assertFalse(any(item["key"] == "postSelloffExhaustion" for item in warning["dampeners"]))
+
+    def test_build_spy_early_warning_amplifies_late_cycle_rally_rollover(self):
+        macro_liquidity = {
+            "score": 43.4,
+            "components": [
+                {"id": "fed_net_liquidity", "module": "Liquidity", "name": "净流动性", "score": 50.0, "value": "$6.00T"},
+                {"id": "cp_tbill_spread", "module": "Funding", "name": "商票-TBill利差", "score": 50.0, "value": "+20bp"},
+                {"id": "real_rate_level", "module": "Rates", "name": "真实利率水平", "score": 50.0, "value": "1.75%"},
+                {"id": "vix", "module": "Risk", "name": "VIX", "score": 50.0, "value": "22.0"},
+                {"id": "dxy", "module": "External", "name": "美元广义指数", "score": 50.0, "value": "120.0"},
+            ],
+        }
+        macro_liquidity_equity = {
+            "available": True,
+            "observationCount": 54,
+            "currentSignal": {
+                "date": "2023-07-31",
+                "score": 43.4,
+                "score3mChange": -2.4,
+                "sp500Trailing3m": 10.06,
+                "levelBucket": "中位评分",
+                "changeBucket": "评分下行",
+                "expectedForward3m": None,
+                "expectedDrawdown3m": None,
+                "confidence": "history",
+            },
+        }
+
+        warning = dashboard_builder.build_spy_early_warning(macro_liquidity, macro_liquidity_equity)
+
+        self.assertTrue(warning["available"])
+        self.assertGreaterEqual(warning["score"], 60)
+        self.assertEqual(warning["regime"], "Caution")
+        self.assertTrue(any(item["key"] == "rallyFragility" for item in warning["amplifiers"]))
+        self.assertTrue(any(item["key"] == "lateCycleRallyRollover" for item in warning["amplifiers"]))
+
+    def test_build_spy_early_warning_amplifies_stalled_low_score_recovery(self):
+        macro_liquidity = {
+            "score": 40.3,
+            "components": [
+                {"id": "fed_net_liquidity", "module": "Liquidity", "name": "净流动性", "score": 50.0, "value": "$6.00T"},
+                {"id": "cp_tbill_spread", "module": "Funding", "name": "商票-TBill利差", "score": 50.0, "value": "+20bp"},
+                {"id": "real_rate_level", "module": "Rates", "name": "真实利率水平", "score": 50.0, "value": "1.75%"},
+                {"id": "vix", "module": "Risk", "name": "VIX", "score": 50.0, "value": "22.0"},
+                {"id": "dxy", "module": "External", "name": "美元广义指数", "score": 50.0, "value": "120.0"},
+            ],
+        }
+        macro_liquidity_equity = {
+            "available": True,
+            "observationCount": 54,
+            "currentSignal": {
+                "date": "2025-01-31",
+                "score": 40.3,
+                "score3mChange": 0.4,
+                "sp500Trailing3m": 5.87,
+                "levelBucket": "低评分",
+                "changeBucket": "变化不大",
+                "expectedForward3m": None,
+                "expectedDrawdown3m": None,
+                "confidence": "history",
+            },
+        }
+
+        warning = dashboard_builder.build_spy_early_warning(macro_liquidity, macro_liquidity_equity)
+
+        self.assertTrue(warning["available"])
+        self.assertGreaterEqual(warning["score"], 60)
+        self.assertEqual(warning["regime"], "Caution")
+        self.assertTrue(any(item["key"] == "fragileLowScore" for item in warning["amplifiers"]))
+        self.assertTrue(any(item["key"] == "lowScoreStall" for item in warning["amplifiers"]))
+
     def test_build_conclusion_audit_scales_factor_contribution_by_group_size_and_source_quality(self):
         groups = [
             {
@@ -657,6 +916,21 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertIn("avgForward3m", current_cells[0])
         self.assertIn("avgMaxDrawdown3m", current_cells[0])
         self.assertIn("hitRate", current_cells[0])
+        warning = dashboard["spyEarlyWarning"]
+        self.assertTrue(warning["available"])
+        self.assertGreaterEqual(warning["score"], 0)
+        self.assertLessEqual(warning["score"], 100)
+        self.assertIn(warning["regime"], {"Constructive", "Neutral", "Caution", "De-risk"})
+        self.assertIn("allocation", warning)
+        self.assertIn("equityExposure", warning["allocation"])
+        self.assertIn("sleeves", warning)
+        self.assertTrue(any(item["key"] == "macroDeterioration" for item in warning["sleeves"]))
+        self.assertEqual(warning["backtest"]["target"], "3M SPX drawdown and negative forward-return warning")
+        self.assertIn("trend", warning)
+        self.assertTrue(warning["trend"]["available"])
+        self.assertGreaterEqual(len(warning["trend"]["points"]), 50)
+        self.assertEqual(warning["trend"]["points"][-1]["score"], warning["score"])
+        self.assertIn("regime", warning["trend"]["points"][-1])
 
     def test_build_live_dashboard_treats_announced_auction_outage_as_warning(self):
         patches = {

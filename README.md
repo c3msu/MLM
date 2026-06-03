@@ -9,6 +9,10 @@ The scorecard conclusion layer includes a credibility audit: factor-driver
 contributions are scaled by module weight and factor count, while proxy,
 modeled, and manual-placeholder inputs are discounted before the dashboard
 states whether the inference is high, medium, or low confidence.
+The dashboard now also includes a SPY Early Warning Index, an equity-specific
+0-100 drawdown-warning overlay that reuses existing Conditions Score
+components plus 3-month score deterioration to guide SPY/SPX exposure from
+constructive through de-risk.
 Section 07, cross-market, includes a dynamic historical chart backed by the
 SQLite history API for global rates, risk/dollar, and inflation/commodity
 series.
@@ -80,5 +84,7 @@ python3 the-dial-treasury-v1/scripts/check_health.py \
 - `docs/investment-view-rule-audit.md`: section 09 investment-view rule map,
   scenario coverage, historical SPY impact overlay, and remaining feasibility
   boundaries.
+- `docs/spy-early-warning-index.md`: SPY Early Warning Index construction,
+  initial historical diagnostics, current reading, and boundaries.
 - `docs/treasury-plan-implementation-checklist.md`: implementation coverage
   against the original replication plan.
