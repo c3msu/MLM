@@ -16,6 +16,7 @@ from treasury_data.sources import (
     parse_fomc_projection_html,
     parse_fred_bulk_zip,
     parse_fred_release_calendar_html,
+    parse_nasdaq_historical_json,
     parse_primary_dealer_stats_json,
     parse_debt_subject_to_limit_json,
     parse_stooq_quote_csv,
@@ -111,6 +112,29 @@ class SourceParsingTests(unittest.TestCase):
         self.assertEqual(quote.date, date(2026, 5, 19))
         self.assertEqual(quote.close, 96.37)
         self.assertAlmostEqual(quote.implied_rate, 3.63)
+
+    def test_parse_nasdaq_historical_json_extracts_descending_ohlcv_rows(self):
+        content = """
+        {
+          "data": {
+            "tradesTable": {
+              "rows": [
+                {"date": "06/05/2026", "close": "$737.55", "volume": "93,989,420", "open": "$752.31", "high": "$752.82", "low": "$735.525"},
+                {"date": "06/04/2026", "close": "$757.09", "volume": "49,923,040", "open": "$752.10", "high": "$758.31", "low": "$751.47"},
+                {"date": "06/03/2026", "close": "$754.24", "volume": "N/A", "open": "$758.15", "high": "$758.80", "low": "$753.57"}
+              ]
+            }
+          }
+        }
+        """
+
+        bars = parse_nasdaq_historical_json(content, "SPY", source_url="https://api.nasdaq.com/api/quote/SPY/historical")
+
+        self.assertEqual([bar.date for bar in bars], [date(2026, 6, 3), date(2026, 6, 4), date(2026, 6, 5)])
+        self.assertEqual(bars[0].symbol, "SPY")
+        self.assertEqual(bars[0].volume, None)
+        self.assertEqual(bars[-1].close, 737.55)
+        self.assertEqual(bars[-1].volume, 93_989_420)
 
     def test_parse_official_rss_news_items_extracts_recent_headlines(self):
         content = """<?xml version="1.0" encoding="utf-8"?>

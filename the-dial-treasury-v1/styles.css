@@ -366,6 +366,33 @@ h3 {
   color: var(--bear);
 }
 
+.equity-freshness-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 31px;
+  max-width: 100%;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.equity-freshness-status.equity-freshness-ok {
+  border-color: rgba(63, 108, 176, 0.34);
+  color: var(--accent);
+}
+
+.equity-freshness-status.equity-freshness-stale,
+.equity-freshness-status.equity-freshness-error {
+  border-color: rgba(205, 57, 45, 0.38);
+  color: var(--bear);
+}
+
 .data-status-btn {
   min-height: 31px;
   flex: 0 0 auto;
@@ -1815,6 +1842,704 @@ h3 {
 
 .spy-warning-foot span,
 .spy-warning-foot em {
+  display: block;
+  font-style: normal;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.equity-risk-panel {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 8px;
+  border: 1px solid rgba(203, 63, 51, 0.26);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(252, 246, 240, 0.78));
+  padding: 10px;
+}
+
+.equity-risk-head {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.34fr) minmax(280px, 0.66fr);
+  gap: 10px;
+  align-items: stretch;
+}
+
+.equity-risk-head > div {
+  display: grid;
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.64);
+  padding: 8px;
+}
+
+.equity-risk-head span,
+.equity-risk-head small,
+.equity-risk-metrics b,
+.equity-risk-quality b,
+.equity-risk-quality small,
+.equity-risk-evidence span,
+.equity-risk-evidence small,
+.equity-risk-components span,
+.equity-risk-components small,
+.equity-risk-components em,
+.equity-risk-drivers span,
+.equity-risk-drivers small,
+.equity-risk-foot {
+  overflow: hidden;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.equity-risk-head strong {
+  color: var(--neutral);
+  font-family: var(--mono);
+  font-size: 30px;
+  line-height: 1;
+}
+
+.equity-risk-head.restrictive strong {
+  color: var(--bear);
+}
+
+.equity-risk-head.supportive strong {
+  color: var(--accent);
+}
+
+.equity-risk-head b {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.equity-risk-summary {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.equity-risk-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.equity-risk-metrics span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.58);
+  padding: 6px 7px;
+}
+
+.equity-risk-metrics strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.equity-risk-quality {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.equity-risk-quality span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid rgba(62, 103, 178, 0.18);
+  border-radius: 7px;
+  background: rgba(248, 250, 252, 0.64);
+  padding: 7px;
+}
+
+.equity-risk-quality strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.equity-risk-quality small {
+  white-space: normal;
+}
+
+.equity-risk-evidence {
+  display: grid;
+  grid-template-columns: auto repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  align-items: stretch;
+}
+
+.equity-risk-evidence > span {
+  align-self: center;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.equity-risk-evidence b {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.62);
+  color: var(--ink);
+  font-size: 11px;
+  overflow: hidden;
+  padding: 6px 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.equity-risk-evidence small {
+  display: block;
+  white-space: normal;
+}
+
+.equity-risk-backtest {
+  display: grid;
+  gap: 6px;
+  border: 1px solid rgba(62, 103, 178, 0.18);
+  border-radius: 7px;
+  background: rgba(248, 250, 252, 0.62);
+  padding: 8px;
+}
+
+.equity-risk-backtest.muted {
+  grid-template-columns: auto 1fr;
+  align-items: center;
+}
+
+.equity-risk-backtest-head {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.equity-risk-backtest-head span,
+.equity-risk-worst > span {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.equity-risk-backtest-head b,
+.equity-risk-backtest.muted b {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.equity-risk-backtest-head small,
+.equity-risk-backtest-grid small,
+.equity-risk-worst small {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
+.equity-risk-backtest-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.equity-risk-backtest-grid span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.64);
+  padding: 6px 7px;
+}
+
+.equity-risk-backtest-grid b {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.equity-risk-backtest-grid strong {
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.equity-risk-tiered {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.equity-risk-tiered span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid rgba(123, 93, 36, 0.22);
+  border-radius: 7px;
+  background: rgba(255, 252, 246, 0.72);
+  padding: 6px 7px;
+}
+
+.equity-risk-tiered b {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.equity-risk-tiered strong {
+  color: var(--accent-red);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.equity-risk-tiered small {
+  overflow: hidden;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.equity-risk-factor-audit {
+  display: grid;
+  grid-template-columns: auto repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  align-items: stretch;
+}
+
+.equity-risk-factor-audit > span {
+  align-self: center;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.equity-risk-factor-audit b {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.66);
+  color: var(--ink);
+  font-size: 11px;
+  overflow: hidden;
+  padding: 6px 7px;
+}
+
+.equity-risk-factor-audit b.core {
+  border-color: rgba(33, 112, 75, 0.24);
+  background: rgba(242, 250, 246, 0.78);
+}
+
+.equity-risk-factor-audit b.trim {
+  border-color: rgba(198, 63, 52, 0.22);
+  background: rgba(255, 247, 245, 0.76);
+}
+
+.equity-risk-factor-audit small {
+  overflow: hidden;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.equity-risk-worst {
+  display: grid;
+  grid-template-columns: auto repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  align-items: stretch;
+}
+
+.equity-risk-worst > span {
+  align-self: center;
+}
+
+.equity-risk-worst b {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: rgba(250, 248, 241, 0.72);
+  color: var(--ink);
+  font-size: 11px;
+  overflow: hidden;
+  padding: 6px 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.equity-risk-regression {
+  display: grid;
+  grid-template-columns: auto repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  align-items: stretch;
+}
+
+.equity-risk-regression > span {
+  align-self: center;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.equity-risk-regression b {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.64);
+  color: var(--ink);
+  font-size: 11px;
+  overflow: hidden;
+  padding: 6px 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.equity-risk-history-chart {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.equity-risk-history-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.equity-risk-history-actions {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.equity-risk-history-head span {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.equity-risk-history-head b {
+  overflow: hidden;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.equity-risk-history-chart svg {
+  width: 100%;
+  min-height: 145px;
+  overflow: visible;
+}
+
+.equity-risk-history-chart.large {
+  min-height: 0;
+}
+
+.equity-risk-history-modal-panel {
+  width: min(90vw, 1460px);
+  height: min(86vh, 900px);
+}
+
+.equity-risk-history-modal-chart {
+  position: relative;
+}
+
+.equity-risk-history-modal-chart svg {
+  height: 100%;
+  min-height: 360px;
+}
+
+.equity-risk-modal-stats {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.equity-risk-modal-alerts {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.equity-risk-modal-alert-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.equity-risk-modal-alert-head span {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.equity-risk-modal-alert-head b,
+.equity-risk-modal-alert-head small {
+  overflow: hidden;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.equity-risk-modal-alert-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.equity-risk-alert-row {
+  display: grid;
+  grid-template-columns: minmax(118px, 1.15fr) repeat(4, minmax(58px, 0.8fr));
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.56);
+}
+
+.equity-risk-alert-row.hit {
+  border-color: rgba(203, 63, 51, 0.26);
+  background: rgba(203, 63, 51, 0.055);
+}
+
+.equity-risk-alert-row.miss {
+  border-color: rgba(142, 134, 118, 0.34);
+}
+
+.equity-risk-alert-row b,
+.equity-risk-alert-row span {
+  min-width: 0;
+}
+
+.equity-risk-alert-row b {
+  color: var(--ink);
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.equity-risk-alert-row small,
+.equity-risk-alert-row em {
+  display: block;
+  overflow: hidden;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.equity-risk-alert-row strong {
+  display: block;
+  overflow: hidden;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.equity-risk-history-chart line {
+  stroke: rgba(142, 134, 118, 0.24);
+  stroke-dasharray: 4 5;
+}
+
+.equity-risk-threshold-line.strong {
+  stroke: rgba(203, 63, 51, 0.42);
+}
+
+.equity-risk-hover-guide {
+  stroke: rgba(76, 69, 56, 0.44);
+  stroke-dasharray: 3 4;
+  pointer-events: none;
+}
+
+.equity-risk-hover-dot {
+  pointer-events: none;
+  stroke: rgba(255, 255, 255, 0.96);
+  stroke-width: 2;
+}
+
+.equity-risk-hover-dot.risk {
+  fill: var(--bear);
+}
+
+.equity-risk-hover-dot.spy {
+  fill: #3e67b2;
+}
+
+.equity-risk-alert-marker {
+  fill: rgba(203, 63, 51, 0.84);
+  pointer-events: none;
+  stroke: rgba(255, 255, 255, 0.96);
+  stroke-width: 1.6;
+}
+
+.equity-risk-alert-marker.miss {
+  fill: rgba(142, 134, 118, 0.68);
+}
+
+.equity-risk-history-tooltip {
+  max-width: 320px;
+}
+
+.equity-risk-history-chart text {
+  fill: var(--faint);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.equity-risk-score-line {
+  fill: none;
+  stroke: var(--bear);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.2;
+}
+
+.equity-risk-spy-line {
+  fill: none;
+  stroke: #3e67b2;
+  stroke-dasharray: 6 5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.equity-risk-score-dot {
+  fill: var(--bear);
+}
+
+.equity-risk-spy-dot {
+  fill: #3e67b2;
+}
+
+.equity-risk-spy-label,
+.equity-risk-spy-axis {
+  fill: #3e67b2;
+}
+
+.equity-risk-components {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.equity-risk-component {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.6);
+  padding: 7px;
+}
+
+.equity-risk-component strong {
+  color: var(--neutral);
+  font-family: var(--mono);
+  font-size: 15px;
+  line-height: 1;
+}
+
+.equity-risk-component em {
+  font-style: normal;
+}
+
+.equity-risk-component.restrictive strong {
+  color: var(--bear);
+}
+
+.equity-risk-component.supportive strong {
+  color: var(--accent);
+}
+
+.equity-risk-drivers {
+  display: grid;
+  grid-template-columns: auto repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  align-items: stretch;
+}
+
+.equity-risk-drivers > span {
+  align-self: center;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.equity-risk-drivers b,
+.equity-risk-drivers em {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: rgba(250, 248, 241, 0.72);
+  color: var(--ink);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+  overflow: hidden;
+  padding: 6px 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.equity-risk-drivers b small {
+  display: block;
+}
+
+.equity-risk-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  overflow: visible;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 7px;
+  white-space: normal;
+}
+
+.equity-risk-foot span,
+.equity-risk-foot em {
   display: block;
   font-style: normal;
   max-width: 100%;
@@ -3405,6 +4130,15 @@ body.modal-open {
   .liquidity-equity-diagnostics,
   .spy-warning-head,
   .spy-warning-drivers,
+  .equity-risk-head,
+  .equity-risk-quality,
+  .equity-risk-evidence,
+  .equity-risk-backtest-grid,
+  .equity-risk-tiered,
+  .equity-risk-factor-audit,
+  .equity-risk-regression,
+  .equity-risk-drivers,
+  .equity-risk-worst,
   .idea-grid {
     grid-template-columns: 1fr;
   }
@@ -3462,7 +4196,10 @@ body.modal-open {
 
   .source-status-grid,
   .source-status-controls,
-  .spy-warning-sleeves {
+  .spy-warning-sleeves,
+  .equity-risk-components,
+  .equity-risk-modal-stats,
+  .equity-risk-modal-alert-grid {
     grid-template-columns: 1fr 1fr;
   }
 
@@ -3539,14 +4276,43 @@ body.modal-open {
   .liquidity-equity-stats,
   .liquidity-signal-cards,
   .liquidity-rolling-grid,
-  .spy-warning-calibration,
-  .spy-warning-sleeves,
+    .spy-warning-calibration,
+    .spy-warning-sleeves,
+    .equity-risk-backtest-head,
+    .equity-risk-backtest-grid,
+    .equity-risk-tiered,
+    .equity-risk-factor-audit,
+    .equity-risk-regression,
+    .equity-risk-worst,
+    .equity-risk-metrics,
+    .equity-risk-quality,
+    .equity-risk-evidence,
+    .equity-risk-modal-stats,
+    .equity-risk-modal-alert-grid,
+    .equity-risk-components,
   .source-status-grid,
   .source-status-controls {
     grid-template-columns: 1fr;
   }
 
-  .spy-warning-foot {
+  .equity-risk-modal-alert-head {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .equity-risk-alert-row {
+    grid-template-columns: minmax(120px, 1.15fr) repeat(2, minmax(64px, 0.8fr));
+  }
+
+  .equity-risk-history-actions {
+    align-items: flex-end;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .spy-warning-foot,
+  .equity-risk-foot {
     align-items: flex-start;
     flex-direction: column;
     gap: 3px;

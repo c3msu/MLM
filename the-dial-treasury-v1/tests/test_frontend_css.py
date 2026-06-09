@@ -228,6 +228,89 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn(".liquidity-equity-buckets", css)
         self.assertIn(".liquidity-equity-diagnostics", css)
 
+    def test_equity_short_term_risk_panel_is_mounted(self):
+        html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
+        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('id="equityShortTermRisk"', html)
+        self.assertIn("equityShortTermRisk", app_js)
+        self.assertIn("renderEquityShortTermRisk", app_js)
+        self.assertIn("renderEquityRiskHistoryChart", app_js)
+        self.assertIn("Equity Short-Term Risk", app_js)
+        self.assertIn("历史回放", app_js)
+        self.assertIn("历史曲线", app_js)
+        self.assertIn("回归检验", app_js)
+        self.assertIn("formatPercentMetric", app_js)
+        self.assertIn("dataThrough", app_js)
+        self.assertIn("sourceQuality", app_js)
+        self.assertIn("factorEvidence", app_js)
+        self.assertIn("forwardCatalystRisk", app_js)
+        self.assertIn("tieredThresholdTests", app_js)
+        self.assertIn("recommendedCautionThreshold", app_js)
+        self.assertIn("componentDiagnostics", app_js)
+        self.assertIn("全局因子审计", app_js)
+        self.assertIn("警戒以上", app_js)
+        self.assertIn("中等预警", app_js)
+        self.assertIn("推荐观察", app_js)
+        self.assertIn(".equity-risk-panel", css)
+        self.assertIn(".equity-risk-quality", css)
+        self.assertIn(".equity-risk-evidence", css)
+        self.assertIn(".equity-risk-backtest", css)
+        self.assertIn(".equity-risk-tiered", css)
+        self.assertIn(".equity-risk-factor-audit", css)
+        self.assertIn(".equity-risk-regression", css)
+        self.assertIn(".equity-risk-history-chart", css)
+        self.assertIn(".equity-risk-components", css)
+        self.assertIn(".equity-risk-drivers", css)
+
+    def test_equity_short_term_risk_history_chart_is_not_gated_by_backtest(self):
+        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+
+        renderer_start = app_js.index("function renderEquityShortTermRisk")
+        renderer_end = app_js.index("function renderEquityRiskHistoryChart")
+        renderer = app_js[renderer_start:renderer_end]
+        self.assertIn("const trendHistory = renderEquityRiskHistoryChart(item);", renderer)
+        self.assertLess(renderer.index("${trendHistory}"), renderer.index('<div class="equity-risk-worst">'))
+        fallback_start = renderer.index('backtest.summary || "样本不足"')
+        self.assertIn("${trendHistory}", renderer[fallback_start:])
+
+    def test_equity_short_term_risk_history_chart_expands_to_interactive_modal(self):
+        html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
+        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
+
+        for element_id in (
+            "equityRiskHistoryModal",
+            "equityRiskHistoryModalChart",
+            "equityRiskHistoryModalTooltip",
+            "equityRiskHistoryModalStats",
+            "equityRiskHistoryModalAlerts",
+            "closeEquityRiskHistoryModal",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        self.assertIn("expandEquityRiskHistory", app_js)
+        self.assertIn("openEquityRiskHistoryModal", app_js)
+        self.assertIn("closeEquityRiskHistoryModal", app_js)
+        self.assertIn("renderEquityRiskHistoryModalChart", app_js)
+        self.assertIn("renderEquityRiskHistoryModalAlerts", app_js)
+        self.assertIn("alertWindows", app_js)
+        self.assertIn("equity-risk-alert-marker", app_js)
+        self.assertIn("score≥75历史告警", app_js)
+        self.assertIn("bindEquityRiskHistoryInteractions", app_js)
+        self.assertIn("renderEquityRiskHistoryTooltip", app_js)
+        self.assertIn("nearestEquityRiskHistoryPoint", app_js)
+        self.assertIn("equity-risk-hover-guide", app_js)
+        self.assertIn("equity-risk-hover-dot", app_js)
+        self.assertIn("SPY close", app_js)
+        self.assertIn(".equity-risk-history-modal-chart", css)
+        self.assertIn(".equity-risk-history-actions", css)
+        self.assertIn(".equity-risk-modal-stats", css)
+        self.assertIn(".equity-risk-modal-alerts", css)
+        self.assertIn(".equity-risk-alert-marker", css)
+        self.assertIn(".equity-risk-hover-guide", css)
+        self.assertIn(".equity-risk-hover-dot", css)
+
     def test_investment_views_render_historical_spy_proxy_impact(self):
         app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
@@ -347,11 +430,42 @@ class FrontendCssTests(unittest.TestCase):
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
         self.assertIn('id="refreshRuntimeData"', html)
+        self.assertIn('id="refreshEquityRisk"', html)
         self.assertIn("/api/update", app_js)
+        self.assertIn("/api/update-equity", app_js)
         self.assertIn("runtimeRefreshInFlight", app_js)
+        self.assertIn("equityRefreshInFlight", app_js)
         self.assertIn("refreshRuntimeData", app_js)
+        self.assertIn("refreshEquityRisk", app_js)
         self.assertIn("#refreshRuntimeData", app_js)
+        self.assertIn("#refreshEquityRisk", app_js)
         self.assertRegex(css, re.compile(r"\.data-status-btn:disabled\s*\{[^}]*cursor:\s*progress", re.DOTALL))
+
+    def test_frontend_auto_syncs_runtime_snapshot_without_history_reload(self):
+        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+
+        self.assertRegex(app_js, re.compile(r"const RUNTIME_AUTO_REFRESH_MS\s*=\s*5\s*\*\s*60\s*\*\s*1000"))
+        self.assertIn("runtimeAutoRefreshTimer", app_js)
+        self.assertIn("startRuntimeAutoRefresh", app_js)
+        self.assertIn("refreshRuntimeSnapshotSilently", app_js)
+        self.assertIn("document.visibilityState", app_js)
+        self.assertIn("window.setInterval", app_js)
+        self.assertIn("loadRuntimeData({ refreshHistory: false", app_js)
+        self.assertIn('document.addEventListener("visibilitychange"', app_js)
+
+    def test_frontend_surfaces_equity_risk_freshness(self):
+        html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
+        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('id="equityFreshnessStatus"', html)
+        self.assertIn("/api/health", app_js)
+        self.assertIn("equityRiskFreshness", app_js)
+        self.assertIn("loadEquityFreshnessStatus", app_js)
+        self.assertIn("renderEquityFreshnessStatus", app_js)
+        self.assertIn("#equityFreshnessStatus", app_js)
+        self.assertIn("equity-freshness-status", css)
+        self.assertIn("equity-freshness-stale", css)
 
     def test_history_panel_mounts_interactive_chart_controls(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")

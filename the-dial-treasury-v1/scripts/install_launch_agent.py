@@ -21,6 +21,8 @@ def build_launch_agent_plist(
     daily_at: str,
     port: int,
     log_dir: Path,
+    equity_interval_minutes: float = 30.0,
+    equity_catchup_interval_minutes: float = 10.0,
 ) -> bytes:
     output_path = PROJECT_ROOT / "data" / "dashboard.json"
     server_command = [
@@ -32,6 +34,10 @@ def build_launch_agent_plist(
         str(port),
         "--daily-at",
         daily_at,
+        "--equity-interval-minutes",
+        f"{equity_interval_minutes:g}",
+        "--equity-catchup-interval-minutes",
+        f"{equity_catchup_interval_minutes:g}",
         "--output",
         str(output_path),
     ]
@@ -59,6 +65,8 @@ def install_launch_agent(
     label: str = DEFAULT_LABEL,
     daily_at: str = "16:30",
     port: int = 8451,
+    equity_interval_minutes: float = 30.0,
+    equity_catchup_interval_minutes: float = 10.0,
     plist_dir: Path = DEFAULT_PLIST_DIR,
     load: bool = False,
 ) -> Path:
@@ -73,6 +81,8 @@ def install_launch_agent(
             daily_at=daily_at,
             port=port,
             log_dir=log_dir,
+            equity_interval_minutes=equity_interval_minutes,
+            equity_catchup_interval_minutes=equity_catchup_interval_minutes,
         )
     )
     if load:
@@ -94,6 +104,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--label", default=DEFAULT_LABEL)
     parser.add_argument("--daily-at", default="16:30")
     parser.add_argument("--port", type=int, default=8451)
+    parser.add_argument("--equity-interval-minutes", type=float, default=30.0)
+    parser.add_argument("--equity-catchup-interval-minutes", type=float, default=10.0)
     parser.add_argument("--load", action="store_true", help="Load the LaunchAgent immediately after writing it")
     parser.add_argument("--uninstall", action="store_true")
     args = parser.parse_args(argv)
@@ -103,7 +115,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Removed {plist_path}")
         return 0
 
-    plist_path = install_launch_agent(label=args.label, daily_at=args.daily_at, port=args.port, load=args.load)
+    plist_path = install_launch_agent(
+        label=args.label,
+        daily_at=args.daily_at,
+        port=args.port,
+        equity_interval_minutes=args.equity_interval_minutes,
+        equity_catchup_interval_minutes=args.equity_catchup_interval_minutes,
+        load=args.load,
+    )
     print(f"Wrote {plist_path}")
     if args.load:
         print(f"Loaded {args.label}; dashboard will serve at http://127.0.0.1:{args.port}/")

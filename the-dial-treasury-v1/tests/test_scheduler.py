@@ -8,12 +8,12 @@ import tempfile
 import threading
 import time
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from scripts import serve
 from scripts.serve import NoStoreHandler, seconds_until_next_run, start_startup_update
-from scripts.update_data import run_update, write_dashboard_json
+from scripts.update_data import REQUIRED_EQUITY_SOURCE_STATUS_NAMES, run_update, write_dashboard_json
 from treasury_data.history_store import (
     history_summary,
     save_dashboard_history,
@@ -24,6 +24,68 @@ from treasury_data.api import api_payload_for_path, api_response_for_path
 
 
 class SchedulerTests(unittest.TestCase):
+    def core_dashboard(self, generated_at="2026-05-20T15:39:54+00:00"):
+        return {
+            "asOf": "2026-05-19",
+            "generatedAt": generated_at,
+            "curve": {"tenors": ["10Y"], "today": [4.56]},
+            "groups": [{"id": "duration", "name": "久期", "factors": [{"n": "10Y", "score": -1}]}],
+            "macroLiquidity": {
+                "score": 41.3,
+                "trend": {
+                    "available": True,
+                    "points": [
+                        {"date": "2026-04-30", "score": 22.8, "percentile": 7},
+                        {"date": "2026-05-22", "score": 41.4, "percentile": 34},
+                    ],
+                },
+            },
+            "equityShortTermRisk": {
+                "available": True,
+                "score": 82.4,
+                "regime": "Strong Alert",
+                "regimeCn": "强告警",
+                "summary": "短期股市风险为强告警。",
+                "asOf": "2026-06-04",
+                "method": "same-day risk controls",
+                "allocation": {"stance": "短线降风险", "equityExposure": "低配", "hedgeAction": "买入保护"},
+                "components": [
+                    {"key": "marketFlow", "label": "股市资金/趋势", "detail": "SPY反弹", "available": True, "score": 82},
+                    {"key": "sectorRotation", "label": "板块轮动断裂", "detail": "成长跑输", "available": True, "score": 79},
+                    {"key": "hotStockReversal", "label": "热点股集体回落", "detail": "龙头回落", "available": True, "score": 76},
+                    {"key": "turnover", "label": "成交承接", "detail": "成交偏弱", "available": True, "score": 62},
+                    {"key": "eventRisk", "label": "新闻/事件风险", "detail": "事件前", "available": True, "score": 70},
+                ],
+                "drivers": [],
+                "trend": {
+                    "available": True,
+                    "points": [
+                        {"date": "2026-06-03", "score": 64.2, "spyClose": 100},
+                        {"date": "2026-06-04", "score": 82.4, "spyClose": 101},
+                    ],
+                },
+                "backtest": {
+                    "available": True,
+                    "sampleSize": 2,
+                    "scoreBuckets": [{"label": "Strong Alert", "count": 1}],
+                    "thresholdTests": [{"threshold": 75, "precision": 100.0}],
+                    "regressionTests": [{"target": "maxDrawdown15d", "rSquared": 0.4}],
+                    "worstWindows": [],
+                    "componentDiagnostics": [
+                        {
+                            "component": "marketFlow",
+                            "label": "股市资金/趋势",
+                            "decision": "support",
+                            "decisionCn": "辅助保留",
+                            "recommendation": "保留低到中权重。",
+                        }
+                    ],
+                },
+                "lookAheadGuard": {"dataThrough": "2026-06-04"},
+            },
+            "sourceStatus": [{"name": "FRED", "status": "ok", "latest": "2026-05-22"}],
+        }
+
     def test_seconds_until_next_run_uses_today_when_time_is_future(self):
         now = datetime(2026, 5, 20, 8, 30, 0)
 
@@ -98,27 +160,13 @@ class SchedulerTests(unittest.TestCase):
                 "generatedAt": "2026-05-20T15:39:54+00:00",
                 "sourceStatus": [{"name": "TreasuryDirect auctioned securities", "status": "ok", "latest": "250"}],
             }
-            refreshed = {
-                "asOf": "2026-05-22",
-                "generatedAt": "2026-05-25T02:18:13+00:00",
-                "curve": {"tenors": ["10Y"], "today": [4.56]},
-                "groups": [{"id": "duration", "name": "久期", "factors": [{"n": "10Y", "score": -1}]}],
-                "percentiles": {"items": [{"name": "10Y", "percentile": 70, "value": "4.56%", "source": "Treasury"}]},
-                "macroLiquidity": {
-                    "score": 41.3,
-                    "trend": {
-                        "available": True,
-                        "points": [
-                            {"date": "2026-04-30", "score": 22.8, "percentile": 7},
-                            {"date": "2026-05-22", "score": 41.4, "percentile": 34},
-                        ],
-                    },
-                },
-                "sourceStatus": [
-                    {"name": "TreasuryDirect auctioned securities", "status": "error", "latest": "timeout"},
-                    {"name": "FRED", "status": "ok", "latest": "2026-05-22"},
-                ],
-            }
+            refreshed = self.core_dashboard("2026-05-25T02:18:13+00:00")
+            refreshed["asOf"] = "2026-05-22"
+            refreshed["percentiles"] = {"items": [{"name": "10Y", "percentile": 70, "value": "4.56%", "source": "Treasury"}]}
+            refreshed["sourceStatus"] = [
+                {"name": "TreasuryDirect auctioned securities", "status": "error", "latest": "timeout"},
+                {"name": "FRED", "status": "ok", "latest": "2026-05-22"},
+            ]
             write_dashboard_json(healthy, output)
 
             dashboard = run_update(output, build_func=lambda: refreshed, history_path=history_db)
@@ -129,6 +177,67 @@ class SchedulerTests(unittest.TestCase):
             self.assertTrue(failed_output.exists())
             self.assertIn(refreshed["generatedAt"], failed_output.read_text(encoding="utf-8"))
             self.assertEqual(history_summary(history_db)["snapshotCount"], 1)
+
+    def test_run_update_keeps_existing_core_dashboard_when_refresh_drops_equity_backtest(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "data" / "dashboard.json"
+            history_db = Path(temp_dir) / "data" / "history.sqlite3"
+            healthy = self.core_dashboard("2026-06-07T07:24:53+00:00")
+            stale_refresh = self.core_dashboard("2026-06-07T09:10:13+00:00")
+            stale_refresh["equityShortTermRisk"].pop("backtest")
+            write_dashboard_json(healthy, output)
+
+            dashboard = run_update(output, build_func=lambda: stale_refresh, history_path=history_db)
+
+            self.assertEqual(dashboard["generatedAt"], healthy["generatedAt"])
+            self.assertIn(healthy["generatedAt"], output.read_text(encoding="utf-8"))
+            failed_output = output.with_name("dashboard.failed.json")
+            self.assertTrue(failed_output.exists())
+            self.assertIn(stale_refresh["generatedAt"], failed_output.read_text(encoding="utf-8"))
+            self.assertFalse(history_db.exists())
+
+    def test_run_update_keeps_existing_core_dashboard_when_refresh_drops_equity_factor_audit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "data" / "dashboard.json"
+            history_db = Path(temp_dir) / "data" / "history.sqlite3"
+            healthy = self.core_dashboard("2026-06-07T07:24:53+00:00")
+            stale_refresh = self.core_dashboard("2026-06-07T09:10:13+00:00")
+            stale_refresh["equityShortTermRisk"]["backtest"].pop("componentDiagnostics")
+            write_dashboard_json(healthy, output)
+
+            dashboard = run_update(output, build_func=lambda: stale_refresh, history_path=history_db)
+
+            self.assertEqual(dashboard["generatedAt"], healthy["generatedAt"])
+            failed_output = output.with_name("dashboard.failed.json")
+            self.assertTrue(failed_output.exists())
+            self.assertIn(stale_refresh["generatedAt"], failed_output.read_text(encoding="utf-8"))
+            self.assertFalse(history_db.exists())
+
+    def test_run_update_keeps_existing_dashboard_when_refresh_loses_equity_source_monitoring(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "data" / "dashboard.json"
+            history_db = Path(temp_dir) / "data" / "history.sqlite3"
+            healthy = self.core_dashboard("2026-06-07T07:24:53+00:00")
+            healthy["sourceStatus"] = [
+                {"name": name, "status": "ok", "latest": "2026-06-05"}
+                for name in REQUIRED_EQUITY_SOURCE_STATUS_NAMES
+            ]
+            stale_refresh = self.core_dashboard("2026-06-07T09:10:13+00:00")
+            stale_refresh["sourceStatus"] = [
+                {"name": name, "status": "ok", "latest": "2026-06-05"}
+                for name in REQUIRED_EQUITY_SOURCE_STATUS_NAMES
+            ]
+            stale_refresh["sourceStatus"][0]["status"] = "warning"
+            stale_refresh["sourceStatus"][0]["latest"] = "timeout"
+            write_dashboard_json(healthy, output)
+
+            dashboard = run_update(output, build_func=lambda: stale_refresh, history_path=history_db)
+
+            self.assertEqual(dashboard["generatedAt"], healthy["generatedAt"])
+            failed_output = output.with_name("dashboard.failed.json")
+            self.assertTrue(failed_output.exists())
+            self.assertIn(stale_refresh["generatedAt"], failed_output.read_text(encoding="utf-8"))
+            self.assertFalse(history_db.exists())
 
     def test_run_update_persists_successful_dashboard_history(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -214,6 +323,195 @@ class SchedulerTests(unittest.TestCase):
         self.assertIs(second_thread, first_thread)
         self.assertEqual(calls, [Path("dashboard.json")])
 
+    def test_equity_update_loop_runs_lightweight_refresh_on_interval(self):
+        calls = []
+        sleeps = []
+
+        def equity_update(output, *, years, timeout, limit):
+            calls.append((output, years, timeout, limit))
+            return {
+                "asOf": "2026-06-04",
+                "generatedAt": "2026-06-04T20:01:00+00:00",
+                "equityShortTermRisk": {"score": 80.4, "asOf": "2026-06-04"},
+            }
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            serve.equity_update_loop(
+                interval_minutes=30,
+                output=Path("dashboard.json"),
+                equity_update_func=equity_update,
+                years=2,
+                timeout=9,
+                limit=500,
+                stale_check_func=lambda output: False,
+                sleep_func=lambda seconds: sleeps.append(seconds),
+                max_runs=2,
+                initial_delay_seconds=5,
+            )
+
+        self.assertEqual(sleeps, [5, 30 * 60])
+        self.assertEqual(
+            calls,
+            [
+                (Path("dashboard.json"), 2, 9, 500),
+                (Path("dashboard.json"), 2, 9, 500),
+            ],
+        )
+
+    def test_start_manual_equity_update_reuses_running_refresh(self):
+        entered = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def slow_update(output, *, years, timeout, limit):
+            calls.append((output, years, timeout, limit))
+            entered.set()
+            release.wait(timeout=2)
+            return {
+                "asOf": "2026-06-04",
+                "generatedAt": "2026-06-04T20:01:00+00:00",
+                "equityShortTermRisk": {"score": 80.4, "asOf": "2026-06-04"},
+            }
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            first_thread = serve.start_manual_equity_update(
+                Path("dashboard.json"),
+                equity_update_func=slow_update,
+                years=2,
+                timeout=9,
+                limit=500,
+            )
+            self.assertTrue(entered.wait(timeout=1))
+            second_thread = serve.start_manual_equity_update(
+                Path("dashboard.json"),
+                equity_update_func=slow_update,
+                years=2,
+                timeout=9,
+                limit=500,
+            )
+            release.set()
+            first_thread.join(timeout=1)
+
+        self.assertIs(second_thread, first_thread)
+        self.assertEqual(calls, [(Path("dashboard.json"), 2, 9, 500)])
+
+    def test_full_and_equity_updates_share_dashboard_write_lock(self):
+        entered_full = threading.Event()
+        release_full = threading.Event()
+        order = []
+
+        def slow_full_update(output):
+            order.append(("full-start", output))
+            entered_full.set()
+            release_full.wait(timeout=2)
+            order.append(("full-end", output))
+            return {"asOf": "2026-06-04", "generatedAt": "2026-06-04T20:01:00+00:00"}
+
+        def equity_update(output, *, years, timeout, limit):
+            order.append(("equity-start", output, years, timeout, limit))
+            return {
+                "asOf": "2026-06-04",
+                "generatedAt": "2026-06-04T20:02:00+00:00",
+                "equityShortTermRisk": {"score": 80.4, "asOf": "2026-06-04"},
+            }
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            full_thread = threading.Thread(
+                target=serve.run_logged_update,
+                args=("full", Path("dashboard.json"), slow_full_update),
+                daemon=True,
+            )
+            full_thread.start()
+            self.assertTrue(entered_full.wait(timeout=1))
+            equity_thread = threading.Thread(
+                target=serve.run_logged_equity_update,
+                args=("equity", Path("dashboard.json"), equity_update),
+                kwargs={"years": 2, "timeout": 9, "limit": 500},
+                daemon=True,
+            )
+            equity_thread.start()
+            time.sleep(0.05)
+            self.assertEqual(order, [("full-start", Path("dashboard.json"))])
+            release_full.set()
+            full_thread.join(timeout=1)
+            equity_thread.join(timeout=1)
+
+        self.assertEqual(
+            order,
+            [
+                ("full-start", Path("dashboard.json")),
+                ("full-end", Path("dashboard.json")),
+                ("equity-start", Path("dashboard.json"), 2, 9, 500),
+            ],
+        )
+
+    def test_expected_equity_bar_date_waits_for_after_close_lag(self):
+        before_ready = datetime(2026, 6, 8, 20, 10, tzinfo=timezone.utc)
+        after_ready = datetime(2026, 6, 8, 20, 40, tzinfo=timezone.utc)
+
+        self.assertEqual(
+            serve.expected_equity_bar_date(before_ready, after_close_lag_minutes=30).isoformat(),
+            "2026-06-05",
+        )
+        self.assertEqual(
+            serve.expected_equity_bar_date(after_ready, after_close_lag_minutes=30).isoformat(),
+            "2026-06-08",
+        )
+
+    def test_equity_risk_freshness_flags_stale_only_after_expected_bar_date_advances(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "data" / "dashboard.json"
+            dashboard = self.core_dashboard(generated_at="2026-06-08T20:00:00+00:00")
+            dashboard["equityShortTermRisk"]["asOf"] = "2026-06-05"
+            write_dashboard_json(dashboard, output)
+
+            before_ready = serve.equity_risk_freshness(
+                output,
+                now=datetime(2026, 6, 8, 20, 10, tzinfo=timezone.utc),
+                after_close_lag_minutes=30,
+            )
+            after_ready = serve.equity_risk_freshness(
+                output,
+                now=datetime(2026, 6, 8, 20, 40, tzinfo=timezone.utc),
+                after_close_lag_minutes=30,
+            )
+
+        self.assertFalse(before_ready["stale"])
+        self.assertEqual(before_ready["expectedDate"], "2026-06-05")
+        self.assertTrue(after_ready["stale"])
+        self.assertEqual(after_ready["expectedDate"], "2026-06-08")
+        self.assertEqual(after_ready["sourceDate"], "2026-06-05")
+
+    def test_equity_update_loop_uses_catchup_interval_when_equity_snapshot_is_stale(self):
+        calls = []
+        sleeps = []
+
+        def equity_update(output, *, years, timeout, limit):
+            calls.append((output, years, timeout, limit))
+            return {
+                "asOf": "2026-06-04",
+                "generatedAt": "2026-06-04T20:01:00+00:00",
+                "equityShortTermRisk": {"score": 80.4, "asOf": "2026-06-04"},
+            }
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            serve.equity_update_loop(
+                interval_minutes=30,
+                output=Path("dashboard.json"),
+                equity_update_func=equity_update,
+                years=2,
+                timeout=9,
+                limit=500,
+                catchup_interval_minutes=5,
+                stale_check_func=lambda output: True,
+                sleep_func=lambda seconds: sleeps.append(seconds),
+                max_runs=2,
+                initial_delay_seconds=0,
+            )
+
+        self.assertEqual(sleeps, [0, 5 * 60])
+        self.assertEqual(len(calls), 2)
+
     def test_post_update_starts_manual_refresh_and_returns_current_snapshot(self):
         entered = threading.Event()
         release = threading.Event()
@@ -257,6 +555,59 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(response.status, 202)
             self.assertEqual(payload["status"], "accepted")
             self.assertEqual(payload["asOf"], "2026-05-19")
+            self.assertTrue(entered.wait(timeout=1))
+
+    def test_post_update_equity_starts_lightweight_refresh_and_returns_current_risk_snapshot(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "data" / "dashboard.json"
+            dashboard = self.core_dashboard(generated_at="2026-06-04T20:00:00+00:00")
+            write_dashboard_json(dashboard, output)
+
+            def slow_equity_update(path, *, years, timeout, limit):
+                self.assertEqual(path, output)
+                self.assertEqual((years, timeout, limit), (2, 9, 500))
+                entered.set()
+                release.wait(timeout=2)
+                return {
+                    **dashboard,
+                    "generatedAt": "2026-06-04T20:02:00+00:00",
+                    "equityShortTermRisk": {"score": 80.4, "asOf": "2026-06-04"},
+                }
+
+            class EquityRefreshHandler(NoStoreHandler):
+                dashboard_output = output
+                equity_update_func = staticmethod(slow_equity_update)
+                equity_years = 2
+                equity_timeout = 9
+                equity_limit = 500
+
+                def log_message(self, format, *args):  # noqa: A002
+                    return
+
+            handler = functools.partial(EquityRefreshHandler, directory=temp_dir)
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+                connection.request("POST", "/api/update-equity")
+                response = connection.getresponse()
+                body = response.read()
+            finally:
+                release.set()
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=1)
+
+            payload = json.loads(body.decode("utf-8"))
+            self.assertEqual(response.status, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(payload["asOf"], "2026-05-19")
+            self.assertEqual(payload["equityRiskAsOf"], "2026-06-04")
+            self.assertEqual(payload["equityRiskScore"], 82.4)
             self.assertTrue(entered.wait(timeout=1))
 
     def test_post_update_reports_running_without_starting_duplicate_refresh(self):
@@ -538,6 +889,41 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(payload["status"], "ok")
             self.assertEqual(payload["history"]["latestBackfill"]["status"], "ok")
             self.assertNotIn("warnings", payload)
+
+    def test_api_health_degrades_when_equity_risk_snapshot_is_stale_after_close(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "data" / "dashboard.json"
+            dashboard = self.core_dashboard(generated_at="2026-06-08T20:00:00+00:00")
+            dashboard["equityShortTermRisk"]["asOf"] = "2026-06-05"
+            write_dashboard_json(dashboard, output)
+
+            class HealthHandler(NoStoreHandler):
+                dashboard_output = output
+                equity_freshness_now = datetime(2026, 6, 8, 20, 40, tzinfo=timezone.utc)
+
+                def log_message(self, format, *args):  # noqa: A002
+                    return
+
+            handler = functools.partial(HealthHandler, directory=temp_dir)
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+                connection.request("GET", "/api/health")
+                response = connection.getresponse()
+                payload = json.loads(response.read().decode("utf-8"))
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=1)
+
+            self.assertEqual(response.status, 200)
+            self.assertEqual(payload["status"], "degraded")
+            self.assertEqual(payload["equityRiskFreshness"]["expectedDate"], "2026-06-08")
+            self.assertEqual(payload["equityRiskFreshness"]["sourceDate"], "2026-06-05")
+            self.assertTrue(payload["equityRiskFreshness"]["stale"])
+            self.assertEqual(payload["warnings"][0]["name"], "Equity Short-Term Risk")
 
     def test_api_payload_for_path_returns_404_for_unknown_api_route(self):
         status, payload = api_payload_for_path({}, "/api/unknown")

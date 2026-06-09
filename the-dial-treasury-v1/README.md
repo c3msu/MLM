@@ -58,6 +58,15 @@ history, and optional daily background updates.
   that reuses the existing Conditions Score components plus 3-month score
   deterioration. High values mean greater SPY/SPX drawdown risk and map to
   equity allocation guidance from constructive through de-risk.
+- Short-Term Equity Risk Index: a daily 0-100 tactical risk layer for SPY that
+  combines Nasdaq OHLCV market structure, sector/leader rotation, hot-stock
+  reversal, downside trend-break/defensive-rotation fragility, weak
+  relief-rally traps, turnover support, official event risk, optional Cboe SPY
+  option OI, and the existing SPY macro warning, with a pure-overextension
+  dampener when event and breakdown confirmation are absent. It is separate
+  from the monthly macro lead study and includes a `lookAheadGuard.dataThrough`
+  field so a 2026-06-04 warning can be audited without using 2026-06-05 price
+  action as an input.
 - Local REST API routes when using `scripts/serve.py`.
 - Daily background update entrypoints through the local Python server or macOS
   LaunchAgent.
@@ -96,27 +105,51 @@ python3 the-dial-treasury-v1/scripts/serve.py --port 8451 --daily-at 16:30
 
 The server serves the existing `the-dial-treasury-v1/data/dashboard.json`
 immediately, runs the startup refresh in the background, and then refreshes
-again every day at the configured `HH:MM`. After each scheduled daily refresh,
-the server also refreshes the public historical SQLite backfill for the last
-5 years unless `--history-years 0` is passed. Refresh writes are atomic, so API
-requests do not read a partially written dashboard file. If a refresh returns
-real-source `error` rows while the current dashboard is healthy, the updater
-writes the candidate to `the-dial-treasury-v1/data/dashboard.failed.json` for
-inspection. If the candidate still has the core curve, scorecard, and
-Conditions Score trend content, it becomes the served snapshot and is persisted
-to history; if the candidate lacks that core content, the service keeps serving
-the last healthy dashboard and does not write it to history.
+again every day at the configured `HH:MM`. In parallel, it runs an equity-only
+refresh every 30 minutes by default (`--equity-interval-minutes 30`) so
+`equityShortTermRisk` can refetch Nasdaq OHLCV and rebuild the short-term
+market-risk block without waiting for the slower macro refresh. Use
+`--equity-interval-minutes 0` to disable that lightweight loop. After 16:00 New
+York close plus a 30-minute data lag, the server expects the latest weekday's
+daily bar to be available; if `equityShortTermRisk.asOf` is still behind that
+expected session, the equity-only loop switches to a 10-minute catch-up cadence
+(`--equity-catchup-interval-minutes 10`) until the snapshot catches up. After
+each scheduled daily refresh, the server also refreshes the public historical
+SQLite backfill for the last 5 years unless `--history-years 0` is passed.
+Refresh writes are atomic, so API requests do not read a partially written
+dashboard file. If a refresh returns real-source `error` rows while the current
+dashboard is healthy, the updater writes the candidate to
+`the-dial-treasury-v1/data/dashboard.failed.json` for inspection. If the
+candidate still has the core curve, scorecard, and Conditions Score trend
+content, it becomes the served snapshot and is persisted to history; if the
+candidate lacks that core content, the service keeps serving the last healthy
+dashboard and does not write it to history.
 
 The hero `刷新` button triggers `POST /api/update`, which starts the same
 public-data refresh in a background thread and returns the current snapshot
-immediately. The server must be running through `scripts/serve.py`; direct
-`file://` mode can only show the embedded fallback snapshot.
+immediately. The `股市` button triggers `POST /api/update-equity`, which only
+refreshes `equityShortTermRisk` with `save_history=False` and returns the
+current short-term equity-risk snapshot immediately. The server must be running
+through `scripts/serve.py`; direct `file://` mode can only show the embedded
+fallback snapshot.
+In served mode the browser also performs a lightweight dashboard snapshot sync
+every 5 minutes, and immediately when the tab becomes visible again. That auto
+sync reloads `data/dashboard.json` only; it does not refetch SQLite history
+series, so the short-term equity panel can catch backend updates without making
+the historical chart endpoints noisy. The top status row also reads
+`/api/health` and displays the `equityRiskFreshness` result as a compact
+`股市日线已同步` / `股市日线滞后` pill, making backend catch-up state visible
+without opening the data-source modal.
 If another manual refresh is already running, the endpoint returns `running`
 and reuses the active thread instead of starting a duplicate fetch.
-Every successful startup, scheduled, CLI, or manual refresh also persists the
-full dashboard snapshot and key metric observations into
-`the-dial-treasury-v1/data/history.sqlite3`. Only failed refresh candidates
-that are rejected in favor of the last healthy dashboard are skipped by history.
+Every successful startup, scheduled, CLI, or full manual refresh also persists
+the full dashboard snapshot and key metric observations into
+`the-dial-treasury-v1/data/history.sqlite3`. The high-frequency server
+equity-only loop deliberately skips history persistence to avoid duplicate
+partial snapshots; run `scripts/update_equity_risk.py` without `--no-history`
+when a one-off equity-only refresh should also be recorded. Only failed refresh
+candidates that are rejected in favor of the last healthy dashboard are skipped
+by history.
 
 To seed or refresh the five-year historical series immediately:
 
@@ -130,7 +163,9 @@ so rerunning it updates existing rows instead of duplicating history.
 For a macOS login background service, write a LaunchAgent plist:
 
 ```bash
-python3 the-dial-treasury-v1/scripts/install_launch_agent.py --daily-at 16:30 --port 8451 --load
+python3 the-dial-treasury-v1/scripts/install_launch_agent.py \
+  --daily-at 16:30 --port 8451 \
+  --equity-interval-minutes 30 --equity-catchup-interval-minutes 10 --load
 ```
 
 Install the companion health checker after the refresh window:
@@ -144,6 +179,23 @@ Manual health check:
 ```bash
 python3 the-dial-treasury-v1/scripts/check_health.py --url http://127.0.0.1:8451/api/health
 ```
+
+`/api/health` includes `equityRiskFreshness` when the short-term equity block
+has an `asOf` date. If the source date is behind the expected U.S. equity daily
+bar, health returns `degraded` with an `Equity Short-Term Risk` warning so the
+daily health checker can surface stale short-term monitoring.
+
+If the full public-data refresh is slow but the short-term equity warning needs
+fresh market-structure history, refresh only the equity block:
+
+```bash
+python3 the-dial-treasury-v1/scripts/update_equity_risk.py \
+  --output the-dial-treasury-v1/data/dashboard.json --years 3 --limit 900
+```
+
+This preserves the current macro snapshot, refetches Nasdaq OHLCV for the
+`equityShortTermRisk` symbol set, rebuilds the tactical risk trend/backtest,
+and keeps the page/API on the same `dashboard.json` contract.
 
 ## Data Boundary
 
@@ -178,6 +230,17 @@ Current real public sources:
   external shocks. It is calibrated against the existing monthly S&P 500
   lead-study diagnostics and should be read as a risk-control overlay, not a
   standalone return forecast.
+- The Short-Term Equity Risk Index is a separate daily market-structure
+  overlay. It uses Nasdaq historical OHLCV rows for SPY, QQQ, SMH, XLK, RSP,
+  IWM, defensive/consumer sector ETFs, and large hot-stock proxies such as
+  NVDA, AVGO, AMD, TSLA, META, MSFT, AAPL, AMZN, and GOOGL. It scores rally
+  extension, downtrend continuation, weak relief-rally traps after recent
+  high-to-low stress, sector rotation breaks, hot-stock close/high reversals,
+  SPY turnover support, high-importance official event risk, the existing macro
+  warning, and Cboe SPY put/call OI when the OI snapshot is dated on or before
+  the signal date. Pure overextension signals are damped when they lack both
+  event risk and downtrend-break confirmation. Later OI snapshots are displayed
+  as coverage metadata but excluded from the no-forward-looking score.
 - The duration/curve conclusion audit uses the editable scorecard, not the
   0-100 Conditions Score. Individual factor contribution is `factor score *
   normalized module weight / factor count`; source modes then discount evidence
@@ -206,6 +269,16 @@ Current real public sources:
   as a public futures proxy for the Fed path model.
 - Stooq public quote CSV for gold spot `XAUUSD`, used in the cross-market
   inflation/commodity panel.
+- Nasdaq public historical quote API for roughly three years of daily OHLCV
+  market-structure inputs used by `equityShortTermRisk`, including the
+  historical replay/backtest of forward SPY returns and next-10-trading-day
+  drawdowns by score bucket, alert threshold, simple historical regressions,
+  and the rendered risk-score versus SPY-indexed history curve.
+- Cboe delayed SPY option chain API for current option open-interest summaries.
+  Because the free endpoint is a current snapshot rather than a historical OI
+  feed, the short-term risk score excludes it whenever the snapshot date is
+  later than `lookAheadGuard.dataThrough`; the historical backtest does not
+  assume unavailable historical option-OI or broad-news archives.
 - NY Fed ACM term premium Excel (`ACMTP10`, `ACMRNY10`).
 - NY Fed Markets API primary dealer statistics, including Treasury dealer
   positions, transactions, repo financing, borrowed securities, and lent
@@ -254,6 +327,7 @@ REST slices:
 - `/api/news`
 - `/api/ideas`
 - `/api/spy_early_warning`
+- `/api/equity_short_term_risk`
 - `/api/source_status`
 - `/api/source-status`
 - `/api/history`

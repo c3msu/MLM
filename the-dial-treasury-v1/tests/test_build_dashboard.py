@@ -8,7 +8,13 @@ from treasury_data.build_dashboard import (
     apply_content_overrides,
     build_conclusion_audit,
     build_dashboard_from_inputs,
+    build_equity_short_term_risk_backtest,
+    build_equity_short_term_risk_index,
     build_events,
+    equity_qqq_tlt_rotation_component,
+    equity_short_term_signal_at,
+    equity_market_flow_component,
+    equity_vol_target_pressure_component,
     compute_tenor_realized_volatility,
     historical_percentile,
     parse_bhadial_public_score,
@@ -19,8 +25,10 @@ from treasury_data.sources import (
     CftcTreasuryPosition,
     DebtLimitStatus,
     FomcProjection,
+    MarketDailyBar,
     MarketQuote,
     NewsItem,
+    OptionOpenInterestSnapshot,
     PrimaryDealerStats,
     QuarterlyRefunding,
     SeriesPoint,
@@ -32,6 +40,128 @@ from treasury_data.sources import (
 
 
 class DashboardBuilderTests(unittest.TestCase):
+    def make_equity_bars(
+        self,
+        symbol: str,
+        *,
+        start_price: float,
+        pre_event_return: float,
+        june4_return: float,
+        june5_return: float,
+        volume_base: int = 50_000_000,
+        june4_volume_multiplier: float = 1.0,
+    ) -> list[MarketDailyBar]:
+        days: list[date] = []
+        cursor = date(2026, 3, 2)
+        while cursor <= date(2026, 6, 5):
+            if cursor.weekday() < 5:
+                days.append(cursor)
+            cursor += dashboard_builder.timedelta(days=1)
+        pre_days = [day for day in days if day < date(2026, 6, 4)]
+        daily_return = (1 + pre_event_return) ** (1 / max(len(pre_days) - 1, 1)) - 1
+        close = start_price
+        bars: list[MarketDailyBar] = []
+        for index, day in enumerate(days):
+            if index == 0:
+                day_return = 0.0
+            elif day == date(2026, 6, 4):
+                day_return = june4_return
+            elif day == date(2026, 6, 5):
+                day_return = june5_return
+            else:
+                day_return = daily_return
+            open_price = close
+            close = close * (1 + day_return)
+            high = max(open_price, close) * (1.006 if day == date(2026, 6, 4) and june4_return < 0 else 1.003)
+            low = min(open_price, close) * (0.997 if day == date(2026, 6, 4) else 0.998)
+            volume = int(volume_base * (1 + (index % 5) * 0.03))
+            if day == date(2026, 6, 4):
+                volume = int(volume_base * june4_volume_multiplier)
+            bars.append(
+                MarketDailyBar(
+                    symbol=symbol,
+                    date=day,
+                    open=round(open_price, 2),
+                    high=round(high, 2),
+                    low=round(low, 2),
+                    close=round(close, 2),
+                    volume=volume,
+                    source="unit-test",
+                )
+            )
+        return bars
+
+    def make_equity_bars_from_closes(
+        self,
+        symbol: str,
+        closes: list[float],
+        *,
+        start: date = date(2025, 2, 3),
+        volume_base: int = 50_000_000,
+        last_volume_multiplier: float = 1.0,
+    ) -> list[MarketDailyBar]:
+        days: list[date] = []
+        cursor = start
+        while len(days) < len(closes):
+            if cursor.weekday() < 5:
+                days.append(cursor)
+            cursor += dashboard_builder.timedelta(days=1)
+        bars: list[MarketDailyBar] = []
+        for index, (day, close) in enumerate(zip(days, closes)):
+            open_price = closes[index - 1] if index else close
+            high = max(open_price, close) * 1.004
+            low = min(open_price, close) * 0.996
+            volume = int(volume_base * (1 + (index % 7) * 0.04))
+            if index == len(closes) - 1:
+                volume = int(volume_base * last_volume_multiplier)
+            bars.append(
+                MarketDailyBar(
+                    symbol=symbol,
+                    date=day,
+                    open=round(open_price, 2),
+                    high=round(high, 2),
+                    low=round(low, 2),
+                    close=round(close, 2),
+                    volume=volume,
+                    source="unit-test",
+                )
+            )
+        return bars
+
+    def make_equity_bars_from_closes_and_ranges(
+        self,
+        symbol: str,
+        closes: list[float],
+        ranges: list[float],
+        *,
+        start: date = date(2025, 2, 3),
+        volume_base: int = 50_000_000,
+    ) -> list[MarketDailyBar]:
+        days: list[date] = []
+        cursor = start
+        while len(days) < len(closes):
+            if cursor.weekday() < 5:
+                days.append(cursor)
+            cursor += dashboard_builder.timedelta(days=1)
+        bars: list[MarketDailyBar] = []
+        for index, (day, close, day_range) in enumerate(zip(days, closes, ranges)):
+            open_price = closes[index - 1] if index else close
+            high = max(open_price, close) * (1 + max(day_range, 0.001) / 2)
+            low = min(open_price, close) * (1 - max(day_range, 0.001) / 2)
+            bars.append(
+                MarketDailyBar(
+                    symbol=symbol,
+                    date=day,
+                    open=round(open_price, 2),
+                    high=round(high, 2),
+                    low=round(low, 2),
+                    close=round(close, 2),
+                    volume=int(volume_base * (1 + (index % 5) * 0.05)),
+                    source="unit-test",
+                )
+            )
+        return bars
+
     def idea_indicators(self, **overrides):
         indicators = {
             "cpi_yoy": 3.8,
@@ -931,6 +1061,891 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertGreaterEqual(len(warning["trend"]["points"]), 50)
         self.assertEqual(warning["trend"]["points"][-1]["score"], warning["score"])
         self.assertIn("regime", warning["trend"]["points"][-1])
+
+    def test_equity_short_term_risk_flags_june4_before_next_day_selloff(self):
+        market_bars = {
+            "SPY": self.make_equity_bars("SPY", start_price=680, pre_event_return=0.103, june4_return=0.0038, june5_return=-0.0258, june4_volume_multiplier=0.72),
+            "QQQ": self.make_equity_bars("QQQ", start_price=520, pre_event_return=0.218, june4_return=-0.0048, june5_return=-0.048),
+            "SMH": self.make_equity_bars("SMH", start_price=190, pre_event_return=0.544, june4_return=-0.0163, june5_return=-0.092),
+            "XLK": self.make_equity_bars("XLK", start_price=180, pre_event_return=0.384, june4_return=-0.0156, june5_return=-0.066),
+            "TLT": self.make_equity_bars("TLT", start_price=88, pre_event_return=-0.021, june4_return=-0.002, june5_return=0.006),
+            "RSP": self.make_equity_bars("RSP", start_price=170, pre_event_return=0.031, june4_return=0.0076, june5_return=-0.014),
+            "IWM": self.make_equity_bars("IWM", start_price=210, pre_event_return=0.107, june4_return=0.0151, june5_return=-0.035),
+            "XLV": self.make_equity_bars("XLV", start_price=140, pre_event_return=-0.041, june4_return=0.0307, june5_return=0.006),
+            "AMD": self.make_equity_bars("AMD", start_price=80, pre_event_return=1.63, june4_return=-0.0356, june5_return=-0.108),
+            "AVGO": self.make_equity_bars("AVGO", start_price=700, pre_event_return=0.314, june4_return=-0.1259, june5_return=-0.079),
+            "TSLA": self.make_equity_bars("TSLA", start_price=320, pre_event_return=0.038, june4_return=-0.0124, june5_return=-0.066),
+            "META": self.make_equity_bars("META", start_price=620, pre_event_return=-0.04, june4_return=0.0074, june5_return=-0.055),
+            "MSFT": self.make_equity_bars("MSFT", start_price=460, pre_event_return=0.074, june4_return=0.0017, june5_return=-0.027),
+        }
+        events = [CalendarEvent(date=date(2026, 6, 5), title="BLS Employment Situation", source="FRED release calendar", importance="高")]
+
+        risk = build_equity_short_term_risk_index(
+            market_bars=market_bars,
+            macro_liquidity_equity={
+                "currentSignal": {
+                    "date": "2026-06-04",
+                    "score3mChange": 8.1,
+                    "levelBucket": "中位评分",
+                    "changeBucket": "评分上行",
+                }
+            },
+            spy_early_warning={"available": True, "score": 41.1, "regime": "Neutral"},
+            calendar_events=events,
+        )
+
+        self.assertTrue(risk["available"])
+        self.assertEqual(risk["asOf"], "2026-06-04")
+        self.assertEqual(risk["lookAheadGuard"]["dataThrough"], "2026-06-04")
+        self.assertEqual(risk["regime"], "Strong Alert")
+        self.assertGreaterEqual(risk["score"], 75)
+        self.assertLessEqual(risk["nextSessionShock"]["returnPct"], -2.0)
+        component_keys = {component["key"] for component in risk["components"]}
+        self.assertTrue({"volTargetPressure", "qqqTltRotation", "marketFlow", "sectorRotation", "hotStockReversal", "turnover", "eventRisk"}.issubset(component_keys))
+        driver_keys = {driver["key"] for driver in risk["drivers"]}
+        self.assertTrue({"rallyExtension", "leaderConcentration", "lateRotationBreak", "hotStockReversal", "eventRisk"}.intersection(driver_keys))
+        self.assertTrue(risk["backtest"]["available"])
+        self.assertIn("thresholdTests", risk["backtest"])
+
+    def test_equity_short_term_risk_uses_explainable_vol_target_and_qqq_tlt_rotation(self):
+        base = [100 + index * 0.18 for index in range(78)]
+        qqq_closes = base + [114.4, 113.6, 112.9, 111.8, 110.6, 109.7, 108.9, 108.1, 107.5, 107.0]
+        spy_closes = [100 + index * 0.10 for index in range(78)] + [108.0, 107.6, 107.2, 106.6, 106.0, 105.6, 105.1, 104.8, 104.5, 104.2]
+        tlt_closes = [100 - index * 0.03 for index in range(78)] + [97.5, 97.4, 97.1, 96.8, 96.6, 96.3, 96.2, 96.0, 95.9, 95.7]
+        quiet_ranges = [0.006] * 78
+        shock_ranges = [0.040, 0.044, 0.050, 0.047, 0.052, 0.045, 0.049, 0.046, 0.043, 0.041]
+        target = date(2025, 6, 6)
+        market_bars = {
+            "SPY": self.make_equity_bars_from_closes_and_ranges("SPY", spy_closes, quiet_ranges + [value * 0.72 for value in shock_ranges]),
+            "QQQ": self.make_equity_bars_from_closes_and_ranges("QQQ", qqq_closes, quiet_ranges + shock_ranges),
+            "TLT": self.make_equity_bars_from_closes_and_ranges("TLT", tlt_closes, [0.007] * len(tlt_closes)),
+            "SMH": self.make_equity_bars_from_closes_and_ranges("SMH", qqq_closes, quiet_ranges + shock_ranges),
+            "XLK": self.make_equity_bars_from_closes_and_ranges("XLK", qqq_closes, quiet_ranges + shock_ranges),
+            "RSP": self.make_equity_bars_from_closes_and_ranges("RSP", spy_closes, quiet_ranges + [0.012] * 10),
+            "IWM": self.make_equity_bars_from_closes_and_ranges("IWM", spy_closes, quiet_ranges + [0.016] * 10),
+            "NVDA": self.make_equity_bars_from_closes_and_ranges("NVDA", qqq_closes, quiet_ranges + shock_ranges),
+            "AVGO": self.make_equity_bars_from_closes_and_ranges("AVGO", qqq_closes, quiet_ranges + shock_ranges),
+            "AMD": self.make_equity_bars_from_closes_and_ranges("AMD", qqq_closes, quiet_ranges + shock_ranges),
+        }
+        normalized = dashboard_builder.normalize_market_bars(market_bars)
+
+        vol = equity_vol_target_pressure_component(normalized, target, weight=0.24)
+        rotation = equity_qqq_tlt_rotation_component(normalized, target, weight=0.18)
+        risk = equity_short_term_signal_at(
+            normalized,
+            target,
+            macro_liquidity_equity={"currentSignal": {"score3mChange": 2.0}},
+            spy_early_warning={"score": 42.0},
+            calendar_events=[],
+            option_open_interest=None,
+        )
+
+        self.assertGreaterEqual(vol["score"], 75)
+        self.assertIn("parkinsonVolBurst", {driver["key"] for driver in vol["drivers"]})
+        self.assertGreaterEqual(rotation["score"], 70)
+        self.assertIn("tltHedgeFailure", {driver["key"] for driver in rotation["drivers"]})
+        components_by_key = {component["key"]: component for component in risk["components"]}
+        self.assertEqual(components_by_key["volTargetPressure"]["weight"], 0.20)
+        self.assertEqual(components_by_key["qqqTltRotation"]["weight"], 0.16)
+        self.assertEqual(components_by_key["marketFlow"]["weight"], 0.18)
+        self.assertEqual(components_by_key["eventRisk"]["weight"], 0.02)
+        self.assertEqual(components_by_key["macroOverlay"]["weight"], 0.04)
+        self.assertEqual(components_by_key["optionOI"]["weight"], 0.0)
+        self.assertEqual(components_by_key["optionOI"]["scoreUse"], "missing")
+        evidence_by_component = {item["component"]: item for item in risk["factorEvidence"]}
+        self.assertEqual(evidence_by_component["volTargetPressure"]["sourceQuality"], "high")
+        self.assertTrue(evidence_by_component["volTargetPressure"]["historicalReplay"])
+        self.assertEqual(evidence_by_component["qqqTltRotation"]["sourceQuality"], "high")
+        self.assertTrue(evidence_by_component["qqqTltRotation"]["historicalReplay"])
+
+    def test_equity_qqq_tlt_rotation_flags_crowded_risk_on_rollover(self):
+        qqq_closes = [100 + index * 0.35 for index in range(70)] + [125, 126, 127, 128, 129, 130, 130.5, 130.2]
+        tlt_closes = [100 - index * 0.08 for index in range(70)] + [94.4, 94.1, 93.8, 93.5, 93.2, 93.0, 92.8, 93.0]
+        market_bars = {
+            "QQQ": self.make_equity_bars_from_closes("QQQ", qqq_closes),
+            "TLT": self.make_equity_bars_from_closes("TLT", tlt_closes),
+        }
+
+        rotation = equity_qqq_tlt_rotation_component(
+            dashboard_builder.normalize_market_bars(market_bars),
+            date(2025, 5, 22),
+            weight=0.18,
+        )
+
+        self.assertGreaterEqual(rotation["score"], 75)
+        self.assertIn("qqqTltCrowdedRollover", {driver["key"] for driver in rotation["drivers"]})
+
+    def test_equity_short_term_risk_backtest_summarizes_forward_drawdowns_by_bucket(self):
+        days = [date(2026, 1, 2) + dashboard_builder.timedelta(days=index) for index in range(20)]
+        closes = [100, 101, 102, 103, 99, 98, 101, 103, 104, 105, 104, 102, 101, 103, 104, 105, 104, 103, 102, 101]
+        spy_bars = [
+            MarketDailyBar(
+                symbol="SPY",
+                date=day,
+                open=close,
+                high=close * 1.01,
+                low=close * 0.99,
+                close=close,
+                volume=10_000_000,
+                source="unit-test",
+            )
+            for day, close in zip(days, closes)
+        ]
+        trend_points = [
+            {"date": days[0].isoformat(), "score": 35.0, "regime": "Normal"},
+            {"date": days[1].isoformat(), "score": 82.0, "regime": "Strong Alert"},
+            {"date": days[7].isoformat(), "score": 66.0, "regime": "Caution"},
+            {"date": days[8].isoformat(), "score": 45.0, "regime": "Watch"},
+        ]
+
+        backtest = build_equity_short_term_risk_backtest(trend_points, spy_bars)
+
+        self.assertTrue(backtest["available"])
+        self.assertEqual(backtest["sampleSize"], 4)
+        strong_bucket = next(bucket for bucket in backtest["scoreBuckets"] if bucket["label"] == "Strong Alert")
+        self.assertEqual(strong_bucket["count"], 1)
+        self.assertLessEqual(strong_bucket["avgMaxDrawdown10d"], -2.0)
+        threshold_75 = next(test for test in backtest["thresholdTests"] if test["threshold"] == 75)
+        self.assertEqual(threshold_75["alertDays"], 1)
+        self.assertEqual(threshold_75["truePositives"], 1)
+        self.assertEqual(threshold_75["precision"], 100.0)
+        tiered = {test["threshold"]: test for test in backtest["tieredThresholdTests"]}
+        self.assertEqual(tiered[75]["key"], "strongAlert")
+        self.assertEqual(tiered[75]["label"], "强告警")
+        self.assertEqual(tiered[60]["key"], "cautionPlus")
+        self.assertEqual(tiered[60]["label"], "警戒以上")
+        self.assertGreaterEqual(tiered[60]["recall"], tiered[75]["recall"])
+        self.assertIn("高精度", tiered[75]["useCase"])
+        self.assertIn("覆盖", tiered[60]["useCase"])
+        self.assertEqual([row["threshold"] for row in backtest["calibrationGrid"]], [50, 55, 60, 65, 70, 75])
+        recommended = backtest["recommendedCautionThreshold"]
+        self.assertIn(recommended["threshold"], {55, 60, 65, 70})
+        self.assertIn("推荐观察", recommended["label"])
+        self.assertIn("precision", recommended)
+        self.assertIn("componentDiagnostics", backtest)
+        self.assertGreaterEqual(len(backtest["worstWindows"]), 1)
+
+    def test_equity_short_term_risk_backtest_audits_component_predictive_quality(self):
+        days = [date(2026, 1, 2) + dashboard_builder.timedelta(days=index) for index in range(25)]
+        closes = [100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 98, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100]
+        spy_bars = [
+            MarketDailyBar(
+                symbol="SPY",
+                date=day,
+                open=close,
+                high=close * 1.01,
+                low=close * 0.99,
+                close=close,
+                volume=10_000_000,
+                source="unit-test",
+            )
+            for day, close in zip(days, closes)
+        ]
+        trend_points = [
+            {
+                "date": days[0].isoformat(),
+                "score": 80.0,
+                "regime": "Strong Alert",
+                "componentScores": {
+                    "goodFactor": {"label": "有效因子", "score": 85.0, "weight": 0.20},
+                    "weakFactor": {"label": "噪声因子", "score": 25.0, "weight": 0.10},
+                },
+            },
+            {
+                "date": days[1].isoformat(),
+                "score": 82.0,
+                "regime": "Strong Alert",
+                "componentScores": {
+                    "goodFactor": {"label": "有效因子", "score": 90.0, "weight": 0.20},
+                    "weakFactor": {"label": "噪声因子", "score": 35.0, "weight": 0.10},
+                },
+            },
+            {
+                "date": days[16].isoformat(),
+                "score": 45.0,
+                "regime": "Watch",
+                "componentScores": {
+                    "goodFactor": {"label": "有效因子", "score": 25.0, "weight": 0.20},
+                    "weakFactor": {"label": "噪声因子", "score": 88.0, "weight": 0.10},
+                },
+            },
+            {
+                "date": days[17].isoformat(),
+                "score": 44.0,
+                "regime": "Watch",
+                "componentScores": {
+                    "goodFactor": {"label": "有效因子", "score": 35.0, "weight": 0.20},
+                    "weakFactor": {"label": "噪声因子", "score": 82.0, "weight": 0.10},
+                },
+            },
+        ]
+
+        backtest = build_equity_short_term_risk_backtest(trend_points, spy_bars)
+
+        diagnostics = {row["component"]: row for row in backtest["componentDiagnostics"]}
+        self.assertEqual(diagnostics["goodFactor"]["decision"], "core")
+        self.assertEqual(diagnostics["goodFactor"]["precision"], 100.0)
+        self.assertIn("保留", diagnostics["goodFactor"]["recommendation"])
+        self.assertEqual(diagnostics["weakFactor"]["decision"], "trim")
+        self.assertEqual(diagnostics["weakFactor"]["precision"], 0.0)
+        self.assertIn("降权", diagnostics["weakFactor"]["recommendation"])
+
+    def test_equity_short_term_risk_backtest_runs_historical_regressions(self):
+        days = [date(2026, 1, 2) + dashboard_builder.timedelta(days=index) for index in range(20)]
+        closes = [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 108, 106, 104, 102, 100, 98, 96, 95, 94]
+        spy_bars = [
+            MarketDailyBar(
+                symbol="SPY",
+                date=day,
+                open=close,
+                high=close * 1.01,
+                low=close * 0.99,
+                close=close,
+                volume=10_000_000,
+                source="unit-test",
+            )
+            for day, close in zip(days, closes)
+        ]
+        trend_points = [
+            {"date": days[0].isoformat(), "score": 10.0, "regime": "Normal"},
+            {"date": days[4].isoformat(), "score": 30.0, "regime": "Normal"},
+            {"date": days[8].isoformat(), "score": 70.0, "regime": "Caution"},
+            {"date": days[9].isoformat(), "score": 90.0, "regime": "Strong Alert"},
+        ]
+
+        backtest = build_equity_short_term_risk_backtest(trend_points, spy_bars)
+
+        regressions = {item["target"]: item for item in backtest["regressionTests"]}
+        self.assertLess(regressions["forward10d"]["slopePer10Score"], 0)
+        self.assertLess(regressions["maxDrawdown10d"]["slopePer10Score"], 0)
+        self.assertGreater(regressions["drawdownEvent10d"]["slopePer10Score"], 0)
+        self.assertGreater(regressions["drawdownEvent10d"]["rSquared"], 0)
+        self.assertIn("score每升10分", regressions["maxDrawdown10d"]["summary"])
+
+    def test_equity_short_term_risk_backtest_counts_relaxed_15d_prediction_window(self):
+        days = [date(2026, 1, 2) + dashboard_builder.timedelta(days=index) for index in range(25)]
+        closes = [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 111, 110, 108, 106, 104, 99, 98, 97, 96, 95, 94, 93]
+        spy_bars = [
+            MarketDailyBar(
+                symbol="SPY",
+                date=day,
+                open=close,
+                high=close * 1.01,
+                low=close * 0.99,
+                close=close,
+                volume=10_000_000,
+                source="unit-test",
+            )
+            for day, close in zip(days, closes)
+        ]
+        trend_points = [
+            {"date": days[3].isoformat(), "score": 82.0, "regime": "Strong Alert"},
+            {"date": days[4].isoformat(), "score": 35.0, "regime": "Normal"},
+        ]
+
+        backtest = build_equity_short_term_risk_backtest(trend_points, spy_bars)
+
+        threshold_10 = next(test for test in backtest["thresholdTests"] if test["threshold"] == 75)
+        threshold_15 = next(test for test in backtest["horizonTests"] if test["threshold"] == 75 and test["horizon"] == 15)
+        self.assertEqual(threshold_10["truePositives"], 0)
+        self.assertEqual(threshold_15["truePositives"], 1)
+        self.assertEqual(threshold_15["precision"], 100.0)
+        self.assertEqual(backtest["preferredThresholdTest"]["horizon"], 15)
+
+    def test_equity_short_term_risk_backtest_reports_alert_lead_time(self):
+        days = [date(2026, 1, 5) + dashboard_builder.timedelta(days=index) for index in range(18)]
+        closes = [100, 100.1, 99.8, 99.2, 97.8, 98.0, 98.4, 99.0, 99.4, 99.7, 100.0, 100.2, 100.4, 100.6, 100.8, 101.0, 101.2, 101.4]
+        spy_bars = []
+        for index, (day, close) in enumerate(zip(days, closes)):
+            open_price = closes[index - 1] if index else close
+            spy_bars.append(
+                MarketDailyBar(
+                    symbol="SPY",
+                    date=day,
+                    open=open_price,
+                    high=max(open_price, close) * 1.001,
+                    low=close,
+                    close=close,
+                    volume=10_000_000,
+                    source="unit-test",
+                )
+            )
+        trend_points = [
+            {"date": days[0].isoformat(), "score": 82.0, "regime": "Strong Alert"},
+            {"date": days[1].isoformat(), "score": 35.0, "regime": "Normal"},
+        ]
+
+        backtest = build_equity_short_term_risk_backtest(trend_points, spy_bars)
+
+        preferred = backtest["preferredThresholdTest"]
+        self.assertEqual(preferred["truePositives"], 1)
+        self.assertEqual(preferred["avgDrawdownLeadDaysWhenHit"], 4.0)
+        self.assertEqual(preferred["medianDrawdownLeadDaysWhenHit"], 4.0)
+        self.assertEqual(backtest["alertClusterTest"]["avgLeadDays"], 4.0)
+        self.assertEqual(backtest["alertClusterTest"]["clusters"][0]["leadDays"], 4)
+
+    def test_equity_short_term_risk_backtest_exposes_alert_windows_for_chart_audit(self):
+        days = [date(2026, 2, 2) + dashboard_builder.timedelta(days=index) for index in range(24)]
+        closes = [100, 100.5, 101, 101.4, 101.8, 102.2, 101.7, 101.2, 100.8, 99.9, 99.0, 98.4, 98.0, 98.6, 99.2, 100.0, 100.5, 101.0, 101.4, 101.8, 102.1, 102.4, 102.6, 102.8]
+        spy_bars = []
+        for index, (day, close) in enumerate(zip(days, closes)):
+            open_price = closes[index - 1] if index else close
+            spy_bars.append(
+                MarketDailyBar(
+                    symbol="SPY",
+                    date=day,
+                    open=open_price,
+                    high=max(open_price, close) * 1.002,
+                    low=close,
+                    close=close,
+                    volume=10_000_000,
+                    source="unit-test",
+                )
+            )
+        trend_points = [
+            {"date": days[0].isoformat(), "score": 34.0, "regime": "Normal", "regimeCn": "正常"},
+            {"date": days[3].isoformat(), "score": 81.0, "regime": "Strong Alert", "regimeCn": "强告警"},
+            {"date": days[4].isoformat(), "score": 88.0, "regime": "Strong Alert", "regimeCn": "强告警"},
+            {"date": days[15].isoformat(), "score": 42.0, "regime": "Watch", "regimeCn": "观察"},
+        ]
+
+        backtest = build_equity_short_term_risk_backtest(trend_points, spy_bars)
+
+        self.assertTrue(backtest["available"])
+        self.assertIn("alertWindows", backtest)
+        self.assertGreaterEqual(len(backtest["alertWindows"]), 2)
+        first = backtest["alertWindows"][0]
+        self.assertEqual(first["date"], days[4].isoformat())
+        self.assertEqual(first["score"], 88.0)
+        self.assertEqual(first["regimeCn"], "强告警")
+        self.assertEqual(first["horizon"], 15)
+        self.assertTrue(first["hit"])
+        self.assertEqual(first["drawdownLeadDays15d"], 6)
+        self.assertLessEqual(first["maxDrawdown15d"], -2.0)
+        self.assertIn("spyClose", first)
+        self.assertIn("forward15d", first)
+
+    def test_equity_short_term_risk_backtest_dedupes_contiguous_alert_clusters(self):
+        days = [date(2026, 1, 2) + dashboard_builder.timedelta(days=index) for index in range(22)]
+        closes = [100, 101, 102, 103, 104, 105, 106, 105, 104, 103, 102, 100, 98, 96, 95, 94, 93, 92, 91, 90, 89, 88]
+        spy_bars = [
+            MarketDailyBar(
+                symbol="SPY",
+                date=day,
+                open=close,
+                high=close * 1.01,
+                low=close * 0.99,
+                close=close,
+                volume=10_000_000,
+                source="unit-test",
+            )
+            for day, close in zip(days, closes)
+        ]
+        trend_points = [
+            {"date": days[2].isoformat(), "score": 78.0, "regime": "Strong Alert"},
+            {"date": days[3].isoformat(), "score": 82.0, "regime": "Strong Alert"},
+            {"date": days[4].isoformat(), "score": 79.0, "regime": "Strong Alert"},
+        ]
+
+        backtest = build_equity_short_term_risk_backtest(trend_points, spy_bars)
+
+        cluster = backtest["alertClusterTest"]
+        self.assertEqual(cluster["threshold"], 75)
+        self.assertEqual(cluster["horizon"], 15)
+        self.assertEqual(cluster["clusterCount"], 1)
+        self.assertEqual(cluster["hitClusters"], 1)
+        self.assertEqual(cluster["precision"], 100.0)
+
+    def test_equity_short_term_risk_flags_downtrend_continuation(self):
+        market_bars = {
+            "SPY": self.make_equity_bars("SPY", start_price=620, pre_event_return=-0.07, june4_return=-0.014, june5_return=-0.028, june4_volume_multiplier=1.12),
+            "QQQ": self.make_equity_bars("QQQ", start_price=510, pre_event_return=-0.11, june4_return=-0.021, june5_return=-0.041),
+            "SMH": self.make_equity_bars("SMH", start_price=245, pre_event_return=-0.14, june4_return=-0.034, june5_return=-0.058),
+            "XLK": self.make_equity_bars("XLK", start_price=230, pre_event_return=-0.10, june4_return=-0.020, june5_return=-0.040),
+            "RSP": self.make_equity_bars("RSP", start_price=185, pre_event_return=-0.035, june4_return=-0.006, june5_return=-0.016),
+            "IWM": self.make_equity_bars("IWM", start_price=215, pre_event_return=-0.09, june4_return=-0.018, june5_return=-0.036),
+            "XLV": self.make_equity_bars("XLV", start_price=145, pre_event_return=0.01, june4_return=0.003, june5_return=-0.004),
+            "XLU": self.make_equity_bars("XLU", start_price=74, pre_event_return=0.02, june4_return=0.004, june5_return=-0.003),
+            "XLP": self.make_equity_bars("XLP", start_price=82, pre_event_return=0.015, june4_return=0.003, june5_return=-0.003),
+            "AMD": self.make_equity_bars("AMD", start_price=110, pre_event_return=-0.18, june4_return=-0.041, june5_return=-0.078),
+            "AVGO": self.make_equity_bars("AVGO", start_price=900, pre_event_return=-0.12, june4_return=-0.045, june5_return=-0.070),
+            "TSLA": self.make_equity_bars("TSLA", start_price=320, pre_event_return=-0.15, june4_return=-0.036, june5_return=-0.064),
+            "META": self.make_equity_bars("META", start_price=620, pre_event_return=-0.08, june4_return=-0.020, june5_return=-0.052),
+            "MSFT": self.make_equity_bars("MSFT", start_price=460, pre_event_return=-0.06, june4_return=-0.018, june5_return=-0.030),
+        }
+
+        flow = equity_market_flow_component(dashboard_builder.normalize_market_bars(market_bars), date(2026, 6, 4), weight=0.22)
+        risk = build_equity_short_term_risk_index(market_bars=market_bars)
+
+        self.assertGreaterEqual(flow["score"], 75)
+        self.assertTrue(any(driver["key"] == "downtrendContinuation" for driver in flow["drivers"]))
+        self.assertEqual(risk["regime"], "Strong Alert")
+        self.assertGreaterEqual(risk["score"], 75)
+
+    def test_equity_short_term_risk_keeps_warning_after_fragile_relief_rally(self):
+        spy_closes = [100.0 + index * 0.04 for index in range(12)] + [100, 100.5, 101, 100.6, 99.8, 98.7, 97.5, 96.1, 94.0, 92.0, 93.4, 95.6, 96.3]
+        qqq_closes = [100.0 + index * 0.03 for index in range(12)] + [100, 100.2, 100.5, 99.6, 98.0, 96.1, 94.0, 92.3, 90.4, 89.0, 90.1, 91.0, 91.5]
+        smh_closes = [100.0 + index * 0.05 for index in range(12)] + [100, 101.0, 100.4, 98.2, 95.0, 92.0, 89.5, 87.7, 85.0, 83.0, 84.0, 85.2, 85.8]
+        defensive_closes = [100.0 + index * 0.02 for index in range(12)] + [100, 100.4, 100.6, 100.9, 101.0, 101.4, 101.6, 101.8, 102.0, 102.2, 102.4, 102.6, 102.8]
+        market_bars = {
+            "SPY": self.make_equity_bars_from_closes("SPY", spy_closes, last_volume_multiplier=0.52),
+            "QQQ": self.make_equity_bars_from_closes("QQQ", qqq_closes),
+            "SMH": self.make_equity_bars_from_closes("SMH", smh_closes),
+            "XLK": self.make_equity_bars_from_closes("XLK", qqq_closes),
+            "RSP": self.make_equity_bars_from_closes("RSP", spy_closes),
+            "IWM": self.make_equity_bars_from_closes("IWM", qqq_closes),
+            "XLV": self.make_equity_bars_from_closes("XLV", defensive_closes),
+            "XLU": self.make_equity_bars_from_closes("XLU", defensive_closes),
+            "XLP": self.make_equity_bars_from_closes("XLP", defensive_closes),
+            "NVDA": self.make_equity_bars_from_closes("NVDA", smh_closes),
+            "AVGO": self.make_equity_bars_from_closes("AVGO", smh_closes),
+            "AMD": self.make_equity_bars_from_closes("AMD", smh_closes),
+            "TSLA": self.make_equity_bars_from_closes("TSLA", qqq_closes),
+            "META": self.make_equity_bars_from_closes("META", qqq_closes),
+            "MSFT": self.make_equity_bars_from_closes("MSFT", qqq_closes),
+        }
+
+        risk = build_equity_short_term_risk_index(market_bars=market_bars)
+
+        self.assertGreaterEqual(risk["score"], 60)
+        self.assertIn("reliefRallyTrap", {driver["key"] for driver in risk["drivers"]})
+
+    def test_equity_short_term_risk_dampens_pure_extension_noise_without_event_or_breakdown(self):
+        market_bars = {
+            "SPY": self.make_equity_bars("SPY", start_price=520, pre_event_return=0.25, june4_return=0.001, june5_return=0.004, june4_volume_multiplier=0.42),
+            "QQQ": self.make_equity_bars("QQQ", start_price=420, pre_event_return=0.40, june4_return=-0.011, june5_return=0.006),
+            "SMH": self.make_equity_bars("SMH", start_price=180, pre_event_return=0.75, june4_return=-0.018, june5_return=0.008),
+            "XLK": self.make_equity_bars("XLK", start_price=170, pre_event_return=0.45, june4_return=-0.012, june5_return=0.006),
+            "RSP": self.make_equity_bars("RSP", start_price=155, pre_event_return=0.05, june4_return=0.002, june5_return=0.003),
+            "IWM": self.make_equity_bars("IWM", start_price=205, pre_event_return=0.05, june4_return=0.002, june5_return=0.003),
+            "NVDA": self.make_equity_bars("NVDA", start_price=820, pre_event_return=0.85, june4_return=-0.035, june5_return=0.014),
+            "AVGO": self.make_equity_bars("AVGO", start_price=760, pre_event_return=0.75, june4_return=-0.034, june5_return=0.012),
+            "AMD": self.make_equity_bars("AMD", start_price=130, pre_event_return=0.65, june4_return=-0.032, june5_return=0.012),
+            "TSLA": self.make_equity_bars("TSLA", start_price=250, pre_event_return=0.40, june4_return=-0.030, june5_return=0.010),
+            "META": self.make_equity_bars("META", start_price=540, pre_event_return=0.35, june4_return=-0.028, june5_return=0.008),
+            "MSFT": self.make_equity_bars("MSFT", start_price=420, pre_event_return=0.30, june4_return=-0.026, june5_return=0.006),
+            "AAPL": self.make_equity_bars("AAPL", start_price=190, pre_event_return=0.28, june4_return=-0.024, june5_return=0.006),
+            "AMZN": self.make_equity_bars("AMZN", start_price=175, pre_event_return=0.32, june4_return=-0.024, june5_return=0.006),
+            "GOOGL": self.make_equity_bars("GOOGL", start_price=150, pre_event_return=0.30, june4_return=-0.024, june5_return=0.006),
+        }
+
+        risk = equity_short_term_signal_at(
+            dashboard_builder.normalize_market_bars(market_bars),
+            date(2026, 6, 4),
+            macro_liquidity_equity={},
+            spy_early_warning={},
+            calendar_events=[],
+            option_open_interest=None,
+        )
+
+        self.assertLess(risk["score"], 75)
+        self.assertEqual(risk["regime"], "Caution")
+
+    def test_equity_short_term_risk_dampens_crowded_rollover_without_event_or_vol_confirmation(self):
+        market_bars = {
+            "SPY": self.make_equity_bars("SPY", start_price=680, pre_event_return=0.103, june4_return=0.0038, june5_return=0.006, june4_volume_multiplier=0.72),
+            "QQQ": self.make_equity_bars("QQQ", start_price=520, pre_event_return=0.218, june4_return=-0.0048, june5_return=0.006),
+            "SMH": self.make_equity_bars("SMH", start_price=190, pre_event_return=0.544, june4_return=-0.0163, june5_return=0.008),
+            "XLK": self.make_equity_bars("XLK", start_price=180, pre_event_return=0.384, june4_return=-0.0156, june5_return=0.006),
+            "TLT": self.make_equity_bars("TLT", start_price=88, pre_event_return=-0.021, june4_return=-0.002, june5_return=0.006),
+            "RSP": self.make_equity_bars("RSP", start_price=170, pre_event_return=0.031, june4_return=0.0076, june5_return=0.003),
+            "IWM": self.make_equity_bars("IWM", start_price=210, pre_event_return=0.107, june4_return=0.0151, june5_return=0.003),
+            "XLV": self.make_equity_bars("XLV", start_price=140, pre_event_return=-0.041, june4_return=0.0307, june5_return=0.006),
+            "AMD": self.make_equity_bars("AMD", start_price=80, pre_event_return=1.63, june4_return=-0.0356, june5_return=0.008),
+            "AVGO": self.make_equity_bars("AVGO", start_price=700, pre_event_return=0.314, june4_return=-0.1259, june5_return=0.008),
+            "TSLA": self.make_equity_bars("TSLA", start_price=320, pre_event_return=0.038, june4_return=-0.0124, june5_return=0.006),
+            "META": self.make_equity_bars("META", start_price=620, pre_event_return=-0.04, june4_return=0.0074, june5_return=0.006),
+            "MSFT": self.make_equity_bars("MSFT", start_price=460, pre_event_return=0.074, june4_return=0.0017, june5_return=0.006),
+        }
+
+        risk = equity_short_term_signal_at(
+            dashboard_builder.normalize_market_bars(market_bars),
+            date(2026, 6, 4),
+            macro_liquidity_equity={},
+            spy_early_warning={},
+            calendar_events=[],
+            option_open_interest=None,
+        )
+
+        self.assertLess(risk["score"], 75)
+        self.assertNotEqual(risk["regime"], "Strong Alert")
+
+    def test_equity_short_term_risk_dampens_post_washout_vol_without_sector_confirmation(self):
+        def bars(symbol: str, closes: list[float], ranges: list[float]) -> list[MarketDailyBar]:
+            return self.make_equity_bars_from_closes_and_ranges(symbol, closes, ranges)
+
+        pre = [100.0 + index * 0.03 for index in range(44)]
+        spy_closes = pre + [102, 101, 99, 97, 94, 91, 88, 89, 90, 91, 90, 89, 88, 87, 86, 85, 86, 87, 86, 85]
+        qqq_closes = pre + [103, 101, 98, 95, 91, 87, 83, 84, 85, 86, 85, 84, 83, 82, 81, 80, 81, 82, 80, 79]
+        tlt_closes = pre + [100, 99, 98, 97, 96, 95, 94, 93.5, 93, 92.5, 92, 91.5, 91, 90.5, 90, 89.5, 89, 88.7, 88.5, 88.3]
+        defensive_closes = [100.0 + index * 0.02 for index in range(len(spy_closes))]
+        hot_closes = pre + [120, 118, 114, 110, 105, 100, 96, 98, 100, 102, 104, 106, 108, 110, 112, 114, 113, 112, 108 / 0.96, 108]
+        ranges = [0.006] * 44 + [0.055] * 20
+        market_bars = {
+            "SPY": bars("SPY", spy_closes, ranges),
+            "QQQ": bars("QQQ", qqq_closes, ranges),
+            "TLT": bars("TLT", tlt_closes, ranges),
+            "SMH": bars("SMH", qqq_closes, ranges),
+            "XLK": bars("XLK", qqq_closes, ranges),
+            "RSP": bars("RSP", spy_closes, ranges),
+            "IWM": bars("IWM", spy_closes, ranges),
+            "XLV": bars("XLV", defensive_closes, ranges),
+            "XLU": bars("XLU", defensive_closes, ranges),
+            "XLP": bars("XLP", defensive_closes, ranges),
+        }
+        for symbol in ("NVDA", "AVGO", "AMD", "TSLA", "META", "MSFT"):
+            market_bars[symbol] = bars(symbol, hot_closes, ranges)
+
+        risk = equity_short_term_signal_at(
+            dashboard_builder.normalize_market_bars(market_bars),
+            date(2025, 5, 1),
+            macro_liquidity_equity={},
+            spy_early_warning={},
+            calendar_events=[],
+            option_open_interest=None,
+        )
+
+        self.assertLess(risk["score"], 75)
+        self.assertNotEqual(risk["regime"], "Strong Alert")
+
+    def test_equity_short_term_risk_attaches_source_quality_and_factor_evidence(self):
+        market_bars = {
+            "SPY": self.make_equity_bars("SPY", start_price=620, pre_event_return=0.10, june4_return=-0.006, june5_return=0.003, june4_volume_multiplier=0.82),
+            "QQQ": self.make_equity_bars("QQQ", start_price=510, pre_event_return=0.16, june4_return=-0.015, june5_return=0.002),
+            "SMH": self.make_equity_bars("SMH", start_price=245, pre_event_return=0.32, june4_return=-0.022, june5_return=0.003),
+            "XLK": self.make_equity_bars("XLK", start_price=230, pre_event_return=0.18, june4_return=-0.014, june5_return=0.002),
+            "TLT": self.make_equity_bars("TLT", start_price=88, pre_event_return=-0.02, june4_return=-0.003, june5_return=0.002),
+            "RSP": self.make_equity_bars("RSP", start_price=185, pre_event_return=0.04, june4_return=0.001, june5_return=0.002),
+            "IWM": self.make_equity_bars("IWM", start_price=215, pre_event_return=0.03, june4_return=-0.002, june5_return=0.002),
+            "XLV": self.make_equity_bars("XLV", start_price=145, pre_event_return=0.02, june4_return=0.002, june5_return=0.001),
+            "XLU": self.make_equity_bars("XLU", start_price=74, pre_event_return=0.02, june4_return=0.002, june5_return=0.001),
+            "XLP": self.make_equity_bars("XLP", start_price=82, pre_event_return=0.02, june4_return=0.002, june5_return=0.001),
+            "NVDA": self.make_equity_bars("NVDA", start_price=820, pre_event_return=0.55, june4_return=-0.030, june5_return=0.006),
+            "AVGO": self.make_equity_bars("AVGO", start_price=760, pre_event_return=0.42, june4_return=-0.028, june5_return=0.006),
+            "AMD": self.make_equity_bars("AMD", start_price=130, pre_event_return=0.36, june4_return=-0.026, june5_return=0.006),
+            "TSLA": self.make_equity_bars("TSLA", start_price=250, pre_event_return=0.30, june4_return=-0.020, june5_return=0.005),
+            "META": self.make_equity_bars("META", start_price=540, pre_event_return=0.24, june4_return=-0.018, june5_return=0.004),
+            "MSFT": self.make_equity_bars("MSFT", start_price=420, pre_event_return=0.18, june4_return=-0.015, june5_return=0.003),
+        }
+        option_snapshot = OptionOpenInterestSnapshot(
+            symbol="SPY",
+            as_of=date(2026, 6, 5),
+            timestamp=datetime(2026, 6, 5, 21, 0, tzinfo=timezone.utc),
+            put_open_interest=1_300_000,
+            call_open_interest=900_000,
+            put_volume=820_000,
+            call_volume=700_000,
+            put_call_open_interest_ratio=1.44,
+            put_call_volume_ratio=1.17,
+            current_price=620.0,
+            source="Cboe delayed option snapshot",
+        )
+
+        risk = equity_short_term_signal_at(
+            dashboard_builder.normalize_market_bars(market_bars),
+            date(2026, 6, 4),
+            macro_liquidity_equity={"currentSignal": {"score3mChange": 8.0}},
+            spy_early_warning={"score": 64.0},
+            calendar_events=[CalendarEvent(date(2026, 6, 8), "BLS Employment Situation", "BLS", "高")],
+            option_open_interest=option_snapshot,
+        )
+
+        self.assertGreaterEqual(risk["sourceQuality"]["scoreEligibleWeightPct"], 90.0)
+        self.assertGreaterEqual(risk["sourceQuality"]["historicalReplayableWeightPct"], 70.0)
+        self.assertEqual(risk["forwardCatalystRisk"]["windowDays"], 5)
+        self.assertEqual(risk["forwardCatalystRisk"]["eventCount"], 1)
+        evidence_by_component = {item["component"]: item for item in risk["factorEvidence"]}
+        self.assertEqual(evidence_by_component["volTargetPressure"]["sourceQuality"], "high")
+        self.assertTrue(evidence_by_component["volTargetPressure"]["historicalReplay"])
+        self.assertEqual(evidence_by_component["qqqTltRotation"]["sourceQuality"], "high")
+        self.assertTrue(evidence_by_component["qqqTltRotation"]["historicalReplay"])
+        self.assertEqual(evidence_by_component["marketFlow"]["sourceQuality"], "high")
+        self.assertEqual(evidence_by_component["marketFlow"]["scoreUse"], "scored")
+        self.assertTrue(evidence_by_component["marketFlow"]["historicalReplay"])
+        self.assertEqual(evidence_by_component["optionOI"]["scoreUse"], "auditOnly")
+        self.assertFalse(evidence_by_component["optionOI"]["historicalReplay"])
+
+    def test_equity_short_term_risk_dampens_repair_rally_after_deep_washout(self):
+        base = [100.0 + index * 0.08 for index in range(40)]
+        spy_closes = base + [104, 103, 101, 98, 95, 92, 90, 91, 92, 93, 94, 95, 96, 97, 98, 97, 96, 97, 98, 99]
+        leader_closes = base + [103, 101, 99, 96, 93, 90, 87, 87.5, 88, 88.5, 89, 89.5, 90, 90.5, 91, 90.5, 90, 90.5, 91, 92]
+        defensive_closes = [100.0 + index * 0.08 for index in range(40)] + [104, 104.5, 105, 105.5, 106, 106.5, 107, 107.5, 108, 108.5, 109, 109.5, 110, 110.5, 111, 111.5, 112, 112.5, 113, 113.5]
+        market_bars = {
+            "SPY": self.make_equity_bars_from_closes("SPY", spy_closes, last_volume_multiplier=1.30),
+            "QQQ": self.make_equity_bars_from_closes("QQQ", leader_closes),
+            "SMH": self.make_equity_bars_from_closes("SMH", leader_closes),
+            "XLK": self.make_equity_bars_from_closes("XLK", leader_closes),
+            "RSP": self.make_equity_bars_from_closes("RSP", spy_closes),
+            "IWM": self.make_equity_bars_from_closes("IWM", spy_closes),
+            "XLV": self.make_equity_bars_from_closes("XLV", defensive_closes),
+            "XLU": self.make_equity_bars_from_closes("XLU", defensive_closes),
+            "XLP": self.make_equity_bars_from_closes("XLP", defensive_closes),
+            "NVDA": self.make_equity_bars_from_closes("NVDA", leader_closes),
+            "AVGO": self.make_equity_bars_from_closes("AVGO", leader_closes),
+            "AMD": self.make_equity_bars_from_closes("AMD", leader_closes),
+            "TSLA": self.make_equity_bars_from_closes("TSLA", leader_closes),
+            "META": self.make_equity_bars_from_closes("META", leader_closes),
+            "MSFT": self.make_equity_bars_from_closes("MSFT", leader_closes),
+        }
+
+        risk = equity_short_term_signal_at(
+            dashboard_builder.normalize_market_bars(market_bars),
+            date(2025, 4, 25),
+            macro_liquidity_equity={},
+            spy_early_warning={},
+            calendar_events=[],
+            option_open_interest=None,
+        )
+
+        self.assertLess(risk["score"], 75)
+        self.assertNotEqual(risk["regime"], "Strong Alert")
+
+    def test_equity_short_term_risk_dampens_narrow_leader_washout_without_catalyst(self):
+        def phase(start: float, middle: float, end: float, first_leg: int = 44, second_leg: int = 20) -> list[float]:
+            closes = [start + (middle - start) * index / (first_leg - 1) for index in range(first_leg)]
+            closes.extend(middle + (end - middle) * index / second_leg for index in range(1, second_leg + 1))
+            return closes
+
+        spy_closes = phase(100, 108, 102)
+        spy_closes[-2] = 102 / 0.985
+        leader_closes = phase(100, 118, 110)
+        leader_closes[-2] = 110 / 0.968
+        defensive_closes = phase(100, 108, 113)
+        rsp_closes = phase(100, 103, 101)
+        market_bars = {
+            "SPY": self.make_equity_bars_from_closes("SPY", spy_closes, last_volume_multiplier=1.60),
+            "QQQ": self.make_equity_bars_from_closes("QQQ", leader_closes),
+            "SMH": self.make_equity_bars_from_closes("SMH", leader_closes),
+            "XLK": self.make_equity_bars_from_closes("XLK", leader_closes),
+            "RSP": self.make_equity_bars_from_closes("RSP", rsp_closes),
+            "IWM": self.make_equity_bars_from_closes("IWM", rsp_closes),
+            "XLV": self.make_equity_bars_from_closes("XLV", defensive_closes),
+            "XLU": self.make_equity_bars_from_closes("XLU", defensive_closes),
+            "XLP": self.make_equity_bars_from_closes("XLP", defensive_closes),
+        }
+        for index, symbol in enumerate(("NVDA", "AVGO", "AMD", "TSLA", "META", "MSFT")):
+            closes = phase(100, 160, 145)
+            closes[-2] = 145 / (0.965 if index < 2 else 0.985)
+            market_bars[symbol] = self.make_equity_bars_from_closes(symbol, closes)
+
+        risk = equity_short_term_signal_at(
+            dashboard_builder.normalize_market_bars(market_bars),
+            date(2025, 5, 1),
+            macro_liquidity_equity={},
+            spy_early_warning={},
+            calendar_events=[],
+            option_open_interest=None,
+        )
+
+        self.assertLess(risk["score"], 75)
+        self.assertNotEqual(risk["regime"], "Strong Alert")
+
+    def test_equity_short_term_risk_dampens_aftershock_stabilization_without_fresh_sell_pressure(self):
+        def phase(start: float, middle: float, end: float, first_leg: int = 44, second_leg: int = 20) -> list[float]:
+            closes = [start + (middle - start) * index / (first_leg - 1) for index in range(first_leg)]
+            closes.extend(middle + (end - middle) * index / second_leg for index in range(1, second_leg + 1))
+            return closes
+
+        spy_closes = phase(100, 108, 100.3)
+        spy_closes[-2] = 100.3 / 0.9933
+        leader_closes = phase(100, 116, 96)
+        leader_closes[-2] = 96 / 0.976
+        defensive_closes = phase(100, 106, 114)
+        hot_closes = phase(100, 150, 128)
+        hot_closes[-2] = 128 / 0.975
+        market_bars = {
+            "SPY": self.make_equity_bars_from_closes("SPY", spy_closes, last_volume_multiplier=1.40),
+            "QQQ": self.make_equity_bars_from_closes("QQQ", leader_closes),
+            "SMH": self.make_equity_bars_from_closes("SMH", leader_closes),
+            "XLK": self.make_equity_bars_from_closes("XLK", leader_closes),
+            "RSP": self.make_equity_bars_from_closes("RSP", phase(100, 103, 100)),
+            "IWM": self.make_equity_bars_from_closes("IWM", phase(100, 103, 100)),
+            "XLV": self.make_equity_bars_from_closes("XLV", defensive_closes),
+            "XLU": self.make_equity_bars_from_closes("XLU", defensive_closes),
+            "XLP": self.make_equity_bars_from_closes("XLP", defensive_closes),
+            "NVDA": self.make_equity_bars_from_closes("NVDA", hot_closes),
+            "AVGO": self.make_equity_bars_from_closes("AVGO", hot_closes),
+            "AMD": self.make_equity_bars_from_closes("AMD", hot_closes),
+            "TSLA": self.make_equity_bars_from_closes("TSLA", hot_closes),
+            "META": self.make_equity_bars_from_closes("META", hot_closes),
+            "MSFT": self.make_equity_bars_from_closes("MSFT", hot_closes),
+        }
+
+        risk = equity_short_term_signal_at(
+            dashboard_builder.normalize_market_bars(market_bars),
+            date(2025, 5, 1),
+            macro_liquidity_equity={},
+            spy_early_warning={},
+            calendar_events=[],
+            option_open_interest=None,
+        )
+
+        self.assertLess(risk["score"], 75)
+        self.assertNotEqual(risk["regime"], "Strong Alert")
+
+    def test_equity_short_term_risk_dampens_hot_rotation_without_market_flow_confirmation(self):
+        market_bars = {
+            "SPY": self.make_equity_bars("SPY", start_price=520, pre_event_return=0.10, june4_return=-0.012, june5_return=0.006, june4_volume_multiplier=0.45),
+            "QQQ": self.make_equity_bars("QQQ", start_price=420, pre_event_return=0.24, june4_return=-0.022, june5_return=0.006),
+            "SMH": self.make_equity_bars("SMH", start_price=180, pre_event_return=0.45, june4_return=-0.028, june5_return=0.008),
+            "XLK": self.make_equity_bars("XLK", start_price=170, pre_event_return=0.25, june4_return=-0.022, june5_return=0.006),
+            "RSP": self.make_equity_bars("RSP", start_price=155, pre_event_return=0.00, june4_return=-0.002, june5_return=0.003),
+            "IWM": self.make_equity_bars("IWM", start_price=205, pre_event_return=0.00, june4_return=-0.002, june5_return=0.003),
+        }
+        for symbol in ("NVDA", "AVGO", "AMD", "TSLA", "META", "MSFT"):
+            market_bars[symbol] = self.make_equity_bars(symbol, start_price=300, pre_event_return=0.60, june4_return=-0.030, june5_return=0.006)
+
+        risk = equity_short_term_signal_at(
+            dashboard_builder.normalize_market_bars(market_bars),
+            date(2026, 6, 4),
+            macro_liquidity_equity={},
+            spy_early_warning={},
+            calendar_events=[],
+            option_open_interest=None,
+        )
+
+        self.assertLess(risk["score"], 75)
+        self.assertNotEqual(risk["regime"], "Strong Alert")
+
+    def test_equity_short_term_risk_dampens_shallow_distribution_without_catalyst(self):
+        def phase(start: float, middle: float, end: float, first_leg: int = 44, second_leg: int = 20) -> list[float]:
+            closes = [start + (middle - start) * index / (first_leg - 1) for index in range(first_leg)]
+            closes.extend(middle + (end - middle) * index / second_leg for index in range(1, second_leg + 1))
+            return closes
+
+        spy_closes = phase(100, 108, 102)
+        spy_closes[-2] = 102 / 0.9913
+        leader_closes = phase(100, 112, 106)
+        leader_closes[-2] = 106 / 0.970
+        defensive_closes = phase(100, 106, 109)
+        hot_closes = phase(100, 150, 140)
+        hot_closes[-2] = 140 / 0.965
+        market_bars = {
+            "SPY": self.make_equity_bars_from_closes("SPY", spy_closes, last_volume_multiplier=1.60),
+            "QQQ": self.make_equity_bars_from_closes("QQQ", leader_closes),
+            "SMH": self.make_equity_bars_from_closes("SMH", leader_closes),
+            "XLK": self.make_equity_bars_from_closes("XLK", leader_closes),
+            "RSP": self.make_equity_bars_from_closes("RSP", phase(100, 103, 101)),
+            "IWM": self.make_equity_bars_from_closes("IWM", phase(100, 103, 101)),
+            "XLV": self.make_equity_bars_from_closes("XLV", defensive_closes),
+            "XLU": self.make_equity_bars_from_closes("XLU", defensive_closes),
+            "XLP": self.make_equity_bars_from_closes("XLP", defensive_closes),
+            "NVDA": self.make_equity_bars_from_closes("NVDA", hot_closes),
+            "AVGO": self.make_equity_bars_from_closes("AVGO", hot_closes),
+            "AMD": self.make_equity_bars_from_closes("AMD", hot_closes),
+            "TSLA": self.make_equity_bars_from_closes("TSLA", hot_closes),
+            "META": self.make_equity_bars_from_closes("META", hot_closes),
+            "MSFT": self.make_equity_bars_from_closes("MSFT", hot_closes),
+        }
+
+        risk = equity_short_term_signal_at(
+            dashboard_builder.normalize_market_bars(market_bars),
+            date(2025, 5, 1),
+            macro_liquidity_equity={},
+            spy_early_warning={},
+            calendar_events=[],
+            option_open_interest=None,
+        )
+
+        self.assertLess(risk["score"], 75)
+        self.assertNotEqual(risk["regime"], "Strong Alert")
+
+    def test_equity_short_term_risk_dampens_sector_specific_semiconductor_slump_when_spy20_positive(self):
+        pre = [100.0 + index * 0.02 for index in range(44)]
+        spy_closes = pre + [100, 101, 102, 103, 104, 105, 107, 106.5, 106, 105.5, 105, 104.5, 104, 103.5, 103, 103.5, 104, 105, 102 / 0.9832, 102]
+        leader_closes = pre + [100, 99, 98, 97, 96, 95, 94, 93, 92, 91, 90, 89, 88, 87, 86, 85, 86, 87, 84 / 0.97, 84]
+        defensive_closes = [100.0 + index * 0.02 for index in range(44)] + [101, 101.3, 101.6, 102, 102.4, 102.8, 103.2, 103.6, 104, 104.4, 104.8, 105, 105.2, 105.4, 105.6, 105.8, 106, 106.2, 106.4, 106.6]
+        hot_closes = pre + [102, 104, 106, 108, 110, 112, 114, 116, 118, 120, 118, 116, 114, 112, 110, 108, 107, 106, 104 / 0.965, 104]
+        rsp_closes = pre + [100, 100.2, 100.4, 100.6, 100.8, 101, 101.2, 101.4, 101.6, 101.8, 102, 101.8, 101.6, 101.4, 101.2, 101, 100.8, 100.6, 100.4, 100.2]
+        market_bars = {
+            "SPY": self.make_equity_bars_from_closes("SPY", spy_closes, last_volume_multiplier=1.45),
+            "QQQ": self.make_equity_bars_from_closes("QQQ", leader_closes),
+            "SMH": self.make_equity_bars_from_closes("SMH", leader_closes),
+            "XLK": self.make_equity_bars_from_closes("XLK", leader_closes),
+            "RSP": self.make_equity_bars_from_closes("RSP", rsp_closes),
+            "IWM": self.make_equity_bars_from_closes("IWM", rsp_closes),
+            "XLV": self.make_equity_bars_from_closes("XLV", defensive_closes),
+            "XLU": self.make_equity_bars_from_closes("XLU", defensive_closes),
+            "XLP": self.make_equity_bars_from_closes("XLP", defensive_closes),
+            "NVDA": self.make_equity_bars_from_closes("NVDA", hot_closes),
+            "AVGO": self.make_equity_bars_from_closes("AVGO", hot_closes),
+            "AMD": self.make_equity_bars_from_closes("AMD", hot_closes),
+            "TSLA": self.make_equity_bars_from_closes("TSLA", hot_closes),
+            "META": self.make_equity_bars_from_closes("META", hot_closes),
+            "MSFT": self.make_equity_bars_from_closes("MSFT", hot_closes),
+        }
+
+        risk = equity_short_term_signal_at(
+            dashboard_builder.normalize_market_bars(market_bars),
+            date(2025, 5, 1),
+            macro_liquidity_equity={},
+            spy_early_warning={},
+            calendar_events=[],
+            option_open_interest=None,
+        )
+
+        self.assertLess(risk["score"], 75)
+        self.assertNotEqual(risk["regime"], "Strong Alert")
+
+    def test_equity_short_term_risk_dampens_light_hot_damage_without_broad_confirmation(self):
+        pre = [100.0 + index * 0.04 for index in range(44)]
+        spy_closes = pre + [101, 102, 103, 104, 105, 106, 105.5, 105, 104.5, 104, 103.5, 103, 102.5, 102, 101.5, 101, 100.5, 101.5, 101 / 0.9861, 101]
+        leader_closes = pre + [101, 102, 103, 104, 105, 106, 105, 104, 103, 102, 101, 100, 99.5, 99, 98.5, 98, 97.5, 98, 97 / 0.976, 97]
+        defensive_closes = pre + [101, 102, 103, 104, 105, 105.5, 105, 104.5, 104, 103.5, 103, 102.5, 102, 101.5, 101, 100.8, 100.6, 101, 100.8, 100.6]
+        rsp_closes = pre + [101, 102, 103, 104, 105, 105.5, 105, 104.5, 104, 103.5, 103, 102.5, 102, 101.5, 101, 100.8, 100.6, 101, 100.8, 100.5]
+        hot_base = pre + [101, 103, 105, 107, 109, 111, 113, 115, 116, 117, 118, 119, 120, 119, 118, 117, 116, 115, 114 / 0.98, 114]
+        market_bars = {
+            "SPY": self.make_equity_bars_from_closes("SPY", spy_closes, last_volume_multiplier=1.20),
+            "QQQ": self.make_equity_bars_from_closes("QQQ", leader_closes),
+            "SMH": self.make_equity_bars_from_closes("SMH", leader_closes),
+            "XLK": self.make_equity_bars_from_closes("XLK", leader_closes),
+            "RSP": self.make_equity_bars_from_closes("RSP", rsp_closes),
+            "IWM": self.make_equity_bars_from_closes("IWM", rsp_closes),
+            "XLV": self.make_equity_bars_from_closes("XLV", defensive_closes),
+            "XLU": self.make_equity_bars_from_closes("XLU", defensive_closes),
+            "XLP": self.make_equity_bars_from_closes("XLP", defensive_closes),
+        }
+        for index, symbol in enumerate(("NVDA", "AVGO", "AMD", "TSLA", "META", "MSFT")):
+            closes = list(hot_base)
+            closes[-2] = 114 / (0.965 if index == 0 else 0.986)
+            market_bars[symbol] = self.make_equity_bars_from_closes(symbol, closes)
+
+        risk = equity_short_term_signal_at(
+            dashboard_builder.normalize_market_bars(market_bars),
+            date(2025, 5, 1),
+            macro_liquidity_equity={},
+            spy_early_warning={},
+            calendar_events=[],
+            option_open_interest=None,
+        )
+
+        self.assertLess(risk["score"], 75)
+        self.assertNotEqual(risk["regime"], "Strong Alert")
+
+    def test_equity_short_term_risk_dampens_event_watch_without_market_confirmation(self):
+        market_bars = {
+            "SPY": self.make_equity_bars("SPY", start_price=520, pre_event_return=0.10, june4_return=-0.002, june5_return=0.006, june4_volume_multiplier=0.80),
+            "QQQ": self.make_equity_bars("QQQ", start_price=420, pre_event_return=0.24, june4_return=-0.017, june5_return=0.006),
+            "SMH": self.make_equity_bars("SMH", start_price=180, pre_event_return=0.45, june4_return=-0.022, june5_return=0.008),
+            "XLK": self.make_equity_bars("XLK", start_price=170, pre_event_return=0.25, june4_return=-0.017, june5_return=0.006),
+            "RSP": self.make_equity_bars("RSP", start_price=155, pre_event_return=0.00, june4_return=0.001, june5_return=0.003),
+            "IWM": self.make_equity_bars("IWM", start_price=205, pre_event_return=0.00, june4_return=0.001, june5_return=0.003),
+        }
+        for symbol in ("NVDA", "AVGO", "AMD", "TSLA", "META", "MSFT"):
+            market_bars[symbol] = self.make_equity_bars(symbol, start_price=300, pre_event_return=0.60, june4_return=-0.014, june5_return=0.006)
+        events = [CalendarEvent(date=date(2026, 6, 5), title="BLS Producer Price Index", source="unit-test", importance="高")]
+
+        risk = equity_short_term_signal_at(
+            dashboard_builder.normalize_market_bars(market_bars),
+            date(2026, 6, 4),
+            macro_liquidity_equity={},
+            spy_early_warning={},
+            calendar_events=events,
+            option_open_interest=None,
+        )
+
+        self.assertLess(risk["score"], 75)
+        self.assertNotEqual(risk["regime"], "Strong Alert")
 
     def test_build_live_dashboard_treats_announced_auction_outage_as_warning(self):
         patches = {

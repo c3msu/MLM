@@ -23,6 +23,7 @@ API_ROUTES = {
     "/api/news": "news",
     "/api/ideas": "ideas",
     "/api/spy_early_warning": "spyEarlyWarning",
+    "/api/equity_short_term_risk": "equityShortTermRisk",
     "/api/source_status": "sourceStatus",
     "/api/source-status": "sourceStatus",
 }

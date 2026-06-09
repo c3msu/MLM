@@ -17,7 +17,7 @@ from datetime import date, datetime
 from email.utils import parsedate_to_datetime
 from functools import lru_cache
 from io import BytesIO, StringIO
-from typing import Iterable
+from typing import Any, Iterable
 import zipfile
 
 
@@ -52,6 +52,11 @@ TREASURY_QRA_DOCS_URL = (
 NYFED_PD_ASOF_URL = "https://markets.newyorkfed.org/api/pd/list/asof.json"
 NYFED_PD_LATEST_URL = "https://markets.newyorkfed.org/api/pd/latest/{seriesbreak}.json"
 STOOQ_QUOTE_URL = "https://stooq.com/q/l/?s={symbol}&f=sd2t2ohlcv&h&e=csv"
+NASDAQ_HISTORICAL_URL = (
+    "https://api.nasdaq.com/api/quote/{symbol}/historical"
+    "?assetclass={asset_class}&fromdate={start}&todate={end}&limit={limit}"
+)
+CBOE_DELAYED_OPTIONS_URL = "https://cdn.cboe.com/api/global/delayed_quotes/options/{symbol}.json"
 FED_FUNDS_FUTURES_SYMBOL = "zq.f"
 GOLD_SPOT_SYMBOL = "xauusd"
 
@@ -256,6 +261,33 @@ class MarketQuote:
         return 100 - self.close
 
 
+@dataclass(frozen=True)
+class MarketDailyBar:
+    symbol: str
+    date: date
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int | None
+    source: str
+
+
+@dataclass(frozen=True)
+class OptionOpenInterestSnapshot:
+    symbol: str
+    as_of: date
+    timestamp: datetime | None
+    put_open_interest: float
+    call_open_interest: float
+    put_volume: float
+    call_volume: float
+    put_call_open_interest_ratio: float | None
+    put_call_volume_ratio: float | None
+    current_price: float | None
+    source: str
+
+
 def fetch_bytes(url: str, timeout: int = 30, retries: int = 2) -> bytes:
     request = urllib.request.Request(
         url,
@@ -360,6 +392,36 @@ def fetch_text_curl_first(url: str, timeout: int = 30, retries: int = 1) -> str:
     return fetch_text(url, timeout=timeout, retries=0)
 
 
+def fetch_text_with_headers(url: str, headers: dict[str, str], timeout: int = 30, retries: int = 1) -> str:
+    last_error: Exception | None = None
+    if shutil.which("curl"):
+        args = ["curl", "-L", "--fail", "--silent", "--show-error", "--max-time", str(timeout), url]
+        for key, value in headers.items():
+            args.extend(["-H", f"{key}: {value}"])
+        for attempt in range(retries + 1):
+            try:
+                completed = subprocess.run(args, check=True, capture_output=True, text=True, timeout=timeout + 5)
+                return completed.stdout
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                last_error = exc
+                if attempt >= retries:
+                    break
+                time.sleep(0.5 * (attempt + 1))
+        raise last_error or RuntimeError(f"Failed to fetch {url}")
+    request = urllib.request.Request(url, headers=headers)
+    context = https_context() if url.startswith("https://") else None
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
+                return response.read().decode("utf-8", errors="replace")
+        except (OSError, urllib.error.URLError) as exc:
+            last_error = exc
+            if attempt >= retries:
+                break
+            time.sleep(0.5 * (attempt + 1))
+    raise last_error or RuntimeError(f"Failed to fetch {url}")
+
+
 def parse_fred_csv(content: str, series_id: str) -> TimeSeries:
     reader = csv.DictReader(StringIO(content))
     if not reader.fieldnames or "observation_date" not in reader.fieldnames:
@@ -414,6 +476,166 @@ def fetch_fed_funds_futures_quote(timeout: int = 15) -> MarketQuote:
 
 def fetch_gold_spot_quote(timeout: int = 15) -> MarketQuote:
     return fetch_stooq_quote(GOLD_SPOT_SYMBOL, timeout=timeout)
+
+
+def parse_market_number(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return float(value)
+    text = str(value).strip().replace("$", "").replace(",", "")
+    if not text or text.upper() in {"N/A", "NA", "N/D", "NULL", "NONE", "--"}:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def parse_nasdaq_historical_json(content: str, symbol: str, *, source_url: str = "Nasdaq historical") -> list[MarketDailyBar]:
+    payload = json.loads(content)
+    rows = (
+        payload.get("data", {})
+        .get("tradesTable", {})
+        .get("rows", [])
+        if isinstance(payload, dict)
+        else []
+    )
+    if not isinstance(rows, list):
+        raise ValueError(f"Nasdaq response for {symbol} did not contain historical rows")
+    bars: list[MarketDailyBar] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        raw_date = str(row.get("date") or "").strip()
+        try:
+            bar_date = datetime.strptime(raw_date, "%m/%d/%Y").date()
+        except ValueError:
+            continue
+        open_price = parse_market_number(row.get("open"))
+        high_price = parse_market_number(row.get("high"))
+        low_price = parse_market_number(row.get("low"))
+        close_price = parse_market_number(row.get("close"))
+        if None in {open_price, high_price, low_price, close_price}:
+            continue
+        volume_raw = parse_market_number(row.get("volume"))
+        bars.append(
+            MarketDailyBar(
+                symbol=symbol.upper(),
+                date=bar_date,
+                open=float(open_price),
+                high=float(high_price),
+                low=float(low_price),
+                close=float(close_price),
+                volume=int(volume_raw) if volume_raw is not None else None,
+                source=source_url,
+            )
+        )
+    bars.sort(key=lambda item: item.date)
+    if not bars:
+        raise ValueError(f"Nasdaq response for {symbol} did not contain usable OHLC rows")
+    return bars
+
+
+def fetch_nasdaq_daily_bars(
+    symbol: str,
+    *,
+    start: date,
+    end: date,
+    asset_class: str = "stocks",
+    timeout: int = 20,
+    limit: int = 260,
+) -> list[MarketDailyBar]:
+    source_url = NASDAQ_HISTORICAL_URL.format(
+        symbol=symbol.upper(),
+        asset_class=asset_class,
+        start=start.isoformat(),
+        end=end.isoformat(),
+        limit=limit,
+    )
+    content = fetch_text_with_headers(
+        source_url,
+        {
+            "User-Agent": "Mozilla/5.0 TreasuryFactorDesk/1.0",
+            "Accept": "application/json,text/plain,*/*",
+        },
+        timeout=timeout,
+        retries=1,
+    )
+    return parse_nasdaq_historical_json(content, symbol.upper(), source_url=source_url)
+
+
+def parse_cboe_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def cboe_option_side(option_symbol: Any) -> str:
+    text = str(option_symbol or "").upper()
+    match = re.search(r"\d{6}([CP])\d{8}$", text)
+    return match.group(1) if match else ""
+
+
+def parse_cboe_option_open_interest_json(
+    content: str,
+    symbol: str,
+    *,
+    source_url: str = "Cboe delayed options",
+) -> OptionOpenInterestSnapshot:
+    payload = json.loads(content)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Cboe response for {symbol} was not a JSON object")
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    options = data.get("options", [])
+    if not isinstance(options, list):
+        raise ValueError(f"Cboe response for {symbol} did not contain options")
+    put_oi = call_oi = put_volume = call_volume = 0.0
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        side = cboe_option_side(option.get("option"))
+        open_interest = parse_market_number(option.get("open_interest")) or 0.0
+        volume = parse_market_number(option.get("volume")) or 0.0
+        if side == "P":
+            put_oi += open_interest
+            put_volume += volume
+        elif side == "C":
+            call_oi += open_interest
+            call_volume += volume
+    if put_oi + call_oi <= 0:
+        raise ValueError(f"Cboe response for {symbol} did not contain usable option open interest")
+    timestamp = parse_cboe_timestamp(payload.get("timestamp"))
+    current_price = parse_market_number(data.get("current_price"))
+    as_of = timestamp.date() if timestamp else date.today()
+    return OptionOpenInterestSnapshot(
+        symbol=symbol.upper(),
+        as_of=as_of,
+        timestamp=timestamp,
+        put_open_interest=put_oi,
+        call_open_interest=call_oi,
+        put_volume=put_volume,
+        call_volume=call_volume,
+        put_call_open_interest_ratio=round(put_oi / call_oi, 4) if call_oi > 0 else None,
+        put_call_volume_ratio=round(put_volume / call_volume, 4) if call_volume > 0 else None,
+        current_price=current_price,
+        source=source_url,
+    )
+
+
+def fetch_cboe_option_open_interest(symbol: str = "SPY", timeout: int = 20) -> OptionOpenInterestSnapshot:
+    source_url = CBOE_DELAYED_OPTIONS_URL.format(symbol=symbol.upper())
+    content = fetch_text_curl_first(source_url, timeout=timeout, retries=1)
+    return parse_cboe_option_open_interest_json(content, symbol.upper(), source_url=source_url)
 
 
 def parse_fred_bulk_zip(content: bytes, series_ids: Iterable[str]) -> dict[str, TimeSeries]:
