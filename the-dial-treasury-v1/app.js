@@ -2379,7 +2379,7 @@ function renderGlobalLpplIndexHistoryCharts(item) {
   if (!rows.length) return `<div class="empty-state compact">LPPL逐市场历史曲线样本不足</div>`;
   return `
     <div class="global-lppl-chart-grid">
-      ${rows.map((row) => renderGlobalLpplRiskHistoryChart(item, { symbol: row.symbol })).join("")}
+      ${rows.map((row) => renderGlobalLpplRiskHistoryChart(item, { symbol: row.symbol, fullWidth: true })).join("")}
     </div>
   `;
 }
@@ -2406,9 +2406,9 @@ function prepareGlobalLpplHistorySeries(item, symbol) {
 }
 
 function globalLpplHistoryScale(series, priceSeries, options = {}) {
-  const W = options.large ? 1180 : 840;
-  const H = options.large ? 420 : 190;
-  const pad = options.large ? { l: 48, r: 72, t: 34, b: 40 } : { l: 34, r: 48, t: 24, b: 28 };
+  const W = options.large || options.fullWidth ? 1180 : 840;
+  const H = options.large ? 420 : options.fullWidth ? 300 : 190;
+  const pad = options.large || options.fullWidth ? { l: 48, r: 72, t: 34, b: 40 } : { l: 34, r: 48, t: 24, b: 28 };
   const minTime = Math.min(...series.map((point) => point.time));
   const maxTime = Math.max(...series.map((point) => point.time));
   const priceValues = priceSeries.map((point) => point.indexedClose).filter(Number.isFinite);
@@ -2438,7 +2438,7 @@ function renderGlobalLpplRiskHistoryChart(item, options = {}) {
         <rect x="${pad.l}" y="${pad.t}" width="${W - pad.l - pad.r}" height="${H - pad.t - pad.b}" fill="transparent"></rect>
   ` : "";
   return `
-    <div class="global-lppl-history-chart ${options.large ? "large" : ""}">
+    <div class="global-lppl-history-chart ${options.large ? "large" : ""} ${options.fullWidth ? "full-width" : ""}">
       <div class="equity-risk-history-head">
         <span>${escapeHtml(symbol || "LPPL")} 历史曲线</span>
         <div class="equity-risk-history-actions">

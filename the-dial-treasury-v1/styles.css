@@ -2485,6 +2485,7 @@ h3 {
 
 .global-lppl-risk-panel {
   display: grid;
+  grid-column: 1 / -1;
   gap: 8px;
   margin-top: 10px;
   padding: 10px;
@@ -2670,8 +2671,8 @@ h3 {
 
 .global-lppl-chart-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
 }
 
 .global-lppl-history-chart {
@@ -2688,6 +2689,10 @@ h3 {
   width: 100%;
   min-height: 150px;
   overflow: visible;
+}
+
+.global-lppl-history-chart.full-width svg {
+  min-height: 280px;
 }
 
 .global-lppl-modal-panel {
@@ -4519,7 +4524,6 @@ body.modal-open {
   .equity-risk-modal-stats,
   .equity-risk-modal-alert-grid,
   .global-lppl-index-grid,
-  .global-lppl-chart-grid,
   .global-lppl-backtest {
     grid-template-columns: 1fr 1fr;
   }
@@ -4613,7 +4617,6 @@ body.modal-open {
     .equity-risk-modal-alert-grid,
     .equity-risk-components,
     .global-lppl-index-grid,
-    .global-lppl-chart-grid,
     .global-lppl-backtest,
   .source-status-grid,
   .source-status-controls {
