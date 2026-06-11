@@ -19,6 +19,7 @@ from treasury_data.sources import (
     parse_nasdaq_historical_json,
     parse_primary_dealer_stats_json,
     parse_debt_subject_to_limit_json,
+    parse_stooq_daily_csv,
     parse_stooq_quote_csv,
     parse_treasury_press_releases_html,
     parse_quarterly_refunding_documents_html,
@@ -112,6 +113,23 @@ class SourceParsingTests(unittest.TestCase):
         self.assertEqual(quote.date, date(2026, 5, 19))
         self.assertEqual(quote.close, 96.37)
         self.assertAlmostEqual(quote.implied_rate, 3.63)
+
+    def test_parse_stooq_daily_csv_extracts_global_index_ohlcv_rows(self):
+        content = "\n".join(
+            [
+                "Date,Open,High,Low,Close,Volume",
+                "2026-06-04,9876.5,9910.0,9800.0,9888.0,123456",
+                "2026-06-05,9888.0,9902.0,9700.0,9725.5,",
+            ]
+        )
+
+        bars = parse_stooq_daily_csv(content, "^hsi", source_url="https://stooq.com/q/d/l/?s=^hsi")
+
+        self.assertEqual([bar.date for bar in bars], [date(2026, 6, 4), date(2026, 6, 5)])
+        self.assertEqual(bars[0].symbol, "^HSI")
+        self.assertEqual(bars[0].volume, 123456)
+        self.assertIsNone(bars[1].volume)
+        self.assertEqual(bars[1].close, 9725.5)
 
     def test_parse_nasdaq_historical_json_extracts_descending_ohlcv_rows(self):
         content = """

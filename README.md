@@ -13,6 +13,15 @@ The dashboard now also includes a SPY Early Warning Index, an equity-specific
 0-100 drawdown-warning overlay that reuses existing Conditions Score
 components plus 3-month score deterioration to guide SPY/SPX exposure from
 constructive through de-risk.
+It also includes a daily `equityShortTermRisk` tactical layer and an
+independent `globalLpplRisk` research indicator. `equityShortTermRisk` uses
+replayable Nasdaq OHLCV market-structure factors and event context for
+short-horizon SPY risk control. `globalLpplRisk` is intentionally separate: it
+fits constrained LPPL curves for SPY, QQQ, and global ETF proxies, records
+index-level historical validation under `indexValidation`, and applies
+`effectiveWeightMultiplier` so weaker historical evidence cannot dominate the
+global score. LPPL is a research temperature gauge, not an input to the
+short-term equity score.
 Section 07, cross-market, includes a dynamic historical chart backed by the
 SQLite history API for global rates, risk/dollar, and inflation/commodity
 series.
@@ -61,6 +70,13 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=the-dial-treasury-v1 \
   python3 the-dial-treasury-v1/scripts/smoke_check.py \
   --path the-dial-treasury-v1/data/dashboard.json
 ```
+
+The smoke check treats any `sourceStatus` error as a failure. If the only
+failure is Treasury Fiscal Data `Debt Subject to Limit` returning a transient
+curl/network error, the dashboard contract can still be inspected, but the
+source-status issue should remain visible until the public endpoint recovers.
+Required equity OHLCV rows must also be `ok`; transient Nasdaq quote timeouts
+are reported with the concrete symbol name.
 
 For server-backed verification:
 

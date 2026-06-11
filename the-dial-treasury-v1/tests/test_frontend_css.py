@@ -244,17 +244,22 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn("formatPercentMetric", app_js)
         self.assertIn("dataThrough", app_js)
         self.assertIn("sourceQuality", app_js)
+        self.assertIn("weightCalibration", app_js)
         self.assertIn("factorEvidence", app_js)
         self.assertIn("forwardCatalystRisk", app_js)
         self.assertIn("tieredThresholdTests", app_js)
         self.assertIn("recommendedCautionThreshold", app_js)
+        self.assertIn("highPrecisionThresholdTest", app_js)
         self.assertIn("componentDiagnostics", app_js)
         self.assertIn("全局因子审计", app_js)
+        self.assertIn("权重校准", app_js)
+        self.assertIn("高精度执行阈值", app_js)
         self.assertIn("警戒以上", app_js)
         self.assertIn("中等预警", app_js)
         self.assertIn("推荐观察", app_js)
         self.assertIn(".equity-risk-panel", css)
         self.assertIn(".equity-risk-quality", css)
+        self.assertIn(".equity-risk-weight-calibration", css)
         self.assertIn(".equity-risk-evidence", css)
         self.assertIn(".equity-risk-backtest", css)
         self.assertIn(".equity-risk-tiered", css)
@@ -310,6 +315,35 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn(".equity-risk-alert-marker", css)
         self.assertIn(".equity-risk-hover-guide", css)
         self.assertIn(".equity-risk-hover-dot", css)
+
+    def test_global_lppl_risk_panel_is_mounted_as_independent_indicator(self):
+        html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
+        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
+
+        for element_id in (
+            "globalLpplRisk",
+            "globalLpplRiskHistoryModal",
+            "globalLpplRiskHistoryModalChart",
+            "globalLpplRiskHistoryModalStats",
+            "globalLpplRiskHistoryModalTooltip",
+            "closeGlobalLpplRiskHistoryModal",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        self.assertIn("globalLpplRisk", app_js)
+        self.assertIn("renderGlobalLpplRisk", app_js)
+        self.assertIn("renderGlobalLpplRiskHistoryChart", app_js)
+        self.assertIn("openGlobalLpplRiskHistoryModal", app_js)
+        self.assertIn("Global LPPL Risk", app_js)
+        self.assertIn("全球指数泡沫临界风险", app_js)
+        self.assertIn("scoreUse", app_js)
+        self.assertIn("criticalDate", app_js)
+        self.assertIn("daysToCritical", app_js)
+        self.assertIn("fitR2", app_js)
+        self.assertIn(".global-lppl-risk-panel", css)
+        self.assertIn(".global-lppl-index-grid", css)
+        self.assertIn(".global-lppl-history-chart", css)
+        self.assertIn(".global-lppl-modal-panel", css)
 
     def test_investment_views_render_historical_spy_proxy_impact(self):
         app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
@@ -463,8 +497,15 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn("equityRiskFreshness", app_js)
         self.assertIn("loadEquityFreshnessStatus", app_js)
         self.assertIn("renderEquityFreshnessStatus", app_js)
+        self.assertIn("EQUITY_FRESHNESS_FAST_REFRESH_MS", app_js)
+        self.assertIn("scheduleEquityFreshnessRefresh", app_js)
+        self.assertIn("refreshEquityFreshnessSilently", app_js)
+        self.assertIn("equityFreshnessRefreshDelay", app_js)
+        self.assertIn("clearTimeout(equityFreshnessRefreshTimer)", app_js)
         self.assertIn("#equityFreshnessStatus", app_js)
+        self.assertIn("post_close_wait", app_js)
         self.assertIn("equity-freshness-status", css)
+        self.assertIn("equity-freshness-waiting", css)
         self.assertIn("equity-freshness-stale", css)
 
     def test_history_panel_mounts_interactive_chart_controls(self):

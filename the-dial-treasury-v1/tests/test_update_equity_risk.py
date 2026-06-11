@@ -93,6 +93,39 @@ class EquityRiskUpdateTests(unittest.TestCase):
         self.assertEqual(updated["generatedAt"], "2026-06-07T10:30:00+00:00")
         self.assertTrue(any(row["name"] == "Nasdaq SPY OHLCV" and row["latest"] != "old" for row in updated["sourceStatus"]))
 
+    def test_build_updated_dashboard_refreshes_global_lppl_risk_independently(self):
+        dashboard = {
+            "asOf": "2026-06-05",
+            "generatedAt": "2026-06-07T09:09:09+00:00",
+            "events": [],
+            "macroLiquidityEquity": {"currentSignal": {"score3mChange": 0.0}},
+            "spyEarlyWarning": {"available": True, "score": 42.0, "regime": "Neutral"},
+            "equityShortTermRisk": {"available": False, "summary": "old"},
+            "globalLpplRisk": {"available": False, "summary": "old LPPL"},
+            "sourceStatus": [{"name": "Global LPPL SPY OHLCV", "status": "warning", "latest": "old"}],
+        }
+        market_bars = {
+            symbol: self.make_bars(symbol, start_price=100 + offset * 5, days=420)
+            for offset, symbol in enumerate(EQUITY_RISK_SYMBOLS)
+        }
+
+        updated = build_updated_dashboard(
+            dashboard,
+            market_bars,
+            generated_at=datetime(2026, 6, 7, 10, 30, tzinfo=timezone.utc),
+        )
+
+        self.assertIn("globalLpplRisk", updated)
+        lppl = updated["globalLpplRisk"]
+        self.assertIn("summary", lppl)
+        self.assertIn("indices", lppl)
+        self.assertIn("history", lppl)
+        self.assertIn("backtest", lppl)
+        self.assertEqual(lppl["scoreUse"], "independent")
+        self.assertIn("globalLpplRisk", updated)
+        self.assertNotIn("globalLpplRisk", updated["equityShortTermRisk"])
+        self.assertTrue(any(row["name"] == "Global LPPL SPY OHLCV" and row["latest"] != "old" for row in updated["sourceStatus"]))
+
 
 if __name__ == "__main__":
     unittest.main()

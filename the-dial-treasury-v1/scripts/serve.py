@@ -38,6 +38,9 @@ _manual_equity_update_lock = threading.Lock()
 _manual_equity_update_thread: threading.Thread | None = None
 _dashboard_update_lock = threading.Lock()
 NEW_YORK_TZ = ZoneInfo("America/New_York")
+DEFAULT_EQUITY_INTERVAL_MINUTES = 30.0
+DEFAULT_EQUITY_CATCHUP_INTERVAL_MINUTES = 5.0
+DEFAULT_EQUITY_AFTER_CLOSE_LAG_MINUTES = 20
 
 
 def seconds_until_next_run(run_at: str, now: datetime | None = None) -> int:
@@ -56,16 +59,68 @@ def previous_weekday(day: date) -> date:
     return cursor
 
 
-def expected_equity_bar_date(now: datetime | None = None, *, after_close_lag_minutes: int = 30) -> date:
+def _ceil_positive_minutes(delta: timedelta) -> int:
+    return max(0, int((delta.total_seconds() + 59) // 60))
+
+
+def _floor_positive_minutes(delta: timedelta) -> int:
+    return max(0, int(delta.total_seconds() // 60))
+
+
+def equity_bar_timing(
+    now: datetime | None = None,
+    *,
+    after_close_lag_minutes: int = DEFAULT_EQUITY_AFTER_CLOSE_LAG_MINUTES,
+) -> dict[str, Any]:
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     ny_now = current.astimezone(NEW_YORK_TZ)
     ny_today = ny_now.date()
-    ready_time = ny_now.replace(hour=16, minute=0, second=0, microsecond=0) + timedelta(minutes=after_close_lag_minutes)
-    if ny_today.weekday() < 5 and ny_now >= ready_time:
-        return ny_today
-    return previous_weekday(ny_today)
+    close_time = ny_now.replace(hour=16, minute=0, second=0, microsecond=0)
+    ready_time = close_time + timedelta(minutes=after_close_lag_minutes)
+    if ny_today.weekday() >= 5:
+        expected = previous_weekday(ny_today)
+        phase = "non_trading_day"
+        minutes_until_expected = None
+        minutes_since_expected = None
+    elif ny_now < close_time:
+        expected = previous_weekday(ny_today)
+        phase = "trading_session"
+        minutes_until_expected = _ceil_positive_minutes(ready_time - ny_now)
+        minutes_since_expected = None
+    elif ny_now < ready_time:
+        expected = previous_weekday(ny_today)
+        phase = "post_close_wait"
+        minutes_until_expected = _ceil_positive_minutes(ready_time - ny_now)
+        minutes_since_expected = None
+    else:
+        expected = ny_today
+        phase = "daily_bar_due"
+        minutes_until_expected = 0
+        minutes_since_expected = _floor_positive_minutes(ny_now - ready_time)
+    return {
+        "expectedDate": expected,
+        "marketDate": ny_today,
+        "marketTime": ny_now.isoformat(),
+        "readyAt": ready_time.isoformat() if ny_today.weekday() < 5 else None,
+        "phase": phase,
+        "minutesUntilExpected": minutes_until_expected,
+        "minutesSinceExpected": minutes_since_expected,
+        "afterCloseLagMinutes": after_close_lag_minutes,
+    }
+
+
+def expected_equity_bar_date(
+    now: datetime | None = None,
+    *,
+    after_close_lag_minutes: int = DEFAULT_EQUITY_AFTER_CLOSE_LAG_MINUTES,
+) -> date:
+    timing = equity_bar_timing(now, after_close_lag_minutes=after_close_lag_minutes)
+    expected = timing["expectedDate"]
+    if not isinstance(expected, date):
+        raise TypeError("equity_bar_timing expectedDate must be a date")
+    return expected
 
 
 class NoStoreHandler(http.server.SimpleHTTPRequestHandler):
@@ -76,7 +131,7 @@ class NoStoreHandler(http.server.SimpleHTTPRequestHandler):
     equity_years: int = 3
     equity_timeout: int = 14
     equity_limit: int = 900
-    equity_after_close_lag_minutes: int = 30
+    equity_after_close_lag_minutes: int = DEFAULT_EQUITY_AFTER_CLOSE_LAG_MINUTES
     equity_freshness_now: datetime | None = None
 
     def end_headers(self) -> None:
@@ -197,6 +252,11 @@ class NoStoreHandler(http.server.SimpleHTTPRequestHandler):
             )
             dashboard = read_dashboard_json(self.dashboard_output)
             risk = dashboard.get("equityShortTermRisk") if isinstance(dashboard.get("equityShortTermRisk"), dict) else {}
+            freshness = equity_risk_freshness(
+                self.dashboard_output,
+                now=self.equity_freshness_now,
+                after_close_lag_minutes=self.equity_after_close_lag_minutes,
+            )
             payload = {
                 "status": "running" if already_running else "accepted",
                 "message": "equity update already running" if already_running else "equity update started",
@@ -204,6 +264,7 @@ class NoStoreHandler(http.server.SimpleHTTPRequestHandler):
                 "generatedAt": dashboard.get("generatedAt"),
                 "equityRiskAsOf": risk.get("asOf"),
                 "equityRiskScore": risk.get("score"),
+                "equityRiskFreshness": freshness,
             }
             status = 202
         except Exception as exc:  # noqa: BLE001
@@ -308,9 +369,19 @@ def equity_risk_freshness(
     output: Path,
     *,
     now: datetime | None = None,
-    after_close_lag_minutes: int = 30,
+    after_close_lag_minutes: int = DEFAULT_EQUITY_AFTER_CLOSE_LAG_MINUTES,
 ) -> dict[str, Any]:
-    expected = expected_equity_bar_date(now, after_close_lag_minutes=after_close_lag_minutes)
+    timing = equity_bar_timing(now, after_close_lag_minutes=after_close_lag_minutes)
+    expected = timing["expectedDate"]
+    base = {
+        "expectedDate": expected.isoformat(),
+        "marketDate": timing["marketDate"].isoformat(),
+        "marketTime": timing["marketTime"],
+        "readyAt": timing["readyAt"],
+        "minutesUntilExpected": timing["minutesUntilExpected"],
+        "minutesSinceExpected": timing["minutesSinceExpected"],
+        "afterCloseLagMinutes": timing["afterCloseLagMinutes"],
+    }
     try:
         dashboard = read_dashboard_json(output)
         risk = dashboard.get("equityShortTermRisk") if isinstance(dashboard.get("equityShortTermRisk"), dict) else {}
@@ -318,22 +389,44 @@ def equity_risk_freshness(
         source_date = date.fromisoformat(str(source_text)) if source_text else None
     except Exception as exc:  # noqa: BLE001
         return {
-            "expectedDate": expected.isoformat(),
+            **base,
             "sourceDate": None,
             "stale": True,
             "lagDays": None,
+            "phase": "error",
+            "timeliness": "error",
             "error": str(exc),
         }
     lag_days = (expected - source_date).days if source_date else None
+    stale = source_date is None or source_date < expected
+    timing_phase = str(timing["phase"])
+    if stale:
+        phase = "catchup"
+        timeliness = "catchup"
+    elif timing_phase in {"trading_session", "post_close_wait"}:
+        phase = timing_phase
+        timeliness = "waiting"
+    elif timing_phase == "non_trading_day":
+        phase = "non_trading_day"
+        timeliness = "fresh"
+    else:
+        phase = "fresh"
+        timeliness = "fresh"
     return {
-        "expectedDate": expected.isoformat(),
+        **base,
         "sourceDate": source_date.isoformat() if source_date else None,
-        "stale": source_date is None or source_date < expected,
+        "stale": stale,
         "lagDays": lag_days,
+        "phase": phase,
+        "timeliness": timeliness,
     }
 
 
-def equity_risk_needs_catchup(output: Path, *, after_close_lag_minutes: int = 30) -> bool:
+def equity_risk_needs_catchup(
+    output: Path,
+    *,
+    after_close_lag_minutes: int = DEFAULT_EQUITY_AFTER_CLOSE_LAG_MINUTES,
+) -> bool:
     return bool(equity_risk_freshness(output, after_close_lag_minutes=after_close_lag_minutes).get("stale"))
 
 
@@ -449,8 +542,8 @@ def equity_update_loop(
     years: int = 3,
     timeout: int = 14,
     limit: int = 900,
-    catchup_interval_minutes: float = 10.0,
-    after_close_lag_minutes: int = 30,
+    catchup_interval_minutes: float = DEFAULT_EQUITY_CATCHUP_INTERVAL_MINUTES,
+    after_close_lag_minutes: int = DEFAULT_EQUITY_AFTER_CLOSE_LAG_MINUTES,
     stale_check_func: Callable[[Path], bool] | None = None,
     sleep_func: Callable[[float], None] = time.sleep,
     max_runs: int | None = None,
@@ -489,9 +582,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--skip-start-update", action="store_true")
     parser.add_argument("--history-years", type=int, default=5, help="Years of public history to refresh after each daily update; use 0 to disable")
-    parser.add_argument("--equity-interval-minutes", type=float, default=30.0, help="Minutes between equity-only risk refreshes; use 0 to disable")
-    parser.add_argument("--equity-catchup-interval-minutes", type=float, default=10.0, help="Minutes between equity-only retries when the latest expected US daily bar is missing")
-    parser.add_argument("--equity-after-close-lag-minutes", type=int, default=30, help="Minutes after the 16:00 New York close before the latest daily bar is expected")
+    parser.add_argument("--equity-interval-minutes", type=float, default=DEFAULT_EQUITY_INTERVAL_MINUTES, help="Minutes between equity-only risk refreshes; use 0 to disable")
+    parser.add_argument("--equity-catchup-interval-minutes", type=float, default=DEFAULT_EQUITY_CATCHUP_INTERVAL_MINUTES, help="Minutes between equity-only retries when the latest expected US daily bar is missing")
+    parser.add_argument("--equity-after-close-lag-minutes", type=int, default=DEFAULT_EQUITY_AFTER_CLOSE_LAG_MINUTES, help="Minutes after the 16:00 New York close before the latest daily bar is expected")
     parser.add_argument("--equity-years", type=int, default=3, help="Lookback years for equity-only risk refresh")
     parser.add_argument("--equity-timeout", type=int, default=14, help="Per-symbol timeout seconds for equity-only risk refresh")
     parser.add_argument("--equity-limit", type=int, default=900, help="Maximum Nasdaq bars per symbol for equity-only risk refresh")

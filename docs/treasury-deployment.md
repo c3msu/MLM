@@ -58,6 +58,8 @@ The local Python server exposes:
 - `/api/events`
 - `/api/news`
 - `/api/ideas`
+- `/api/spy_early_warning`
+- `/api/equity_short_term_risk`
 - `/api/source_status`
 - `/api/source-status`
 - `/api/history`
@@ -65,6 +67,7 @@ The local Python server exposes:
 - `/api/history/stats`
 - `/api/history/series`
 - `POST /api/update`
+- `POST /api/update-equity`
 
 The dashboard slice endpoints are dynamic views over `data/dashboard.json`;
 the history endpoints read `data/history.sqlite3`. The update script does not
@@ -82,6 +85,12 @@ contract intact when redeploying or changing the score.
 stance. It reports normalized duration/curve scores, top factor drivers,
 evidence quality, source warnings/errors, and whether proxy or modeled inputs
 make the conclusion unsuitable for a high-confidence narrative.
+The same payload includes three separate equity-risk contracts:
+`spyEarlyWarning`, `equityShortTermRisk`, and `globalLpplRisk`. `globalLpplRisk`
+is independent from `equityShortTermRisk`; it exposes current LPPL fits,
+SPY/QQQ replay history, global-score backtests, and per-index
+`indexValidation`/`effectiveWeightMultiplier` rows for SPY, QQQ, and global ETF
+proxies.
 The `/api/cross` slice includes the section-07 `historySeries` registry used by
 the UI to request global-rate, risk/dollar, and inflation/commodity history
 through `/api/history/series`.
@@ -96,6 +105,9 @@ returns `202 accepted` with the currently served snapshot metadata, so the UI
 does not block while public sources are fetched. If a manual refresh is already
 running, it returns `running` and reuses the active thread instead of starting
 a duplicate fetch.
+`POST /api/update-equity` runs the lightweight daily-market refresh path for
+`equityShortTermRisk` and `globalLpplRisk` without rebuilding the whole macro
+snapshot.
 `/api/history` returns snapshot and metric counts plus latest stored metadata;
 `/api/history/snapshots` returns recent stored snapshot metadata.
 `/api/history/stats` returns per-series counts, ranges, latest values, and
@@ -172,6 +184,9 @@ The same SQLite history store powers the section-07 dynamic cross-market chart,
 including global 10Y yields, S&P 500, VIX, dollar, credit OAS, CPI/PCE/core
 PCE, Dallas Fed Trimmed Mean PCE, WTI, OVX, and GVZ where public history is
 available.
+Short-term equity and LPPL refreshes use Nasdaq public historical quote rows.
+The LPPL global proxy set is `SPY`, `QQQ`, `EWY`, `EWH`, `EWT`, and `EWJ`; the
+Asia entries are clearly labeled as ETF proxies rather than direct index feeds.
 
 The remaining non-real fields are explicit: Fed path probabilities are still
 model-converted rather than official CME FedWatch probabilities, although the

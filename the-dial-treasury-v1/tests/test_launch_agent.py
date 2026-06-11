@@ -26,7 +26,8 @@ class LaunchAgentTests(unittest.TestCase):
         self.assertIn("--daily-at", command)
         self.assertIn("16:30", command)
         self.assertIn("--equity-interval-minutes 30", command)
-        self.assertIn("--equity-catchup-interval-minutes 10", command)
+        self.assertIn("--equity-catchup-interval-minutes 5", command)
+        self.assertIn("--equity-after-close-lag-minutes 20", command)
         self.assertIn("launchd.out.log", payload["StandardOutPath"])
 
     def test_health_plist_runs_daily_health_check_with_notification(self):

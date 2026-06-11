@@ -29,6 +29,9 @@ Target system: `the-dial-treasury-v1/`, the active MarcoMonitor runtime.
 | Cross-market panel | Done | FRED public proxies for global yields, SPX, VIX, dollar, credit OAS, CPI, PCE, core PCE, Dallas Fed Trimmed Mean PCE, WTI, OVX, GVZ, plus Stooq public `XAUUSD` gold spot. Section 07 also includes a dynamic history chart with group/series/range controls backed by SQLite history and `/api/history/series`. |
 | Historical percentiles and Conditions Score | Done | The Dial-style percentile block plus a bhadial-compatible 47 tracked factor / 30 scored factor / 7 module Conditions Score. Module roll-up weights follow public factor coverage with overlap adjustment; Funding uses EMA(5); target-distance, shock-only, deviation, and bounded risk-signal methods are explicit. ETF-exact factors remain documented public proxies. |
 | Conclusion credibility and weight audit | Done | Scorecard duration/curve conclusions scale each factor by normalized module weight and module factor count. The audit discounts proxy, modeled, and manual-placeholder evidence and surfaces whether weight changes are justified. |
+| SPY early warning overlay | Done | `spyEarlyWarning` is a separate macro/SPY drawdown-risk overlay and is not the headline Conditions Score. |
+| Short-term equity risk overlay | Done | `equityShortTermRisk` is a daily tactical SPY risk layer using replayable Nasdaq OHLCV market structure, audited factor weights, high-precision threshold diagnostics, and no-forward-looking guards. |
+| Global LPPL risk overlay | Done | `globalLpplRisk` is an independent LPPL research indicator for SPY, QQQ, and global ETF proxies (`EWY`, `EWH`, `EWT`, `EWJ`). It includes SPY/QQQ history, global backtests, per-index `indexValidation`, and `effectiveWeightMultiplier` aggregation; it is not included in `equityShortTermRisk`. |
 | REST API | Done | Local Python server exposes dashboard slices for curve, decomposition, Fed path, scorecard, policy, auctions, positioning, cross-market, events, news, ideas, and source status. It supports ISO date-range filters on dated list endpoints and `format=csv` exports for dashboard slice routes. Health, history, and update endpoints remain JSON-only. |
 | Historical persistence | Done | Successful refreshes persist full dashboard snapshots plus normalized curve, scorecard, percentile, and cross-market metrics to local SQLite `data/history.sqlite3`; `/api/history`, `/api/history/snapshots`, `/api/history/stats`, and `/api/history/series` expose read-only status and series views. Latest 5-year history backfill runs are recorded and surfaced through `/api/health`. |
 | Static deployment API mirror | Deferred | Local deployment is the current target; static hosting and Vercel files were removed from this pass. |
@@ -46,6 +49,16 @@ Target system: `the-dial-treasury-v1/`, the active MarcoMonitor runtime.
 - Fed/FOMC, BLS CPI/PPI/employment release dates via FRED, BEA GDP/PCE release dates, Treasury auction, and Treasury QRA events are official/public-source fields; broader private market event calendars are not connected in this local version.
 - MOVE index itself, bond-market depth, bid-ask, swaps, futures basis, and on/off-the-run spread data are left as documented paid-data boundaries unless a licensed source is provided. A public 10Y realized-volatility proxy is connected for the sentiment/liquidity scorecard.
 - NY Fed primary dealer statistics are real weekly public data but are voluntarily reported by dealers and are not intraday/real-time.
+- Global LPPL non-U.S. markets currently use ETF proxies (`EWY`, `EWH`, `EWT`,
+  `EWJ`) because stable public direct index histories are not connected. The
+  UI and payload label these as proxies and avoid synthetic direct-index
+  scores.
+- `scripts/smoke_check.py` fails on any `sourceStatus` error row. A transient
+  Treasury Fiscal Data `Debt Subject to Limit` curl/network failure is a real
+  source-status failure even when the dashboard schema and LPPL contract remain
+  valid.
+- Required Nasdaq OHLCV rows for short-term equity monitoring must be `ok`;
+  symbol-specific quote warnings are surfaced directly by smoke verification.
 
 ## Verification Checklist
 

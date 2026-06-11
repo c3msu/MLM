@@ -63,10 +63,24 @@ history, and optional daily background updates.
   reversal, downside trend-break/defensive-rotation fragility, weak
   relief-rally traps, turnover support, official event risk, optional Cboe SPY
   option OI, and the existing SPY macro warning, with a pure-overextension
-  dampener when event and breakdown confirmation are absent. It is separate
-  from the monthly macro lead study and includes a `lookAheadGuard.dataThrough`
-  field so a 2026-06-04 warning can be audited without using 2026-06-05 price
-  action as an input.
+  dampener when event and breakdown confirmation are absent. The configured
+  weights are calibrated toward historically replayable factors: multi-scale
+  volatility pressure, market-flow/downtrend structure, hot-stock reversal,
+  turnover confirmation, and QQQ/TLT rotation carry most of the score, while
+  non-replayable calendar/news context and historically weak standalone
+  rotation breaks remain low-weight. Backtest payloads also expose a
+  high-precision execution threshold, separate from the earlier strong-alert
+  threshold, so the dashboard can distinguish early warning from higher
+  confidence de-risking. It is separate from the monthly macro lead study and
+  includes a `lookAheadGuard.dataThrough` field so a 2026-06-04 warning can be
+  audited without using 2026-06-05 price action as an input.
+- Global LPPL Risk: an independent 0-100 global equity-index bubble/critical
+  window research indicator. It fits constrained LPPL curves for SPY, QQQ, and
+  global ETF proxies for KOSPI (`EWY`), Hang Seng (`EWH`), Taiwan Weighted
+  (`EWT`), and Nikkei (`EWJ`). It is not an input to `equityShortTermRisk`.
+  Its payload includes per-index `validation` rows, an `indexValidation`
+  summary, and `effectiveWeightMultiplier` values so markets with weaker
+  own-history LPPL drawdown evidence are downweighted in the global aggregate.
 - Local REST API routes when using `scripts/serve.py`.
 - Daily background update entrypoints through the local Python server or macOS
   LaunchAgent.
@@ -110,10 +124,10 @@ refresh every 30 minutes by default (`--equity-interval-minutes 30`) so
 `equityShortTermRisk` can refetch Nasdaq OHLCV and rebuild the short-term
 market-risk block without waiting for the slower macro refresh. Use
 `--equity-interval-minutes 0` to disable that lightweight loop. After 16:00 New
-York close plus a 30-minute data lag, the server expects the latest weekday's
+York close plus a 20-minute data lag, the server expects the latest weekday's
 daily bar to be available; if `equityShortTermRisk.asOf` is still behind that
-expected session, the equity-only loop switches to a 10-minute catch-up cadence
-(`--equity-catchup-interval-minutes 10`) until the snapshot catches up. After
+expected session, the equity-only loop switches to a 5-minute catch-up cadence
+(`--equity-catchup-interval-minutes 5`) until the snapshot catches up. After
 each scheduled daily refresh, the server also refreshes the public historical
 SQLite backfill for the last 5 years unless `--history-years 0` is passed.
 Refresh writes are atomic, so API requests do not read a partially written
@@ -128,18 +142,22 @@ dashboard and does not write it to history.
 The hero `刷新` button triggers `POST /api/update`, which starts the same
 public-data refresh in a background thread and returns the current snapshot
 immediately. The `股市` button triggers `POST /api/update-equity`, which only
-refreshes `equityShortTermRisk` with `save_history=False` and returns the
-current short-term equity-risk snapshot immediately. The server must be running
-through `scripts/serve.py`; direct `file://` mode can only show the embedded
-fallback snapshot.
+refreshes `equityShortTermRisk` plus the independent `globalLpplRisk` with
+`save_history=False` and returns the current short-term equity-risk snapshot
+immediately. The server must be running through `scripts/serve.py`; direct
+`file://` mode can only show the embedded fallback snapshot.
 In served mode the browser also performs a lightweight dashboard snapshot sync
 every 5 minutes, and immediately when the tab becomes visible again. That auto
 sync reloads `data/dashboard.json` only; it does not refetch SQLite history
 series, so the short-term equity panel can catch backend updates without making
-the historical chart endpoints noisy. The top status row also reads
-`/api/health` and displays the `equityRiskFreshness` result as a compact
-`股市日线已同步` / `股市日线滞后` pill, making backend catch-up state visible
-without opening the data-source modal.
+the historical chart endpoints noisy. When the equity snapshot is stale, in
+catch-up, or within 30 minutes of the expected post-close daily bar, the browser
+switches the equity freshness check to a 1-minute cadence. The top status row
+also reads `/api/health` and displays the `equityRiskFreshness` result as a
+compact `股市日线已同步` / `股市日线等待` / `股市日线追赶中` pill, making
+backend catch-up state and normal post-close waiting visible without opening
+the data-source modal. Manual `POST /api/update-equity` responses include the
+same freshness payload so the pill updates immediately after pressing `股市`.
 If another manual refresh is already running, the endpoint returns `running`
 and reuses the active thread instead of starting a duplicate fetch.
 Every successful startup, scheduled, CLI, or full manual refresh also persists
@@ -165,7 +183,10 @@ For a macOS login background service, write a LaunchAgent plist:
 ```bash
 python3 the-dial-treasury-v1/scripts/install_launch_agent.py \
   --daily-at 16:30 --port 8451 \
-  --equity-interval-minutes 30 --equity-catchup-interval-minutes 10 --load
+  --equity-interval-minutes 30 \
+  --equity-catchup-interval-minutes 5 \
+  --equity-after-close-lag-minutes 20 \
+  --load
 ```
 
 Install the companion health checker after the refresh window:
@@ -194,8 +215,9 @@ python3 the-dial-treasury-v1/scripts/update_equity_risk.py \
 ```
 
 This preserves the current macro snapshot, refetches Nasdaq OHLCV for the
-`equityShortTermRisk` symbol set, rebuilds the tactical risk trend/backtest,
-and keeps the page/API on the same `dashboard.json` contract.
+`equityShortTermRisk` symbol set, refetches the Global LPPL ETF proxy set,
+rebuilds the tactical risk trend/backtest plus LPPL validation, and keeps the
+page/API on the same `dashboard.json` contract.
 
 ## Data Boundary
 
@@ -238,9 +260,29 @@ Current real public sources:
   high-to-low stress, sector rotation breaks, hot-stock close/high reversals,
   SPY turnover support, high-importance official event risk, the existing macro
   warning, and Cboe SPY put/call OI when the OI snapshot is dated on or before
-  the signal date. Pure overextension signals are damped when they lack both
-  event risk and downtrend-break confirmation. Later OI snapshots are displayed
-  as coverage metadata but excluded from the no-forward-looking score.
+  the signal date. Its `weightCalibration` payload exposes the current
+  historical factor audit: validated replayable factors are retained at higher
+  weight, while low-replay or weak standalone factors are reduced to context or
+  audit roles. Its `highPrecisionThresholdTest` payload scans stricter score
+  cutoffs above the early strong-alert threshold and reports the highest
+  historical precision candidate for execution-level risk reduction. Pure
+  overextension signals are damped when they lack both event risk and
+  downtrend-break confirmation. Later OI snapshots are displayed as coverage
+  metadata but excluded from the no-forward-looking score.
+- The Global LPPL Risk indicator is a separate research diagnostic under
+  `globalLpplRisk`. It uses the same Nasdaq OHLCV fetcher for SPY, QQQ, and
+  ETF proxies: EWY for Korea/KOSPI exposure, EWH for Hong Kong/Hang Seng
+  exposure, EWT for Taiwan Weighted exposure, and EWJ for Japan/Nikkei
+  exposure. The model searches constrained `tc/m/omega` grids and solves the
+  linear LPPL coefficients by least squares. The dashboard stores current
+  per-index `score`, `confidence`, `criticalDate`, `fitR2`, and source
+  metadata; `history.points` replays the SPY/QQQ global risk curve; `backtest`
+  validates the global score against future SPY drawdown windows; and
+  `indexValidation` validates each available index against its own
+  15-trading-day forward drawdown history. `effectiveWeightMultiplier` is
+  applied during aggregation so a high LPPL score with only partial own-market
+  validation cannot dominate the global reading. This block is intentionally
+  not included in `equityShortTermRisk`.
 - The duration/curve conclusion audit uses the editable scorecard, not the
   0-100 Conditions Score. Individual factor contribution is `factor score *
   normalized module weight / factor count`; source modes then discount evidence
@@ -274,6 +316,10 @@ Current real public sources:
   historical replay/backtest of forward SPY returns and next-10-trading-day
   drawdowns by score bucket, alert threshold, simple historical regressions,
   and the rendered risk-score versus SPY-indexed history curve.
+- Nasdaq public historical quote API is also used for the Global LPPL ETF
+  proxy set (`SPY`, `QQQ`, `EWY`, `EWH`, `EWT`, `EWJ`). The UI labels the Asia
+  markets as proxies and does not fabricate direct index histories when a
+  stable public source is unavailable.
 - Cboe delayed SPY option chain API for current option open-interest summaries.
   Because the free endpoint is a current snapshot rather than a historical OI
   feed, the short-term risk score excludes it whenever the snapshot date is
@@ -335,6 +381,10 @@ REST slices:
 - `/api/history/stats`
 - `/api/history/series`
 - `POST /api/update`
+- `POST /api/update-equity`
+
+`/api/dashboard` includes the independent `globalLpplRisk` block; it is not
+exposed as a separate slice route yet.
 
 List-style endpoints that carry ISO dates, such as `/api/events`, accept
 `from=YYYY-MM-DD` and `to=YYYY-MM-DD`. Dashboard slice routes handled by
@@ -350,6 +400,9 @@ on background-history issues; warning-severity source errors remain in
 `POST /api/update` starts a background refresh and returns `202 accepted` with
 the current `asOf` and `generatedAt`; repeated calls while it is active return
 `running` without launching duplicate source fetches.
+`POST /api/update-equity` starts the lightweight equity/LPPL refresh path. It
+updates `equityShortTermRisk`, `globalLpplRisk`, and their source-status rows
+without running the full macro source pipeline.
 `/api/history` returns SQLite history counts and latest snapshot metadata;
 `/api/history/snapshots` returns recent stored snapshot metadata.
 `/api/history/stats` returns per-series count, date range, latest value,
@@ -380,6 +433,13 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=the-dial-treasury-v1 \
   python3 the-dial-treasury-v1/scripts/smoke_check.py \
   --path the-dial-treasury-v1/data/dashboard.json
 ```
+
+The smoke check intentionally fails if any real public source has
+`sourceStatus.status == "error"`. A transient Treasury Fiscal Data
+`Debt Subject to Limit` curl/network failure is therefore reported even when
+the dashboard schema, LPPL contract, and UI can still be verified separately.
+Required Nasdaq equity OHLCV rows must also be `ok`; transient quote timeouts
+are reported with the affected symbol name.
 
 ## Manual Content Overrides
 

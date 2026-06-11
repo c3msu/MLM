@@ -52,6 +52,7 @@ TREASURY_QRA_DOCS_URL = (
 NYFED_PD_ASOF_URL = "https://markets.newyorkfed.org/api/pd/list/asof.json"
 NYFED_PD_LATEST_URL = "https://markets.newyorkfed.org/api/pd/latest/{seriesbreak}.json"
 STOOQ_QUOTE_URL = "https://stooq.com/q/l/?s={symbol}&f=sd2t2ohlcv&h&e=csv"
+STOOQ_DAILY_URL = "https://stooq.com/q/d/l/?s={symbol}&d1={start}&d2={end}&i=d"
 NASDAQ_HISTORICAL_URL = (
     "https://api.nasdaq.com/api/quote/{symbol}/historical"
     "?assetclass={asset_class}&fromdate={start}&todate={end}&limit={limit}"
@@ -468,6 +469,61 @@ def parse_stooq_quote_csv(content: str, symbol: str) -> MarketQuote:
 def fetch_stooq_quote(symbol: str, timeout: int = 15) -> MarketQuote:
     url = STOOQ_QUOTE_URL.format(symbol=symbol)
     return parse_stooq_quote_csv(fetch_text_curl_first(url, timeout=timeout), symbol.upper())
+
+
+def parse_stooq_daily_csv(content: str, symbol: str, *, source_url: str = "Stooq daily") -> list[MarketDailyBar]:
+    reader = csv.DictReader(StringIO(content))
+    required = {"Date", "Open", "High", "Low", "Close"}
+    if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
+        raise ValueError(f"Stooq response for {symbol} did not contain OHLC columns")
+    bars: list[MarketDailyBar] = []
+    for row in reader:
+        raw_date = (row.get("Date") or "").strip()
+        if raw_date in {"", "N/D"}:
+            continue
+        try:
+            bar_date = datetime.strptime(raw_date, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        open_price = parse_market_number(row.get("Open"))
+        high_price = parse_market_number(row.get("High"))
+        low_price = parse_market_number(row.get("Low"))
+        close_price = parse_market_number(row.get("Close"))
+        if None in {open_price, high_price, low_price, close_price}:
+            continue
+        volume_raw = parse_market_number(row.get("Volume"))
+        bars.append(
+            MarketDailyBar(
+                symbol=symbol.upper(),
+                date=bar_date,
+                open=float(open_price),
+                high=float(high_price),
+                low=float(low_price),
+                close=float(close_price),
+                volume=int(volume_raw) if volume_raw is not None else None,
+                source=source_url,
+            )
+        )
+    bars.sort(key=lambda item: item.date)
+    if not bars:
+        raise ValueError(f"Stooq response for {symbol} did not contain usable OHLC rows")
+    return bars
+
+
+def fetch_stooq_daily_bars(
+    symbol: str,
+    *,
+    start: date,
+    end: date,
+    timeout: int = 20,
+) -> list[MarketDailyBar]:
+    source_url = STOOQ_DAILY_URL.format(
+        symbol=symbol.lower(),
+        start=start.strftime("%Y%m%d"),
+        end=end.strftime("%Y%m%d"),
+    )
+    content = fetch_text_curl_first(source_url, timeout=timeout, retries=1)
+    return parse_stooq_daily_csv(content, symbol.upper(), source_url=source_url)
 
 
 def fetch_fed_funds_futures_quote(timeout: int = 15) -> MarketQuote:

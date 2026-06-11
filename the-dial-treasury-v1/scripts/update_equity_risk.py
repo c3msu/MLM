@@ -15,10 +15,12 @@ if str(PROJECT_ROOT) not in sys.path:
 from scripts.update_data import DEFAULT_OUTPUT, write_dashboard_json  # noqa: E402
 from treasury_data.build_dashboard import (  # noqa: E402
     EQUITY_RISK_SYMBOLS,
+    GLOBAL_LPPL_INDEX_SPECS,
     build_equity_short_term_risk_index,
+    build_global_lppl_risk_index,
 )
 from treasury_data.history_store import history_db_for_output, save_dashboard_history  # noqa: E402
-from treasury_data.sources import CalendarEvent, MarketDailyBar, fetch_nasdaq_daily_bars  # noqa: E402
+from treasury_data.sources import CalendarEvent, MarketDailyBar, fetch_nasdaq_daily_bars, fetch_stooq_daily_bars  # noqa: E402
 
 DailyBarFetcher = Callable[..., list[MarketDailyBar]]
 
@@ -59,6 +61,13 @@ def build_source_status_rows(market_bars: dict[str, list[MarketDailyBar]]) -> li
             rows.append({"name": f"Nasdaq {symbol} OHLCV", "status": "ok", "latest": bars[-1].date.isoformat()})
         else:
             rows.append({"name": f"Nasdaq {symbol} OHLCV", "status": "warning", "latest": "equity-only refresh unavailable"})
+    for spec in GLOBAL_LPPL_INDEX_SPECS:
+        symbol = str(spec["symbol"]).upper()
+        bars = market_bars.get(symbol, [])
+        if bars:
+            rows.append({"name": f"Global LPPL {symbol} OHLCV", "status": "ok", "latest": bars[-1].date.isoformat()})
+        else:
+            rows.append({"name": f"Global LPPL {symbol} OHLCV", "status": "warning", "latest": "global LPPL refresh unavailable"})
     return rows
 
 
@@ -84,6 +93,7 @@ def build_updated_dashboard(
         calendar_events=dashboard_events_to_calendar_events(dashboard),
     )
     updated["equityShortTermRisk"] = risk
+    updated["globalLpplRisk"] = build_global_lppl_risk_index(market_bars=market_bars)
     updated["generatedAt"] = (generated_at or datetime.now(timezone.utc)).replace(microsecond=0).isoformat()
     updated["sourceStatus"] = merge_source_status(
         dashboard.get("sourceStatus", []),
@@ -112,6 +122,44 @@ def fetch_equity_market_bars(
             source_rows.append({"name": f"Nasdaq {symbol} OHLCV", "status": "ok", "latest": latest})
         except Exception as exc:  # noqa: BLE001
             source_rows.append({"name": f"Nasdaq {symbol} OHLCV", "status": "warning", "latest": str(exc)})
+    for spec in GLOBAL_LPPL_INDEX_SPECS:
+        symbol = str(spec["symbol"]).upper()
+        if symbol in market_bars:
+            bars = market_bars[symbol]
+            latest = bars[-1].date.isoformat() if bars else "none"
+            source_rows.append({"name": f"Global LPPL {symbol} OHLCV", "status": "ok", "latest": latest})
+            continue
+        if spec.get("source") == "nasdaq":
+            try:
+                bars = fetcher(
+                    str(spec["sourceSymbol"]),
+                    start=equity_start,
+                    end=equity_end,
+                    asset_class=str(spec.get("assetClass") or "etf"),
+                    timeout=timeout,
+                    limit=limit,
+                )
+                market_bars[symbol] = [
+                    MarketDailyBar(symbol=symbol, date=bar.date, open=bar.open, high=bar.high, low=bar.low, close=bar.close, volume=bar.volume, source=bar.source)
+                    for bar in bars
+                ]
+                latest = bars[-1].date.isoformat() if bars else "none"
+                source_rows.append({"name": f"Global LPPL {symbol} OHLCV", "status": "ok", "latest": latest})
+            except Exception as exc:  # noqa: BLE001
+                source_rows.append({"name": f"Global LPPL {symbol} OHLCV", "status": "warning", "latest": str(exc)})
+            continue
+        if spec.get("source") != "stooq":
+            continue
+        try:
+            bars = fetch_stooq_daily_bars(str(spec["sourceSymbol"]), start=equity_start, end=equity_end, timeout=timeout)
+            market_bars[symbol] = [
+                MarketDailyBar(symbol=symbol, date=bar.date, open=bar.open, high=bar.high, low=bar.low, close=bar.close, volume=bar.volume, source=bar.source)
+                for bar in bars
+            ]
+            latest = bars[-1].date.isoformat() if bars else "none"
+            source_rows.append({"name": f"Global LPPL {symbol} OHLCV", "status": "ok", "latest": latest})
+        except Exception as exc:  # noqa: BLE001
+            source_rows.append({"name": f"Global LPPL {symbol} OHLCV", "status": "warning", "latest": str(exc)})
     return market_bars, source_rows
 
 
@@ -151,9 +199,11 @@ def main(argv: list[str] | None = None) -> int:
         limit=args.limit,
     )
     risk = dashboard.get("equityShortTermRisk", {})
+    lppl = dashboard.get("globalLpplRisk", {})
     backtest = risk.get("backtest", {}) if isinstance(risk, dict) else {}
     print(
         f"Wrote {args.output} with equityShortTermRisk={risk.get('score')} "
+        f"globalLpplRisk={lppl.get('score') if isinstance(lppl, dict) else None} "
         f"trend={len((risk.get('trend') or {}).get('points') or [])} "
         f"backtest={backtest.get('sampleSize')}"
     )

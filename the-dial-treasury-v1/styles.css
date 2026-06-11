@@ -387,6 +387,11 @@ h3 {
   color: var(--accent);
 }
 
+.equity-freshness-status.equity-freshness-waiting {
+  border-color: rgba(168, 118, 20, 0.34);
+  color: var(--accent);
+}
+
 .equity-freshness-status.equity-freshness-stale,
 .equity-freshness-status.equity-freshness-error {
   border-color: rgba(205, 57, 45, 0.38);
@@ -1880,6 +1885,8 @@ h3 {
 .equity-risk-metrics b,
 .equity-risk-quality b,
 .equity-risk-quality small,
+.equity-risk-weight-calibration span,
+.equity-risk-weight-calibration small,
 .equity-risk-evidence span,
 .equity-risk-evidence small,
 .equity-risk-components span,
@@ -1956,7 +1963,7 @@ h3 {
 
 .equity-risk-quality {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 6px;
 }
 
@@ -1980,6 +1987,37 @@ h3 {
 }
 
 .equity-risk-quality small {
+  white-space: normal;
+}
+
+.equity-risk-weight-calibration {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  gap: 6px;
+  align-items: stretch;
+}
+
+.equity-risk-weight-calibration > span {
+  align-self: center;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.equity-risk-weight-calibration b {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid rgba(171, 130, 54, 0.18);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.66);
+  color: var(--ink);
+  font-size: 11.5px;
+  line-height: 1.45;
+  padding: 7px 8px;
+}
+
+.equity-risk-weight-calibration small {
+  display: block;
   white-space: normal;
 }
 
@@ -2087,7 +2125,7 @@ h3 {
 
 .equity-risk-tiered {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
 }
 
@@ -2443,6 +2481,261 @@ h3 {
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 2;
+}
+
+.global-lppl-risk-panel {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.52);
+}
+
+.global-lppl-empty,
+.global-lppl-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.global-lppl-empty > div,
+.global-lppl-head > div {
+  min-width: 0;
+}
+
+.global-lppl-empty span,
+.global-lppl-head span {
+  display: block;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.global-lppl-empty strong,
+.global-lppl-head strong {
+  display: block;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 24px;
+  line-height: 1;
+}
+
+.global-lppl-head.restrictive strong {
+  color: var(--bear);
+}
+
+.global-lppl-head.supportive strong {
+  color: var(--bull);
+}
+
+.global-lppl-head b,
+.global-lppl-head small {
+  display: block;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.global-lppl-head b {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.global-lppl-head small {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.global-lppl-summary,
+.global-lppl-validation-summary,
+.global-lppl-empty p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.global-lppl-validation-summary {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.global-lppl-backtest {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.global-lppl-backtest span,
+.global-lppl-index-card {
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(250, 248, 242, 0.68);
+}
+
+.global-lppl-backtest b,
+.global-lppl-backtest small,
+.global-lppl-index-card small,
+.global-lppl-index-card b {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.global-lppl-backtest b,
+.global-lppl-index-card b {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.global-lppl-backtest strong,
+.global-lppl-index-card strong {
+  display: block;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 15px;
+  line-height: 1.2;
+}
+
+.global-lppl-backtest small,
+.global-lppl-index-card small {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 9.5px;
+}
+
+.global-lppl-index-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.global-lppl-index-card {
+  display: grid;
+  gap: 3px;
+}
+
+.global-lppl-index-card span {
+  display: block;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.global-lppl-index-card span small {
+  color: var(--faint);
+  font-weight: 600;
+}
+
+.global-lppl-index-card.restrictive {
+  border-color: rgba(203, 63, 51, 0.26);
+  background: rgba(203, 63, 51, 0.055);
+}
+
+.global-lppl-index-card.supportive {
+  border-color: rgba(42, 126, 91, 0.22);
+  background: rgba(42, 126, 91, 0.05);
+}
+
+.global-lppl-index-card.missing {
+  opacity: 0.72;
+}
+
+.global-lppl-history-chart {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.global-lppl-history-chart svg {
+  width: 100%;
+  min-height: 150px;
+  overflow: visible;
+}
+
+.global-lppl-modal-panel {
+  width: min(90vw, 1460px);
+  height: min(84vh, 860px);
+}
+
+.global-lppl-modal-chart svg {
+  height: 100%;
+  min-height: 360px;
+}
+
+.global-lppl-history-chart line {
+  stroke: rgba(142, 134, 118, 0.24);
+  stroke-dasharray: 4 5;
+}
+
+.global-lppl-threshold-line.strong {
+  stroke: rgba(203, 63, 51, 0.42);
+}
+
+.global-lppl-score-line {
+  fill: none;
+  stroke: var(--bear);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.2;
+}
+
+.global-lppl-spy-line,
+.global-lppl-qqq-line {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.global-lppl-spy-line {
+  stroke: #3e67b2;
+  stroke-dasharray: 6 5;
+}
+
+.global-lppl-qqq-line {
+  stroke: #a87614;
+  stroke-dasharray: 2 5;
+}
+
+.global-lppl-score-dot {
+  fill: var(--bear);
+  stroke: rgba(255, 255, 255, 0.96);
+  stroke-width: 2;
+}
+
+.global-lppl-hover-guide {
+  stroke: rgba(76, 69, 56, 0.44);
+  stroke-dasharray: 3 4;
+  pointer-events: none;
+}
+
+.global-lppl-hover-dot {
+  fill: var(--bear);
+  pointer-events: none;
+  stroke: rgba(255, 255, 255, 0.96);
+  stroke-width: 2;
+}
+
+.global-lppl-history-chart text {
+  fill: var(--faint);
+  font-family: var(--mono);
+  font-size: 10px;
 }
 
 .equity-risk-score-dot {
@@ -4132,6 +4425,7 @@ body.modal-open {
   .spy-warning-drivers,
   .equity-risk-head,
   .equity-risk-quality,
+  .equity-risk-weight-calibration,
   .equity-risk-evidence,
   .equity-risk-backtest-grid,
   .equity-risk-tiered,
@@ -4199,7 +4493,9 @@ body.modal-open {
   .spy-warning-sleeves,
   .equity-risk-components,
   .equity-risk-modal-stats,
-  .equity-risk-modal-alert-grid {
+  .equity-risk-modal-alert-grid,
+  .global-lppl-index-grid,
+  .global-lppl-backtest {
     grid-template-columns: 1fr 1fr;
   }
 
@@ -4286,10 +4582,13 @@ body.modal-open {
     .equity-risk-worst,
     .equity-risk-metrics,
     .equity-risk-quality,
+    .equity-risk-weight-calibration,
     .equity-risk-evidence,
     .equity-risk-modal-stats,
     .equity-risk-modal-alert-grid,
     .equity-risk-components,
+    .global-lppl-index-grid,
+    .global-lppl-backtest,
   .source-status-grid,
   .source-status-controls {
     grid-template-columns: 1fr;

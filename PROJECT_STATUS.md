@@ -11,6 +11,17 @@ The headline 0-100 macro score is aligned to the public bhadial Conditions
 Score shape: 30 scored factors, 7 modules, Funding EMA(5), and explicit
 public-proxy boundaries for ETF-relative factors.
 
+The equity-risk surface has three separate contracts:
+
+- `spyEarlyWarning`: monthly/medium-horizon macro drawdown-risk overlay.
+- `equityShortTermRisk`: daily SPY tactical risk score from replayable OHLCV
+  market structure, event context, and audited factor weights.
+- `globalLpplRisk`: independent global LPPL research indicator for SPY, QQQ,
+  KOSPI/EWY, Hang Seng/EWH, Taiwan/EWT, and Nikkei/EWJ. It is not included in
+  `equityShortTermRisk`; each index carries `indexValidation` and
+  `effectiveWeightMultiplier` so historically weaker LPPL evidence is
+  downweighted.
+
 Run locally:
 
 ```bash
@@ -73,6 +84,8 @@ operation, testing, and documentation should target `the-dial-treasury-v1/`.
 - Public-source parsers: `the-dial-treasury-v1/treasury_data/sources.py`.
 - Local server/API: `the-dial-treasury-v1/scripts/serve.py`.
 - Manual refresh entrypoint: `the-dial-treasury-v1/scripts/update_data.py`.
+- Equity/LPPL lightweight refresh entrypoint:
+  `the-dial-treasury-v1/scripts/update_equity_risk.py`.
 - Smoke check: `the-dial-treasury-v1/scripts/smoke_check.py`.
 
 The local server exposes the existing dashboard slice APIs, history APIs, and
@@ -106,3 +119,8 @@ output, Python caches, `.DS_Store`, and local content overrides.
 - `the-dial-treasury-v1/data/dashboard.json` is intentionally tracked as a
   serving snapshot. `the-dial-treasury-v1/data/history.sqlite3` and other
   SQLite/DB files are not tracked.
+- `scripts/smoke_check.py` fails on any real-source `error` row. At the moment
+  Treasury Fiscal Data `Debt Subject to Limit` can intermittently return curl
+  exit 7; keep that visible rather than suppressing the source-status failure.
+  Required Nasdaq equity OHLCV rows must also be `ok`; symbol-specific
+  warnings are reported explicitly by the smoke check.

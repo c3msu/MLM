@@ -35,6 +35,15 @@ def load_dashboard(path: Path | None = None, url: str | None = None, timeout: fl
     return payload
 
 
+def load_health(url: str, timeout: float = 10.0) -> dict[str, Any]:
+    endpoint = url.rstrip("/") + "/api/health"
+    with urlopen(endpoint, timeout=timeout) as response:
+        payload = json.load(response)
+    if not isinstance(payload, dict):
+        raise ValueError("health payload is not a JSON object")
+    return payload
+
+
 def validate_dashboard(dashboard: dict[str, Any]) -> list[str]:
     issues: list[str] = []
     if dashboard.get("meta", {}).get("dataMode") != "real-public-sources":
@@ -53,8 +62,9 @@ def validate_dashboard(dashboard: dict[str, Any]) -> list[str]:
             issues.append("sourceStatus contains error rows")
         if not any(isinstance(row, dict) and row.get("name") == "Fed path" and row.get("status") == "modeled" for row in source_status):
             issues.append("Fed path modeled boundary is not explicit")
-        if not has_required_equity_source_status(source_status):
-            issues.append("missing equity daily OHLCV source monitoring")
+        equity_issues = equity_source_status_issues(source_status)
+        if equity_issues:
+            issues.append("equity daily OHLCV source monitoring incomplete: " + "; ".join(equity_issues[:5]))
 
     event_titles = list_texts(dashboard.get("events", []), column=1)
     required_events = {
@@ -84,6 +94,34 @@ def validate_dashboard(dashboard: dict[str, Any]) -> list[str]:
         issues.append("missing SPY early-warning contract")
     if not has_equity_short_term_risk_contract(dashboard.get("equityShortTermRisk")):
         issues.append("missing equity short-term risk contract")
+    if not has_global_lppl_risk_contract(dashboard.get("globalLpplRisk")):
+        issues.append("missing global LPPL risk contract")
+    return issues
+
+
+def validate_health_payload(payload: dict[str, Any]) -> list[str]:
+    issues: list[str] = []
+    freshness = payload.get("equityRiskFreshness")
+    if not isinstance(freshness, dict):
+        issues.append("missing equityRiskFreshness health payload")
+        return issues
+    for key in ("expectedDate", "sourceDate"):
+        if freshness.get(key) is not None and not parse_iso_date(freshness.get(key)):
+            issues.append(f"equityRiskFreshness invalid {key}")
+    if not isinstance(freshness.get("stale"), bool):
+        issues.append("equityRiskFreshness missing stale")
+    if not isinstance(freshness.get("phase"), str) or not freshness.get("phase"):
+        issues.append("equityRiskFreshness missing phase")
+    if not isinstance(freshness.get("timeliness"), str) or not freshness.get("timeliness"):
+        issues.append("equityRiskFreshness missing timeliness")
+    if freshness.get("marketTime") is not None and not parse_iso_datetime(freshness.get("marketTime")):
+        issues.append("equityRiskFreshness invalid marketTime")
+    if freshness.get("readyAt") is not None and not parse_iso_datetime(freshness.get("readyAt")):
+        issues.append("equityRiskFreshness invalid readyAt")
+    for key in ("minutesUntilExpected", "minutesSinceExpected"):
+        value = freshness.get(key)
+        if value is not None and not isinstance(value, int):
+            issues.append(f"equityRiskFreshness invalid {key}")
     return issues
 
 
@@ -130,21 +168,30 @@ def has_cross_history_target(groups: Any, category: str, name: str) -> bool:
 
 
 def has_required_equity_source_status(source_status: Any) -> bool:
+    return not equity_source_status_issues(source_status)
+
+
+def equity_source_status_issues(source_status: Any) -> list[str]:
     if not isinstance(source_status, list):
-        return False
+        return ["sourceStatus is not a list"]
     rows = {
         str(row.get("name") or ""): row
         for row in source_status
         if isinstance(row, dict)
     }
+    issues: list[str] = []
     for name in REQUIRED_EQUITY_SOURCE_STATUS_NAMES:
         row = rows.get(name)
-        if not isinstance(row, dict) or row.get("status") != "ok":
-            return False
+        if not isinstance(row, dict):
+            issues.append(f"{name} missing")
+            continue
+        if row.get("status") != "ok":
+            issues.append(f"{name} status={row.get('status') or 'missing'}")
+            continue
         latest = row.get("latest")
         if not isinstance(latest, str) or not parse_iso_date(latest):
-            return False
-    return True
+            issues.append(f"{name} latest invalid")
+    return issues
 
 
 def ideas_have_investment_contract(ideas: Any) -> bool:
@@ -316,6 +363,36 @@ def has_equity_short_term_risk_contract(payload: Any) -> bool:
         return False
     if float(source_quality.get("historicalReplayableWeightPct")) < 60:
         return False
+    weight_calibration = payload.get("weightCalibration")
+    if not isinstance(weight_calibration, dict) or weight_calibration.get("available") is not True:
+        return False
+    for key in ("basis", "summary"):
+        if not isinstance(weight_calibration.get(key), str) or not weight_calibration.get(key):
+            return False
+    for key in ("validatedWeightPct", "downweightedWeightPct", "contextWeightPct"):
+        value = weight_calibration.get(key)
+        if not isinstance(value, (int, float)) or not 0 <= float(value) <= 100:
+            return False
+    calibration_rows = weight_calibration.get("rows")
+    if not isinstance(calibration_rows, list):
+        return False
+    calibration_keys = {
+        str(row.get("component") or "")
+        for row in calibration_rows
+        if isinstance(row, dict)
+    }
+    if not set(REQUIRED_EQUITY_PANEL_COMPONENT_KEYS).issubset(calibration_keys):
+        return False
+    for row in calibration_rows:
+        if not isinstance(row, dict):
+            return False
+        for key in ("component", "label", "scoreUse", "sourceQuality", "diagnosticDecision", "calibratedRole", "calibratedRoleCn"):
+            if not isinstance(row.get(key), str) or not row.get(key):
+                return False
+        if row.get("calibratedRole") not in {"validated", "downweighted", "context"}:
+            return False
+        if not isinstance(row.get("configuredWeight"), (int, float)):
+            return False
     forward_catalyst = payload.get("forwardCatalystRisk")
     if not isinstance(forward_catalyst, dict):
         return False
@@ -401,6 +478,15 @@ def has_equity_short_term_risk_contract(payload: Any) -> bool:
         return False
     if "avgDrawdownLeadDaysWhenHit" not in preferred or "medianDrawdownLeadDaysWhenHit" not in preferred:
         return False
+    precision_tests = backtest.get("precisionThresholdTests")
+    if not isinstance(precision_tests, list) or not precision_tests:
+        return False
+    high_precision = backtest.get("highPrecisionThresholdTest")
+    if not isinstance(high_precision, dict):
+        return False
+    for key in ("threshold", "precision", "recall", "alertDays", "falsePositives"):
+        if key not in high_precision:
+            return False
     alert_cluster = backtest.get("alertClusterTest")
     if not isinstance(alert_cluster, dict) or "avgLeadDays" not in alert_cluster:
         return False
@@ -408,6 +494,125 @@ def has_equity_short_term_risk_contract(payload: Any) -> bool:
     if not isinstance(guard, dict) or not parse_iso_date(guard.get("dataThrough")):
         return False
     if guard.get("dataThrough") != payload.get("asOf"):
+        return False
+    return True
+
+
+def has_global_lppl_risk_contract(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("scoreUse") != "independent":
+        return False
+    for key in ("title", "regime", "regimeCn", "summary", "method"):
+        if not isinstance(payload.get(key), str) or not payload.get(key):
+            return False
+    if "Global LPPL Risk" not in payload.get("title", ""):
+        return False
+    if payload.get("available") is True:
+        score = payload.get("score")
+        if not isinstance(score, (int, float)) or not 0 <= float(score) <= 100:
+            return False
+        if not parse_iso_date(payload.get("asOf")):
+            return False
+    elif payload.get("score") is not None:
+        return False
+    indices = payload.get("indices")
+    if not isinstance(indices, list) or len(indices) < 6:
+        return False
+    for row in indices:
+        if not isinstance(row, dict):
+            return False
+        for key in ("symbol", "name", "region", "status", "statusCn", "reason", "sourceQuality"):
+            if not isinstance(row.get(key), str) or not row.get(key):
+                return False
+        if not isinstance(row.get("available"), bool):
+            return False
+        row_score = row.get("score")
+        if row.get("available"):
+            if not isinstance(row_score, (int, float)) or not 0 <= float(row_score) <= 100:
+                return False
+            if not isinstance(row.get("confidence"), (int, float)) or not 0 <= float(row.get("confidence")) <= 1:
+                return False
+            if not parse_iso_date(row.get("criticalDate")):
+                return False
+            if not isinstance(row.get("daysToCritical"), int):
+                return False
+            if not isinstance(row.get("fitR2"), (int, float)) or not 0 <= float(row.get("fitR2")) <= 1:
+                return False
+            if not isinstance(row.get("windowDays"), int):
+                return False
+            if not isinstance(row.get("effectiveWeightMultiplier"), (int, float)):
+                return False
+            validation = row.get("validation")
+            if not isinstance(validation, dict) or validation.get("symbol") != row.get("symbol"):
+                return False
+        elif row_score is not None:
+            return False
+    index_validation = payload.get("indexValidation")
+    if not isinstance(index_validation, dict):
+        return False
+    if payload.get("available") is True:
+        if index_validation.get("available") is not True:
+            return False
+        validation_rows = index_validation.get("rows")
+        if not isinstance(validation_rows, list) or len(validation_rows) < 2:
+            return False
+        for row in validation_rows:
+            if not isinstance(row, dict):
+                return False
+            for key in ("symbol", "sourceSymbol", "validationRole", "validationRoleCn", "summary"):
+                if not isinstance(row.get(key), str) or not row.get(key):
+                    return False
+            for key in ("sampleSize", "threshold", "alertDays", "truePositives", "falsePositives"):
+                if not isinstance(row.get(key), int):
+                    return False
+            multiplier = row.get("effectiveWeightMultiplier")
+            if not isinstance(multiplier, (int, float)) or not 0 < float(multiplier) <= 1:
+                return False
+    elif not isinstance(index_validation.get("rows"), list):
+        return False
+    history = payload.get("history")
+    if not isinstance(history, dict):
+        return False
+    if history.get("available") is True:
+        points = history.get("points")
+        if not isinstance(points, list) or len(points) < 2:
+            return False
+        for point in points[:5]:
+            if not isinstance(point, dict) or not parse_iso_date(point.get("date")):
+                return False
+            if not isinstance(point.get("score"), (int, float)) or not 0 <= float(point.get("score")) <= 100:
+                return False
+    elif not isinstance(history.get("points"), list):
+        return False
+    backtest = payload.get("backtest")
+    if not isinstance(backtest, dict):
+        return False
+    if backtest.get("available") is True:
+        if not isinstance(backtest.get("sampleSize"), int):
+            return False
+        horizon_tests = backtest.get("horizonTests")
+        if not isinstance(horizon_tests, list) or [row.get("horizon") for row in horizon_tests] != [5, 10, 15, 20]:
+            return False
+        for row in horizon_tests:
+            if not isinstance(row, dict):
+                return False
+            for key in ("alertDays", "truePositives", "falsePositives"):
+                if not isinstance(row.get(key), int):
+                    return False
+        calibration_grid = backtest.get("calibrationGrid")
+        if not isinstance(calibration_grid, list) or len(calibration_grid) < 3:
+            return False
+        recommended = backtest.get("recommendedThreshold")
+        if not isinstance(recommended, dict) or not isinstance(recommended.get("threshold"), int):
+            return False
+        cluster = backtest.get("alertClusterTest")
+        if not isinstance(cluster, dict):
+            return False
+        for key in ("clusterCount", "hitClusters", "falseClusters", "maxFalseClusterDays"):
+            if not isinstance(cluster.get(key), int):
+                return False
+    elif not isinstance(backtest.get("horizonTests"), list):
         return False
     return True
 
@@ -421,6 +626,9 @@ def main(argv: list[str] | None = None) -> int:
 
     dashboard = load_dashboard(path=args.path, url=args.url, timeout=args.timeout)
     issues = validate_dashboard(dashboard)
+    if args.url:
+        health = load_health(args.url, timeout=args.timeout)
+        issues.extend(validate_health_payload(health))
     if issues:
         print("SMOKE FAILED")
         for issue in issues:

@@ -482,6 +482,44 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(after_ready["expectedDate"], "2026-06-08")
         self.assertEqual(after_ready["sourceDate"], "2026-06-05")
 
+    def test_equity_risk_freshness_reports_waiting_phase_before_expected_bar_is_due(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "data" / "dashboard.json"
+            dashboard = self.core_dashboard(generated_at="2026-06-08T20:00:00+00:00")
+            dashboard["equityShortTermRisk"]["asOf"] = "2026-06-05"
+            write_dashboard_json(dashboard, output)
+
+            freshness = serve.equity_risk_freshness(
+                output,
+                now=datetime(2026, 6, 8, 20, 10, tzinfo=timezone.utc),
+                after_close_lag_minutes=30,
+            )
+
+        self.assertFalse(freshness["stale"])
+        self.assertEqual(freshness["phase"], "post_close_wait")
+        self.assertEqual(freshness["timeliness"], "waiting")
+        self.assertEqual(freshness["minutesUntilExpected"], 20)
+        self.assertEqual(freshness["readyAt"], "2026-06-08T16:30:00-04:00")
+
+    def test_equity_risk_freshness_reports_catchup_phase_after_expected_bar_is_due(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "data" / "dashboard.json"
+            dashboard = self.core_dashboard(generated_at="2026-06-08T20:00:00+00:00")
+            dashboard["equityShortTermRisk"]["asOf"] = "2026-06-05"
+            write_dashboard_json(dashboard, output)
+
+            freshness = serve.equity_risk_freshness(
+                output,
+                now=datetime(2026, 6, 8, 20, 40, tzinfo=timezone.utc),
+                after_close_lag_minutes=30,
+            )
+
+        self.assertTrue(freshness["stale"])
+        self.assertEqual(freshness["phase"], "catchup")
+        self.assertEqual(freshness["timeliness"], "catchup")
+        self.assertEqual(freshness["minutesSinceExpected"], 10)
+        self.assertEqual(freshness["readyAt"], "2026-06-08T16:30:00-04:00")
+
     def test_equity_update_loop_uses_catchup_interval_when_equity_snapshot_is_stale(self):
         calls = []
         sleeps = []
@@ -608,6 +646,54 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(payload["asOf"], "2026-05-19")
             self.assertEqual(payload["equityRiskAsOf"], "2026-06-04")
             self.assertEqual(payload["equityRiskScore"], 82.4)
+            self.assertTrue(entered.wait(timeout=1))
+
+    def test_post_update_equity_returns_current_freshness_for_immediate_ui_feedback(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "data" / "dashboard.json"
+            dashboard = self.core_dashboard(generated_at="2026-06-08T20:00:00+00:00")
+            dashboard["equityShortTermRisk"]["asOf"] = "2026-06-05"
+            write_dashboard_json(dashboard, output)
+
+            def slow_equity_update(path, *, years, timeout, limit):
+                entered.set()
+                release.wait(timeout=2)
+                return dashboard
+
+            class EquityRefreshHandler(NoStoreHandler):
+                dashboard_output = output
+                equity_update_func = staticmethod(slow_equity_update)
+                equity_freshness_now = datetime(2026, 6, 8, 20, 40, tzinfo=timezone.utc)
+                equity_after_close_lag_minutes = 30
+
+                def log_message(self, format, *args):  # noqa: A002
+                    return
+
+            handler = functools.partial(EquityRefreshHandler, directory=temp_dir)
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+                connection.request("POST", "/api/update-equity")
+                response = connection.getresponse()
+                body = response.read()
+            finally:
+                release.set()
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=1)
+
+            payload = json.loads(body.decode("utf-8"))
+            self.assertEqual(response.status, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(payload["equityRiskFreshness"]["phase"], "catchup")
+            self.assertEqual(payload["equityRiskFreshness"]["timeliness"], "catchup")
+            self.assertEqual(payload["equityRiskFreshness"]["expectedDate"], "2026-06-08")
+            self.assertEqual(payload["equityRiskFreshness"]["sourceDate"], "2026-06-05")
             self.assertTrue(entered.wait(timeout=1))
 
     def test_post_update_reports_running_without_starting_duplicate_refresh(self):
@@ -923,6 +1009,9 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(payload["equityRiskFreshness"]["expectedDate"], "2026-06-08")
             self.assertEqual(payload["equityRiskFreshness"]["sourceDate"], "2026-06-05")
             self.assertTrue(payload["equityRiskFreshness"]["stale"])
+            self.assertEqual(payload["equityRiskFreshness"]["phase"], "catchup")
+            self.assertEqual(payload["equityRiskFreshness"]["timeliness"], "catchup")
+            self.assertEqual(payload["equityRiskFreshness"]["minutesSinceExpected"], 20)
             self.assertEqual(payload["warnings"][0]["name"], "Equity Short-Term Risk")
 
     def test_api_payload_for_path_returns_404_for_unknown_api_route(self):

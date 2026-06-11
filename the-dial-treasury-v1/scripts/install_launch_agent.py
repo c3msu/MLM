@@ -7,8 +7,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.serve import (
+    DEFAULT_EQUITY_AFTER_CLOSE_LAG_MINUTES,
+    DEFAULT_EQUITY_CATCHUP_INTERVAL_MINUTES,
+    DEFAULT_EQUITY_INTERVAL_MINUTES,
+)
+
+
 DEFAULT_LABEL = "com.changming.treasury-factor-desk"
 DEFAULT_PLIST_DIR = Path.home() / "Library" / "LaunchAgents"
 DEFAULT_LOG_DIR = Path.home() / "Library" / "Logs" / "treasury-factor-desk"
@@ -21,8 +30,9 @@ def build_launch_agent_plist(
     daily_at: str,
     port: int,
     log_dir: Path,
-    equity_interval_minutes: float = 30.0,
-    equity_catchup_interval_minutes: float = 10.0,
+    equity_interval_minutes: float = DEFAULT_EQUITY_INTERVAL_MINUTES,
+    equity_catchup_interval_minutes: float = DEFAULT_EQUITY_CATCHUP_INTERVAL_MINUTES,
+    equity_after_close_lag_minutes: int = DEFAULT_EQUITY_AFTER_CLOSE_LAG_MINUTES,
 ) -> bytes:
     output_path = PROJECT_ROOT / "data" / "dashboard.json"
     server_command = [
@@ -38,6 +48,8 @@ def build_launch_agent_plist(
         f"{equity_interval_minutes:g}",
         "--equity-catchup-interval-minutes",
         f"{equity_catchup_interval_minutes:g}",
+        "--equity-after-close-lag-minutes",
+        str(equity_after_close_lag_minutes),
         "--output",
         str(output_path),
     ]
@@ -65,8 +77,9 @@ def install_launch_agent(
     label: str = DEFAULT_LABEL,
     daily_at: str = "16:30",
     port: int = 8451,
-    equity_interval_minutes: float = 30.0,
-    equity_catchup_interval_minutes: float = 10.0,
+    equity_interval_minutes: float = DEFAULT_EQUITY_INTERVAL_MINUTES,
+    equity_catchup_interval_minutes: float = DEFAULT_EQUITY_CATCHUP_INTERVAL_MINUTES,
+    equity_after_close_lag_minutes: int = DEFAULT_EQUITY_AFTER_CLOSE_LAG_MINUTES,
     plist_dir: Path = DEFAULT_PLIST_DIR,
     load: bool = False,
 ) -> Path:
@@ -83,6 +96,7 @@ def install_launch_agent(
             log_dir=log_dir,
             equity_interval_minutes=equity_interval_minutes,
             equity_catchup_interval_minutes=equity_catchup_interval_minutes,
+            equity_after_close_lag_minutes=equity_after_close_lag_minutes,
         )
     )
     if load:
@@ -104,8 +118,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--label", default=DEFAULT_LABEL)
     parser.add_argument("--daily-at", default="16:30")
     parser.add_argument("--port", type=int, default=8451)
-    parser.add_argument("--equity-interval-minutes", type=float, default=30.0)
-    parser.add_argument("--equity-catchup-interval-minutes", type=float, default=10.0)
+    parser.add_argument("--equity-interval-minutes", type=float, default=DEFAULT_EQUITY_INTERVAL_MINUTES)
+    parser.add_argument("--equity-catchup-interval-minutes", type=float, default=DEFAULT_EQUITY_CATCHUP_INTERVAL_MINUTES)
+    parser.add_argument("--equity-after-close-lag-minutes", type=int, default=DEFAULT_EQUITY_AFTER_CLOSE_LAG_MINUTES)
     parser.add_argument("--load", action="store_true", help="Load the LaunchAgent immediately after writing it")
     parser.add_argument("--uninstall", action="store_true")
     args = parser.parse_args(argv)
@@ -121,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
         port=args.port,
         equity_interval_minutes=args.equity_interval_minutes,
         equity_catchup_interval_minutes=args.equity_catchup_interval_minutes,
+        equity_after_close_lag_minutes=args.equity_after_close_lag_minutes,
         load=args.load,
     )
     print(f"Wrote {plist_path}")

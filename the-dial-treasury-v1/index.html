@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650;9..144,750&family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20260609-equity-freshness-ui-v1">
+  <link rel="stylesheet" href="styles.css?v=20260609-equity-freshness-ui-v2">
 </head>
 <body>
   <header class="site-header">
@@ -195,6 +195,7 @@
         <p id="liquidityEquityRead" class="liquidity-equity-read">--</p>
         <div id="spyEarlyWarning" class="spy-warning-panel"></div>
         <div id="equityShortTermRisk" class="equity-risk-panel">equityShortTermRisk loading</div>
+        <div id="globalLpplRisk" class="global-lppl-risk-panel">globalLpplRisk loading</div>
         <div id="liquidityEquitySignal" class="liquidity-equity-signal"></div>
         <div id="liquidityEquityStateGrid" class="liquidity-state-grid"></div>
         <div id="liquidityEquityStats" class="liquidity-equity-stats"></div>
@@ -538,7 +539,22 @@
       <div id="equityRiskHistoryModalTooltip" class="percentile-tooltip equity-risk-history-tooltip modal-tooltip" hidden></div>
     </section>
   </div>
+  <div id="globalLpplRiskHistoryModal" class="chart-modal" role="dialog" aria-modal="true" aria-labelledby="globalLpplRiskHistoryModalTitle" hidden>
+    <div class="chart-modal-backdrop" data-close-global-lppl-risk-history-modal></div>
+    <section class="chart-modal-panel global-lppl-modal-panel">
+      <div class="panel-title modal-title">
+        <div>
+          <h3 id="globalLpplRiskHistoryModalTitle">Global LPPL Risk · 历史验证</h3>
+          <span class="panel-kicker">LPPL replay · SPY/QQQ indexed · 5/10/15/20D drawdown audit</span>
+        </div>
+        <button id="closeGlobalLpplRiskHistoryModal" class="icon-btn chart-close-btn" type="button" title="关闭" aria-label="关闭全球LPPL风险历史弹窗">×</button>
+      </div>
+      <div id="globalLpplRiskHistoryModalStats" class="equity-risk-modal-stats global-lppl-modal-stats"></div>
+      <div id="globalLpplRiskHistoryModalChart" class="global-lppl-history-chart global-lppl-modal-chart modal-chart"></div>
+      <div id="globalLpplRiskHistoryModalTooltip" class="percentile-tooltip global-lppl-history-tooltip modal-tooltip" hidden></div>
+    </section>
+  </div>
   <script src="i18n.js?v=20260526-html-export"></script>
-  <script src="app.js?v=20260609-equity-freshness-ui-v1"></script>
+  <script src="app.js?v=20260609-equity-freshness-ui-v2"></script>
 </body>
 </html>

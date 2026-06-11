@@ -118,6 +118,20 @@ const DEFAULT_DATA = {
     backtest: { available: false, sampleSize: 0, scoreBuckets: [], thresholdTests: [], regressionTests: [], worstWindows: [] },
     lookAheadGuard: {}
   },
+  globalLpplRisk: {
+    available: false,
+    title: "Global LPPL Risk · 全球指数泡沫临界风险",
+    score: null,
+    scoreUse: "independent",
+    regime: "Unavailable",
+    regimeCn: "不可用",
+    summary: "HTTP模式读取 data/dashboard.json 后显示全球LPPL风险评估。",
+    method: "LPPL grid search over constrained tc/m/omega with linear least-squares fit.",
+    indices: [],
+    indexValidation: { available: false, rows: [] },
+    history: { available: false, points: [] },
+    backtest: { available: false, sampleSize: 0, threshold: 65, horizonTests: [] }
+  },
   groups: [
     {
       id: "g1",
@@ -457,6 +471,8 @@ const DEFAULT_DATA = {
 const STORAGE_KEY = "the-dial-treasury-v1-state";
 const LANGUAGE_STORAGE_KEY = "the-dial-treasury-v1-language";
 const RUNTIME_AUTO_REFRESH_MS = 5 * 60 * 1000;
+const EQUITY_FRESHNESS_FAST_REFRESH_MS = 60 * 1000;
+const EQUITY_FRESHNESS_NEAR_READY_MINUTES = 30;
 const I18N = window.TreasuryI18n;
 const IDEA_SPY_PROXY_LABEL = "S&P 500 price-index proxy for SPY";
 let currentLanguage = I18N.normalizeLanguage(localStorage.getItem(LANGUAGE_STORAGE_KEY) || document.documentElement.lang);
@@ -471,6 +487,8 @@ let equityRefreshInFlight = false;
 let runtimeSnapshotRefreshInFlight = false;
 let equityFreshnessStatus = null;
 let runtimeAutoRefreshTimer = null;
+let equityFreshnessRefreshTimer = null;
+let equityFreshnessRefreshInFlight = false;
 let sourceStatusFilter = "all";
 let sourceStatusQuery = "";
 let percentileTrendCache = [];
@@ -596,17 +614,64 @@ async function loadEquityFreshnessStatus() {
     const payload = await response.json();
     equityFreshnessStatus = payload.equityRiskFreshness || null;
     renderEquityFreshnessStatus(equityFreshnessStatus);
+    scheduleEquityFreshnessRefresh(equityFreshnessStatus);
   } catch (error) {
     console.warn("Failed to load equity risk freshness", error);
     equityFreshnessStatus = { stale: true, error: error.message };
     renderEquityFreshnessStatus(equityFreshnessStatus);
+    scheduleEquityFreshnessRefresh(equityFreshnessStatus);
+  }
+}
+
+function equityFreshnessRefreshDelay(freshness) {
+  if (!freshness) return RUNTIME_AUTO_REFRESH_MS;
+  const phase = freshness.phase || "";
+  const minutesUntilExpected = Number(freshness.minutesUntilExpected);
+  if (freshness.stale || freshness.timeliness === "catchup" || phase === "catchup") {
+    return EQUITY_FRESHNESS_FAST_REFRESH_MS;
+  }
+  if (
+    freshness.timeliness === "waiting"
+    && Number.isFinite(minutesUntilExpected)
+    && minutesUntilExpected <= EQUITY_FRESHNESS_NEAR_READY_MINUTES
+  ) {
+    return EQUITY_FRESHNESS_FAST_REFRESH_MS;
+  }
+  return RUNTIME_AUTO_REFRESH_MS;
+}
+
+function scheduleEquityFreshnessRefresh(freshness) {
+  if (window.location.protocol === "file:") return;
+  clearTimeout(equityFreshnessRefreshTimer);
+  equityFreshnessRefreshTimer = window.setTimeout(
+    refreshEquityFreshnessSilently,
+    equityFreshnessRefreshDelay(freshness)
+  );
+}
+
+async function refreshEquityFreshnessSilently() {
+  if (equityFreshnessRefreshInFlight) return;
+  if (document.visibilityState === "hidden") {
+    scheduleEquityFreshnessRefresh(equityFreshnessStatus);
+    return;
+  }
+  equityFreshnessRefreshInFlight = true;
+  try {
+    const fast = equityFreshnessRefreshDelay(equityFreshnessStatus) === EQUITY_FRESHNESS_FAST_REFRESH_MS;
+    if (fast && canAutoRefreshRuntimeSnapshot()) {
+      await refreshRuntimeSnapshotSilently();
+    } else {
+      await loadEquityFreshnessStatus();
+    }
+  } finally {
+    equityFreshnessRefreshInFlight = false;
   }
 }
 
 function renderEquityFreshnessStatus(freshness) {
   const node = $("#equityFreshnessStatus");
   if (!node) return;
-  node.classList.remove("equity-freshness-ok", "equity-freshness-stale", "equity-freshness-error");
+  node.classList.remove("equity-freshness-ok", "equity-freshness-waiting", "equity-freshness-stale", "equity-freshness-error");
   if (!freshness) {
     node.textContent = "股市日线 --";
     node.title = "短期股市日线同步状态";
@@ -614,6 +679,9 @@ function renderEquityFreshnessStatus(freshness) {
   }
   const sourceDate = freshness.sourceDate || "--";
   const expectedDate = freshness.expectedDate || "--";
+  const phase = freshness.phase || "";
+  const minutesUntilExpected = Number(freshness.minutesUntilExpected);
+  const minutesSinceExpected = Number(freshness.minutesSinceExpected);
   if (freshness.error) {
     node.classList.add("equity-freshness-error");
     node.textContent = "股市日线检查失败";
@@ -622,13 +690,21 @@ function renderEquityFreshnessStatus(freshness) {
   }
   if (freshness.stale) {
     node.classList.add("equity-freshness-stale");
-    node.textContent = `股市日线滞后 ${sourceDate}`;
-    node.title = `短期股市日线滞后: source ${sourceDate}, expected ${expectedDate}; 后台将进入 catch-up 刷新。`;
+    const lagText = Number.isFinite(minutesSinceExpected) ? ` · 已到期${minutesSinceExpected}m` : "";
+    node.textContent = `股市日线追赶中 ${sourceDate}`;
+    node.title = `短期股市日线滞后: source ${sourceDate}, expected ${expectedDate}${lagText}; 后台将进入 catch-up 刷新。`;
+    return;
+  }
+  if (freshness.timeliness === "waiting" || phase === "post_close_wait" || phase === "trading_session") {
+    node.classList.add("equity-freshness-waiting");
+    const waitText = Number.isFinite(minutesUntilExpected) ? `${minutesUntilExpected}m` : "--";
+    node.textContent = phase === "trading_session" ? `股市日线盘中 ${sourceDate}` : `股市日线等待 ${waitText}`;
+    node.title = `短期股市日线正常等待: source ${sourceDate}, expected ${expectedDate}, readyAt ${freshness.readyAt || "--"}`;
     return;
   }
   node.classList.add("equity-freshness-ok");
   node.textContent = `股市日线已同步 ${sourceDate}`;
-  node.title = `短期股市日线已同步: source ${sourceDate}, expected ${expectedDate}`;
+  node.title = `短期股市日线已同步: source ${sourceDate}, expected ${expectedDate}, phase ${phase || "fresh"}`;
 }
 
 function setRuntimeRefreshBusy(isBusy) {
@@ -683,6 +759,11 @@ async function refreshEquityRisk() {
     const response = await fetch("/api/update-equity", { method: "POST", cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json().catch(() => ({}));
+    if (payload.equityRiskFreshness) {
+      equityFreshnessStatus = payload.equityRiskFreshness;
+      renderEquityFreshnessStatus(equityFreshnessStatus);
+      scheduleEquityFreshnessRefresh(equityFreshnessStatus);
+    }
     toast(payload.status === "running" ? "股市风险刷新正在运行" : "股市风险刷新已启动");
     window.setTimeout(() => loadRuntimeData({ refreshHistory: false }), 1200);
   } catch (error) {
@@ -1606,6 +1687,9 @@ function renderMacroLiquidityEquityLead() {
   const shortTermNode = $("#equityShortTermRisk");
   if (shortTermNode) shortTermNode.innerHTML = renderEquityShortTermRisk(state.equityShortTermRisk || DEFAULT_DATA.equityShortTermRisk);
   if (!$("#equityRiskHistoryModal")?.hidden) renderEquityRiskHistoryModalChart();
+  const globalLpplNode = $("#globalLpplRisk");
+  if (globalLpplNode) globalLpplNode.innerHTML = renderGlobalLpplRisk(state.globalLpplRisk || DEFAULT_DATA.globalLpplRisk);
+  if (!$("#globalLpplRiskHistoryModal")?.hidden) renderGlobalLpplRiskHistoryModalChart();
   const signalNode = $("#liquidityEquitySignal");
   if (signalNode) signalNode.innerHTML = renderLiquidityCurrentSignal(panel.currentSignal || {});
   const stateGridNode = $("#liquidityEquityStateGrid");
@@ -1734,6 +1818,9 @@ function renderEquityShortTermRisk(risk) {
   const recommendedCautionThreshold = backtest.recommendedCautionThreshold && typeof backtest.recommendedCautionThreshold === "object"
     ? backtest.recommendedCautionThreshold
     : {};
+  const highPrecisionThreshold = backtest.highPrecisionThresholdTest && typeof backtest.highPrecisionThresholdTest === "object"
+    ? backtest.highPrecisionThresholdTest
+    : {};
   const cautionDisplay = Number.isFinite(Number(recommendedCautionThreshold.threshold)) ? recommendedCautionThreshold : cautionTier;
   const strongTier = tieredThresholdTests.find((test) => Number(test.threshold) === 75) || preferredThreshold || {};
   const clusterTest = backtest.alertClusterTest && typeof backtest.alertClusterTest === "object" ? backtest.alertClusterTest : {};
@@ -1753,6 +1840,7 @@ function renderEquityShortTermRisk(risk) {
   const shock = item.nextSessionShock && typeof item.nextSessionShock === "object" ? item.nextSessionShock : {};
   const snapshot = item.marketSnapshot && typeof item.marketSnapshot === "object" ? item.marketSnapshot : {};
   const sourceQuality = item.sourceQuality && typeof item.sourceQuality === "object" ? item.sourceQuality : {};
+  const weightCalibration = item.weightCalibration && typeof item.weightCalibration === "object" ? item.weightCalibration : {};
   const forwardCatalystRisk = item.forwardCatalystRisk && typeof item.forwardCatalystRisk === "object" ? item.forwardCatalystRisk : {};
   const factorEvidence = Array.isArray(item.factorEvidence) ? item.factorEvidence : [];
   const scoreUseLabel = (value) => ({
@@ -1767,8 +1855,15 @@ function renderEquityShortTermRisk(risk) {
       <span><b>数据可信度</b><strong>${escapeHtml(sourceQuality.verdict || "--")}</strong><small>${escapeHtml(sourceQuality.detail || "等待证据评估")}</small></span>
       <span><b>计分权重</b><strong>${formatPercentMetric(sourceQuality.scoreEligibleWeightPct)}</strong><small>${Number(sourceQuality.scoredComponentCount) || 0} factors scored</small></span>
       <span><b>历史可回放</b><strong>${formatPercentMetric(sourceQuality.historicalReplayableWeightPct)}</strong><small>high-quality ${formatPercentMetric(sourceQuality.highQualityWeightPct)}</small></span>
+      <span><b>权重校准</b><strong>${formatPercentMetric(weightCalibration.validatedWeightPct)}</strong><small>降权 ${formatPercentMetric(weightCalibration.downweightedWeightPct)} · 背景 ${formatPercentMetric(weightCalibration.contextWeightPct)}</small></span>
       <span><b>前瞻窗口</b><strong>${Number(forwardCatalystRisk.windowDays) || 5}D</strong><small>${Number(forwardCatalystRisk.eventCount) || 0} events · ${escapeHtml(forwardCatalystRisk.scoreUse ? scoreUseLabel(forwardCatalystRisk.scoreUse) : "--")}</small></span>
     </div>
+    ${weightCalibration.available ? `
+      <div class="equity-risk-weight-calibration">
+        <span>权重校准</span>
+        <b>${escapeHtml(weightCalibration.summary || "")}<small>${escapeHtml(weightCalibration.basis || "")}</small></b>
+      </div>
+    ` : ""}
     ${factorEvidence.length ? `
       <div class="equity-risk-evidence">
         <span>因子证据</span>
@@ -1811,6 +1906,7 @@ function renderEquityShortTermRisk(risk) {
       <div class="equity-risk-tiered">
         <span><b>强告警</b><strong>${formatPercentMetric(strongTier.precision)}</strong><small>高精度 · recall ${formatPercentMetric(strongTier.recall)} · false ${Number(strongTier.falsePositives) || 0}</small></span>
         <span><b>中等预警 · 警戒以上</b><strong>${formatPercentMetric(cautionDisplay.precision)}</strong><small>推荐观察 score≥${Number(cautionDisplay.threshold) || 60} · 覆盖 ${formatPercentMetric(cautionDisplay.recall)} · false ${Number(cautionDisplay.falsePositives) || 0}</small></span>
+        <span><b>高精度执行阈值</b><strong>${formatPercentMetric(highPrecisionThreshold.precision)}</strong><small>score≥${Number(highPrecisionThreshold.threshold) || 75} · recall ${formatPercentMetric(highPrecisionThreshold.recall)} · false ${Number(highPrecisionThreshold.falsePositives) || 0}</small></span>
       </div>
       ${factorAudit}
       ${trendHistory}
@@ -2153,6 +2249,250 @@ function renderEquityRiskHistoryTooltip(tooltip, chartNode, event, point) {
   const top = Math.min(Math.max(8, event.clientY - parentRect.top - 58), Math.max(8, parentRect.height - tooltip.offsetHeight - 8));
   tooltip.style.left = `${left}px`;
   tooltip.style.top = `${top}px`;
+}
+
+function renderGlobalLpplRisk(payload) {
+  const item = payload && typeof payload === "object" ? payload : DEFAULT_DATA.globalLpplRisk;
+  if (!item.available) {
+    const indices = Array.isArray(item.indices) ? item.indices : [];
+    return `
+      <div class="global-lppl-empty">
+        <div>
+          <span>Global LPPL Risk · 全球指数泡沫临界风险</span>
+          <strong>--</strong>
+        </div>
+        <p>${escapeHtml(item.summary || "暂无全球LPPL风险评估")}</p>
+        ${indices.length ? renderGlobalLpplIndexGrid(indices) : ""}
+      </div>
+    `;
+  }
+  const score = Number(item.score);
+  const riskClass = spyWarningClass(score);
+  const indices = Array.isArray(item.indices) ? item.indices : [];
+  const backtest = item.backtest && typeof item.backtest === "object" ? item.backtest : {};
+  const indexValidation = item.indexValidation && typeof item.indexValidation === "object" ? item.indexValidation : {};
+  const horizonTests = Array.isArray(backtest.horizonTests) ? backtest.horizonTests : [];
+  const preferred = horizonTests.find((row) => Number(row.horizon) === 15) || horizonTests[0] || {};
+  const cluster = backtest.alertClusterTest && typeof backtest.alertClusterTest === "object" ? backtest.alertClusterTest : {};
+  return `
+    <div class="global-lppl-head ${riskClass}">
+      <div>
+        <span>Global LPPL Risk · 全球指数泡沫临界风险</span>
+        <strong>${Number.isFinite(score) ? score.toFixed(1) : "--"}</strong>
+      </div>
+      <div>
+        <b>${escapeHtml(item.regimeCn || item.regime || "--")} · ${escapeHtml(item.asOf || "--")}</b>
+        <small>${escapeHtml(item.scoreUse || "independent")} · ${escapeHtml(item.method || "LPPL")}</small>
+      </div>
+    </div>
+    <p class="global-lppl-summary">${escapeHtml(item.summary || "")}</p>
+    ${indexValidation.summary ? `<p class="global-lppl-validation-summary">${escapeHtml(indexValidation.summary)}</p>` : ""}
+    <div class="global-lppl-backtest">
+      <span><b>历史验证</b><strong>${Number(backtest.sampleSize) || 0} obs</strong><small>threshold score≥${Number(backtest.threshold) || 65}</small></span>
+      <span><b>15D精确率</b><strong>${formatPercentMetric(preferred.precision)}</strong><small>${Number(preferred.alertDays) || 0} alerts · false ${Number(preferred.falsePositives) || 0}</small></span>
+      <span><b>15D覆盖率</b><strong>${formatPercentMetric(preferred.recall)}</strong><small>${escapeHtml(backtest.drawdownEvent || "forward drawdown audit")}</small></span>
+      <span><b>告警簇</b><strong>${formatPercentMetric(cluster.precision)}</strong><small>false clusters ${Number(cluster.falseClusters) || 0} · max ${Number(cluster.maxFalseClusterDays) || 0}</small></span>
+    </div>
+    ${renderGlobalLpplIndexGrid(indices)}
+    ${renderGlobalLpplRiskHistoryChart(item)}
+  `;
+}
+
+function renderGlobalLpplIndexGrid(indices) {
+  return `
+    <div class="global-lppl-index-grid">
+      ${indices.map((row) => {
+        const score = Number(row.score);
+        const confidence = Number(row.confidence);
+        const validation = row.validation && typeof row.validation === "object" ? row.validation : {};
+        const weightMultiplier = Number(row.effectiveWeightMultiplier);
+        const riskClass = row.available ? spyWarningClass(score) : "neutral";
+        const validationText = row.available && validation.symbol
+          ? `15D验证 ${formatPercentMetric(validation.precision15d)} · w×${Number.isFinite(weightMultiplier) ? weightMultiplier.toFixed(2) : "--"} · ${escapeHtml(validation.validationRoleCn || validation.validationRole || "")}`
+          : "";
+        return `
+          <div class="global-lppl-index-card ${riskClass} ${row.available ? "" : "missing"}">
+            <span>${escapeHtml(row.name || row.symbol || "")}<small>${escapeHtml(row.region || row.symbol || "")}</small></span>
+            <strong>${row.available && Number.isFinite(score) ? score.toFixed(0) : "--"}</strong>
+            <b>${escapeHtml(row.statusCn || row.status || "--")}</b>
+            <small>${row.available ? `criticalDate ${escapeHtml(row.criticalDate || "--")} · ${Number(row.daysToCritical) || "--"}D · fitR2 ${formatNumberMetric(row.fitR2, 2)} · conf ${formatPercentMetric(confidence * 100)}` : escapeHtml(row.reason || "source unavailable")}</small>
+            ${validationText ? `<small>${validationText}</small>` : ""}
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function prepareGlobalLpplHistorySeries(item) {
+  const raw = Array.isArray(item?.history?.points) ? item.history.points : [];
+  const series = raw.map((point) => ({
+    date: point.date,
+    time: Date.parse(point.date || ""),
+    score: Number(point.score),
+    spyIndexed: Number(point.spyIndexed),
+    qqqIndexed: Number(point.qqqIndexed),
+    topSymbol: point.topSymbol || "",
+    availableIndices: Number(point.availableIndices),
+  })).filter((point) => Number.isFinite(point.time) && Number.isFinite(point.score));
+  return {
+    series,
+    spySeries: series.filter((point) => Number.isFinite(point.spyIndexed)),
+    qqqSeries: series.filter((point) => Number.isFinite(point.qqqIndexed)),
+  };
+}
+
+function globalLpplHistoryScale(series, spySeries, qqqSeries, options = {}) {
+  const W = options.large ? 1180 : 840;
+  const H = options.large ? 420 : 190;
+  const pad = options.large ? { l: 48, r: 72, t: 34, b: 40 } : { l: 34, r: 48, t: 24, b: 28 };
+  const minTime = Math.min(...series.map((point) => point.time));
+  const maxTime = Math.max(...series.map((point) => point.time));
+  const priceValues = [...spySeries.map((point) => point.spyIndexed), ...qqqSeries.map((point) => point.qqqIndexed)].filter(Number.isFinite);
+  const priceMin = priceValues.length ? Math.min(...priceValues) : 100;
+  const priceMax = priceValues.length ? Math.max(...priceValues) : 100;
+  const pricePad = Math.max(4, (priceMax - priceMin) * 0.12);
+  const priceLow = Math.max(0, priceMin - pricePad);
+  const priceHigh = priceMax + pricePad;
+  const x = (time) => pad.l + ((time - minTime) / Math.max(1, maxTime - minTime)) * (W - pad.l - pad.r);
+  const yRisk = (value) => pad.t + ((100 - Math.max(0, Math.min(100, value))) / 100) * (H - pad.t - pad.b);
+  const yPrice = (value) => pad.t + ((priceHigh - value) / Math.max(1, priceHigh - priceLow)) * (H - pad.t - pad.b);
+  return { W, H, pad, minTime, maxTime, priceLow, priceHigh, x, yRisk, yPrice };
+}
+
+function renderGlobalLpplRiskHistoryChart(item, options = {}) {
+  const { series, spySeries, qqqSeries } = prepareGlobalLpplHistorySeries(item);
+  if (series.length < 2) return `<div class="empty-state compact">LPPL历史曲线样本不足</div>`;
+  const scale = globalLpplHistoryScale(series, spySeries, qqqSeries, options);
+  const { W, H, pad, priceLow, priceHigh, x, yRisk, yPrice } = scale;
+  const riskPath = macroLiquidityPath(series, x, yRisk, "score");
+  const spyPath = spySeries.length >= 2 ? macroLiquidityPath(spySeries, x, yPrice, "spyIndexed") : "";
+  const qqqPath = qqqSeries.length >= 2 ? macroLiquidityPath(qqqSeries, x, yPrice, "qqqIndexed") : "";
+  const latest = series[series.length - 1];
+  const ticks = buildDateTicks(series, options.large ? 8 : 5);
+  const interactiveLayer = options.interactive ? `
+        <line class="global-lppl-hover-guide" x1="${pad.l}" x2="${pad.l}" y1="${pad.t}" y2="${H - pad.b}" stroke-opacity="0"></line>
+        <circle class="global-lppl-hover-dot risk" cx="${x(latest.time).toFixed(1)}" cy="${yRisk(latest.score).toFixed(1)}" r="5" opacity="0"></circle>
+        <rect x="${pad.l}" y="${pad.t}" width="${W - pad.l - pad.r}" height="${H - pad.t - pad.b}" fill="transparent"></rect>
+  ` : "";
+  return `
+    <div class="global-lppl-history-chart ${options.large ? "large" : ""}">
+      <div class="equity-risk-history-head">
+        <span>LPPL历史曲线</span>
+        <div class="equity-risk-history-actions">
+          <b>Global LPPL risk vs SPY/QQQ indexed</b>
+          ${options.large ? "" : `<button id="expandGlobalLpplRiskHistory" class="icon-btn chart-expand-btn" type="button" title="放大查看全球LPPL风险历史曲线" aria-label="放大查看全球LPPL风险历史曲线">⛶</button>`}
+        </div>
+      </div>
+      <svg data-global-lppl-history-chart viewBox="0 0 ${W} ${H}" role="img" aria-label="Global LPPL risk historical curve versus SPY and QQQ indexed price">
+        <rect x="0" y="0" width="${W}" height="${H}" fill="transparent"></rect>
+        ${[45, 65, 75].map((tick) => `
+          <line x1="${pad.l}" x2="${W - pad.r}" y1="${yRisk(tick).toFixed(1)}" y2="${yRisk(tick).toFixed(1)}" class="${tick === 65 ? "global-lppl-threshold-line strong" : "global-lppl-threshold-line"}"></line>
+          <text x="8" y="${yRisk(tick).toFixed(1)}" dy="4">${tick}</text>
+        `).join("")}
+        ${ticks.map((point) => `<text x="${x(point.time).toFixed(1)}" y="${H - 8}" text-anchor="middle">${formatMonthLabel(point.time)}</text>`).join("")}
+        ${spyPath ? `<path d="${spyPath}" class="global-lppl-spy-line"></path>` : ""}
+        ${qqqPath ? `<path d="${qqqPath}" class="global-lppl-qqq-line"></path>` : ""}
+        <path d="${riskPath}" class="global-lppl-score-line"></path>
+        <circle class="global-lppl-score-dot" cx="${x(latest.time).toFixed(1)}" cy="${yRisk(latest.score).toFixed(1)}" r="4.2"></circle>
+        <text x="${W - pad.r}" y="15" text-anchor="end">Global LPPL Risk ${latest.score.toFixed(1)}</text>
+        ${Number.isFinite(latest.spyIndexed) ? `<text x="${W - pad.r}" y="30" text-anchor="end" class="global-lppl-price-label">SPY indexed ${latest.spyIndexed.toFixed(0)}</text>` : ""}
+        ${Number.isFinite(latest.qqqIndexed) ? `<text x="${W - pad.r}" y="45" text-anchor="end" class="global-lppl-qqq-label">QQQ indexed ${latest.qqqIndexed.toFixed(0)}</text>` : ""}
+        <text x="${W - 8}" y="${yPrice(priceHigh).toFixed(1) + 4}" text-anchor="end" class="global-lppl-price-axis">${priceHigh.toFixed(0)}</text>
+        <text x="${W - 8}" y="${yPrice(priceLow).toFixed(1) + 4}" text-anchor="end" class="global-lppl-price-axis">${priceLow.toFixed(0)}</text>
+        ${interactiveLayer}
+      </svg>
+    </div>
+  `;
+}
+
+function renderGlobalLpplRiskHistoryModalStats(item) {
+  const { series } = prepareGlobalLpplHistorySeries(item);
+  const backtest = item?.backtest && typeof item.backtest === "object" ? item.backtest : {};
+  const horizonTests = Array.isArray(backtest.horizonTests) ? backtest.horizonTests : [];
+  const preferred = horizonTests.find((row) => Number(row.horizon) === 15) || horizonTests[0] || {};
+  const cluster = backtest.alertClusterTest && typeof backtest.alertClusterTest === "object" ? backtest.alertClusterTest : {};
+  if (series.length < 2) return `<div class="empty-state compact">LPPL历史样本不足</div>`;
+  const latest = series[series.length - 1];
+  return [
+    ["样本", `${series.length} pts`],
+    ["区间", `${series[0].date} / ${latest.date}`],
+    ["最新LPPL", latest.score.toFixed(1)],
+    ["阈值", `score≥${Number(backtest.threshold) || 65}`],
+    ["15D精确率", formatPercentMetric(preferred.precision)],
+    ["误报", `${Number(preferred.falsePositives) || 0}`],
+    ["簇命中率", formatPercentMetric(cluster.precision)],
+    ["最大误报簇", `${Number(cluster.maxFalseClusterDays) || 0} pts`],
+  ].map(([label, value]) => `
+    <div class="history-stat">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(String(value))}</strong>
+    </div>
+  `).join("");
+}
+
+function openGlobalLpplRiskHistoryModal() {
+  const modal = $("#globalLpplRiskHistoryModal");
+  if (!modal) return;
+  modal.hidden = false;
+  document.body.classList.add("modal-open");
+  renderGlobalLpplRiskHistoryModalChart();
+  $("#closeGlobalLpplRiskHistoryModal")?.focus();
+}
+
+function closeGlobalLpplRiskHistoryModal() {
+  const modal = $("#globalLpplRiskHistoryModal");
+  if (!modal) return;
+  modal.hidden = true;
+  document.body.classList.remove("modal-open");
+}
+
+function renderGlobalLpplRiskHistoryModalChart() {
+  const item = state.globalLpplRisk || DEFAULT_DATA.globalLpplRisk;
+  const chartNode = $("#globalLpplRiskHistoryModalChart");
+  const statsNode = $("#globalLpplRiskHistoryModalStats");
+  if (statsNode) statsNode.innerHTML = renderGlobalLpplRiskHistoryModalStats(item);
+  if (!chartNode) return;
+  chartNode.innerHTML = renderGlobalLpplRiskHistoryChart(item, { large: true, interactive: true });
+  bindGlobalLpplRiskHistoryInteractions(chartNode, item, { large: true, tooltipSelector: "#globalLpplRiskHistoryModalTooltip" });
+}
+
+function bindGlobalLpplRiskHistoryInteractions(chartNode, item, options = {}) {
+  const svg = chartNode?.querySelector("[data-global-lppl-history-chart]");
+  const tooltip = $(options.tooltipSelector || "#globalLpplRiskHistoryModalTooltip");
+  if (!svg || !tooltip) return;
+  const { series, spySeries, qqqSeries } = prepareGlobalLpplHistorySeries(item);
+  if (series.length < 2) return;
+  const scale = globalLpplHistoryScale(series, spySeries, qqqSeries, options);
+  const guide = svg.querySelector(".global-lppl-hover-guide");
+  const riskDot = svg.querySelector(".global-lppl-hover-dot.risk");
+  svg.addEventListener("mousemove", (event) => {
+    const rect = svg.getBoundingClientRect();
+    const svgX = ((event.clientX - rect.left) / Math.max(1, rect.width)) * scale.W;
+    const point = nearestEquityRiskHistoryPoint(series, svgX, scale);
+    if (!point) return;
+    const pointX = scale.x(point.time);
+    guide?.setAttribute("x1", pointX.toFixed(1));
+    guide?.setAttribute("x2", pointX.toFixed(1));
+    guide?.setAttribute("stroke-opacity", "0.42");
+    riskDot?.setAttribute("cx", pointX.toFixed(1));
+    riskDot?.setAttribute("cy", scale.yRisk(point.score).toFixed(1));
+    riskDot?.setAttribute("opacity", "1");
+    tooltip.innerHTML = `
+      <b>${escapeHtml(point.date)} · LPPL ${point.score.toFixed(1)}</b>
+      <span>SPY ${Number.isFinite(point.spyIndexed) ? point.spyIndexed.toFixed(1) : "--"} · QQQ ${Number.isFinite(point.qqqIndexed) ? point.qqqIndexed.toFixed(1) : "--"}</span>
+      <small>top ${escapeHtml(point.topSymbol || "--")} · indices ${Number(point.availableIndices) || "--"}</small>
+    `;
+    const parentRect = (tooltip.offsetParent || chartNode).getBoundingClientRect();
+    tooltip.hidden = false;
+    tooltip.style.left = `${Math.min(Math.max(8, event.clientX - parentRect.left + 12), Math.max(8, parentRect.width - tooltip.offsetWidth - 8))}px`;
+    tooltip.style.top = `${Math.min(Math.max(8, event.clientY - parentRect.top - 58), Math.max(8, parentRect.height - tooltip.offsetHeight - 8))}px`;
+  });
+  svg.addEventListener("mouseleave", () => {
+    guide?.setAttribute("stroke-opacity", "0");
+    riskDot?.setAttribute("opacity", "0");
+    tooltip.hidden = true;
+  });
 }
 
 function spyWarningClass(score) {
@@ -3674,10 +4014,15 @@ $$("[data-close-macro-liquidity-trend-modal]").forEach((node) => {
 });
 document.addEventListener("click", (event) => {
   if (event.target.closest("#expandEquityRiskHistory")) openEquityRiskHistoryModal();
+  if (event.target.closest("#expandGlobalLpplRiskHistory")) openGlobalLpplRiskHistoryModal();
 });
 $("#closeEquityRiskHistoryModal")?.addEventListener("click", closeEquityRiskHistoryModal);
 $$("[data-close-equity-risk-history-modal]").forEach((node) => {
   node.addEventListener("click", closeEquityRiskHistoryModal);
+});
+$("#closeGlobalLpplRiskHistoryModal")?.addEventListener("click", closeGlobalLpplRiskHistoryModal);
+$$("[data-close-global-lppl-risk-history-modal]").forEach((node) => {
+  node.addEventListener("click", closeGlobalLpplRiskHistoryModal);
 });
 $("#expandPercentileChart")?.addEventListener("click", openPercentileModal);
 $("#closePercentileModal")?.addEventListener("click", closePercentileModal);
@@ -3749,6 +4094,7 @@ $$("[data-close-percentile-modal]").forEach((node) => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !$("#macroLiquidityTrendModal")?.hidden) closeMacroLiquidityTrendModal();
   if (event.key === "Escape" && !$("#equityRiskHistoryModal")?.hidden) closeEquityRiskHistoryModal();
+  if (event.key === "Escape" && !$("#globalLpplRiskHistoryModal")?.hidden) closeGlobalLpplRiskHistoryModal();
   if (event.key === "Escape" && !$("#percentileModal")?.hidden) closePercentileModal();
   if (event.key === "Escape" && !$("#sourceStatusModal")?.hidden) closeSourceStatusModal();
 });

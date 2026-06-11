@@ -1,4 +1,5 @@
 import unittest
+import math
 from contextlib import ExitStack
 from datetime import date, datetime, timezone
 from unittest.mock import patch
@@ -1145,11 +1146,14 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertGreaterEqual(rotation["score"], 70)
         self.assertIn("tltHedgeFailure", {driver["key"] for driver in rotation["drivers"]})
         components_by_key = {component["key"]: component for component in risk["components"]}
-        self.assertEqual(components_by_key["volTargetPressure"]["weight"], 0.20)
-        self.assertEqual(components_by_key["qqqTltRotation"]["weight"], 0.16)
-        self.assertEqual(components_by_key["marketFlow"]["weight"], 0.18)
-        self.assertEqual(components_by_key["eventRisk"]["weight"], 0.02)
-        self.assertEqual(components_by_key["macroOverlay"]["weight"], 0.04)
+        self.assertEqual(components_by_key["volTargetPressure"]["weight"], 0.22)
+        self.assertEqual(components_by_key["qqqTltRotation"]["weight"], 0.14)
+        self.assertEqual(components_by_key["marketFlow"]["weight"], 0.22)
+        self.assertEqual(components_by_key["sectorRotation"]["weight"], 0.06)
+        self.assertEqual(components_by_key["hotStockReversal"]["weight"], 0.18)
+        self.assertEqual(components_by_key["turnover"]["weight"], 0.14)
+        self.assertEqual(components_by_key["eventRisk"]["weight"], 0.01)
+        self.assertEqual(components_by_key["macroOverlay"]["weight"], 0.03)
         self.assertEqual(components_by_key["optionOI"]["weight"], 0.0)
         self.assertEqual(components_by_key["optionOI"]["scoreUse"], "missing")
         evidence_by_component = {item["component"]: item for item in risk["factorEvidence"]}
@@ -1222,6 +1226,9 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertIn(recommended["threshold"], {55, 60, 65, 70})
         self.assertIn("推荐观察", recommended["label"])
         self.assertIn("precision", recommended)
+        self.assertEqual([row["threshold"] for row in backtest["precisionThresholdTests"]], [75, 78, 80, 82, 85, 88, 90])
+        self.assertIn("高精度", backtest["highPrecisionThresholdTest"]["label"])
+        self.assertIn("precision", backtest["highPrecisionThresholdTest"])
         self.assertIn("componentDiagnostics", backtest)
         self.assertGreaterEqual(len(backtest["worstWindows"]), 1)
 
@@ -1456,6 +1463,87 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(cluster["hitClusters"], 1)
         self.assertEqual(cluster["precision"], 100.0)
 
+    def test_global_lppl_risk_flags_synthetic_bubble_as_independent_indicator(self):
+        def lppl_closes(days: int = 300) -> list[float]:
+            tc = days + 45
+            closes: list[float] = []
+            for index in range(days):
+                distance = max(1.0, tc - index)
+                log_price = 5.2 - 0.58 * (distance ** 0.48) + 0.045 * (distance ** 0.48) * math.cos(8.5 * math.log(distance) + 0.7)
+                closes.append(math.exp(log_price))
+            scale = 100 / closes[0]
+            return [close * scale for close in closes]
+
+        market_bars = {
+            "SPY": self.make_equity_bars_from_closes("SPY", lppl_closes()),
+            "QQQ": self.make_equity_bars_from_closes("QQQ", [value * (1 + index * 0.0007) for index, value in enumerate(lppl_closes())]),
+        }
+
+        risk = dashboard_builder.build_global_lppl_risk_index(market_bars=market_bars)
+
+        self.assertTrue(risk["available"])
+        self.assertEqual(risk["title"], "Global LPPL Risk · 全球指数泡沫临界风险")
+        self.assertGreaterEqual(risk["score"], 60)
+        self.assertIn("independent", risk["scoreUse"])
+        self.assertIn("LPPL", risk["summary"])
+        self.assertGreaterEqual(len(risk["indices"]), 2)
+        qqq = next(row for row in risk["indices"] if row["symbol"] == "QQQ")
+        self.assertEqual(qqq["status"], "risk")
+        self.assertGreaterEqual(qqq["score"], 60)
+        self.assertGreaterEqual(qqq["confidence"], 0.35)
+        self.assertRegex(qqq["criticalDate"], r"^2026-")
+        self.assertGreaterEqual(qqq["daysToCritical"], 10)
+        self.assertLessEqual(qqq["daysToCritical"], 180)
+        self.assertTrue(risk["history"]["available"])
+        self.assertGreaterEqual(len(risk["history"]["points"]), 40)
+        self.assertTrue(risk["backtest"]["available"])
+        self.assertEqual([row["horizon"] for row in risk["backtest"]["horizonTests"]], [5, 10, 15, 20])
+        self.assertTrue(risk["indexValidation"]["available"])
+        validation_rows = {row["symbol"]: row for row in risk["indexValidation"]["rows"]}
+        self.assertIn("SPY", validation_rows)
+        self.assertIn("QQQ", validation_rows)
+        self.assertIn("precision15d", validation_rows["QQQ"])
+        self.assertIn("effectiveWeightMultiplier", validation_rows["QQQ"])
+        self.assertGreater(validation_rows["QQQ"]["sampleSize"], 20)
+        self.assertLessEqual(validation_rows["QQQ"]["effectiveWeightMultiplier"], 1.0)
+        self.assertIn("validation", qqq)
+        self.assertEqual(qqq["validation"]["symbol"], "QQQ")
+        self.assertIn("effectiveWeightMultiplier", qqq)
+
+    def test_global_lppl_risk_marks_quiet_trend_low_confidence(self):
+        closes = [100 + index * 0.08 for index in range(280)]
+        market_bars = {
+            "SPY": self.make_equity_bars_from_closes("SPY", closes),
+            "QQQ": self.make_equity_bars_from_closes("QQQ", [value * 1.05 for value in closes]),
+        }
+
+        risk = dashboard_builder.build_global_lppl_risk_index(market_bars=market_bars)
+
+        self.assertTrue(risk["available"])
+        self.assertLessEqual(risk["score"], 35)
+        self.assertTrue(all(row["status"] in {"quiet", "watch"} for row in risk["indices"] if row["available"]))
+        self.assertLessEqual(max(row["confidence"] for row in risk["indices"] if row["available"]), 0.45)
+
+    def test_global_lppl_risk_reports_missing_indices_without_fabricated_scores(self):
+        risk = dashboard_builder.build_global_lppl_risk_index(market_bars={"SPY": self.make_equity_bars_from_closes("SPY", [100 + index for index in range(80)])})
+
+        self.assertFalse(risk["available"])
+        self.assertIsNone(risk["score"])
+        self.assertGreaterEqual(len(risk["indices"]), 6)
+        missing = [row for row in risk["indices"] if not row["available"]]
+        self.assertTrue(missing)
+        self.assertTrue(all(row["score"] is None for row in missing))
+
+    def test_global_lppl_aggregate_does_not_let_weak_single_market_dominate(self):
+        score = dashboard_builder.aggregate_global_lppl_score(
+            [
+                {"score": 100.0, "confidence": 0.9, "weight": 0.1, "effectiveWeightMultiplier": 0.5},
+                {"score": 62.0, "confidence": 0.8, "weight": 0.9, "effectiveWeightMultiplier": 1.0},
+            ]
+        )
+
+        self.assertLess(score, 70.0)
+
     def test_equity_short_term_risk_flags_downtrend_continuation(self):
         market_bars = {
             "SPY": self.make_equity_bars("SPY", start_price=620, pre_event_return=-0.07, june4_return=-0.014, june5_return=-0.028, june4_volume_multiplier=1.12),
@@ -1481,6 +1569,11 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertTrue(any(driver["key"] == "downtrendContinuation" for driver in flow["drivers"]))
         self.assertEqual(risk["regime"], "Strong Alert")
         self.assertGreaterEqual(risk["score"], 75)
+        self.assertTrue(risk["weightCalibration"]["available"])
+        calibration_rows = {row["component"]: row for row in risk["weightCalibration"]["rows"]}
+        self.assertIn("marketFlow", calibration_rows)
+        self.assertEqual(calibration_rows["marketFlow"]["configuredWeight"], 0.22)
+        self.assertIn(calibration_rows["marketFlow"]["calibratedRole"], {"validated", "context", "downweighted"})
 
     def test_equity_short_term_risk_keeps_warning_after_fragile_relief_rally(self):
         spy_closes = [100.0 + index * 0.04 for index in range(12)] + [100, 100.5, 101, 100.6, 99.8, 98.7, 97.5, 96.1, 94.0, 92.0, 93.4, 95.6, 96.3]

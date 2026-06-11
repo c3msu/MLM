@@ -44,6 +44,7 @@ from .sources import (
     fetch_nasdaq_daily_bars,
     fetch_primary_dealer_stats,
     fetch_quarterly_refunding,
+    fetch_stooq_daily_bars,
     fetch_tic_major_holders,
     fetch_treasury_press_releases,
     fetch_treasury_auctions,
@@ -341,16 +342,82 @@ EQUITY_RISK_SYMBOLS: dict[str, str] = {
 EQUITY_RISK_CORE_SYMBOLS = {"SPY", "QQQ", "SMH", "XLK", "TLT", "RSP", "IWM"}
 EQUITY_RISK_HOT_STOCKS = ["NVDA", "AVGO", "AMD", "TSLA", "META", "MSFT", "AAPL", "AMZN", "GOOGL"]
 EQUITY_RISK_COMPONENT_WEIGHTS: dict[str, float] = {
-    "volTargetPressure": 0.20,
-    "qqqTltRotation": 0.16,
-    "marketFlow": 0.18,
-    "sectorRotation": 0.16,
-    "hotStockReversal": 0.14,
-    "turnover": 0.10,
-    "macroOverlay": 0.04,
-    "eventRisk": 0.02,
+    "volTargetPressure": 0.22,
+    "qqqTltRotation": 0.14,
+    "marketFlow": 0.22,
+    "sectorRotation": 0.06,
+    "hotStockReversal": 0.18,
+    "turnover": 0.14,
+    "macroOverlay": 0.03,
+    "eventRisk": 0.01,
     "optionOI": 0.00,
 }
+GLOBAL_LPPL_INDEX_SPECS: list[dict[str, Any]] = [
+    {
+        "symbol": "SPY",
+        "name": "SPY",
+        "region": "US broad",
+        "source": "nasdaq",
+        "sourceSymbol": "SPY",
+        "assetClass": "etf",
+        "sourceQuality": "high",
+        "weight": 0.23,
+    },
+    {
+        "symbol": "QQQ",
+        "name": "Nasdaq / QQQ proxy",
+        "region": "US tech",
+        "source": "nasdaq",
+        "sourceSymbol": "QQQ",
+        "assetClass": "etf",
+        "sourceQuality": "high",
+        "weight": 0.23,
+    },
+    {
+        "symbol": "KOSPI",
+        "name": "KOSPI / EWY proxy",
+        "region": "Korea ETF proxy",
+        "source": "nasdaq",
+        "sourceSymbol": "EWY",
+        "assetClass": "etf",
+        "sourceQuality": "medium",
+        "weight": 0.13,
+    },
+    {
+        "symbol": "HSI",
+        "name": "Hang Seng / EWH proxy",
+        "region": "Hong Kong ETF proxy",
+        "source": "nasdaq",
+        "sourceSymbol": "EWH",
+        "assetClass": "etf",
+        "sourceQuality": "medium",
+        "weight": 0.13,
+    },
+    {
+        "symbol": "TWII",
+        "name": "Taiwan Weighted / EWT proxy",
+        "region": "Taiwan ETF proxy",
+        "source": "nasdaq",
+        "sourceSymbol": "EWT",
+        "assetClass": "etf",
+        "sourceQuality": "medium",
+        "weight": 0.13,
+    },
+    {
+        "symbol": "NIKKEI",
+        "name": "Nikkei / EWJ proxy",
+        "region": "Japan ETF proxy",
+        "source": "nasdaq",
+        "sourceSymbol": "EWJ",
+        "assetClass": "etf",
+        "sourceQuality": "medium",
+        "weight": 0.15,
+    },
+]
+GLOBAL_LPPL_MIN_OBSERVATIONS = 120
+GLOBAL_LPPL_DEFAULT_WINDOW = 252
+GLOBAL_LPPL_HISTORY_STEP = 4
+GLOBAL_LPPL_ALERT_THRESHOLD = 65
 
 
 def build_live_dashboard() -> dict[str, Any]:
@@ -370,6 +437,7 @@ def build_live_dashboard() -> dict[str, Any]:
     fed_funds_futures: MarketQuote | None = None
     gold_quote: MarketQuote | None = None
     equity_market_bars: dict[str, list[MarketDailyBar]] = {}
+    global_lppl_market_bars: dict[str, list[MarketDailyBar]] = {}
     option_open_interest: OptionOpenInterestSnapshot | None = None
     official_news: list[NewsItem] = []
 
@@ -504,6 +572,43 @@ def build_live_dashboard() -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             source_status.append({"name": f"Nasdaq {symbol} OHLCV", "status": "warning", "latest": str(exc)})
 
+    global_lppl_market_bars.update({symbol: bars for symbol, bars in equity_market_bars.items() if symbol in {"SPY", "QQQ"}})
+    for spec in GLOBAL_LPPL_INDEX_SPECS:
+        symbol = str(spec["symbol"]).upper()
+        if symbol in global_lppl_market_bars:
+            bars = global_lppl_market_bars[symbol]
+            latest = bars[-1].date.isoformat() if bars else "none"
+            source_status.append({"name": f"Global LPPL {symbol} OHLCV", "status": "ok", "latest": latest})
+            continue
+        if spec.get("source") == "nasdaq":
+            try:
+                bars = fetch_nasdaq_daily_bars(
+                    str(spec["sourceSymbol"]),
+                    start=equity_start,
+                    end=equity_end,
+                    asset_class=str(spec.get("assetClass") or "etf"),
+                    timeout=14,
+                    limit=900,
+                )
+                global_lppl_market_bars[symbol] = [
+                    MarketDailyBar(symbol=symbol, date=bar.date, open=bar.open, high=bar.high, low=bar.low, close=bar.close, volume=bar.volume, source=bar.source)
+                    for bar in bars
+                ]
+                latest = bars[-1].date.isoformat() if bars else "none"
+                source_status.append({"name": f"Global LPPL {symbol} OHLCV", "status": "ok", "latest": latest})
+            except Exception as exc:  # noqa: BLE001
+                source_status.append({"name": f"Global LPPL {symbol} OHLCV", "status": "warning", "latest": str(exc)})
+            continue
+        if spec.get("source") != "stooq":
+            continue
+        try:
+            bars = fetch_stooq_daily_bars(str(spec["sourceSymbol"]), start=equity_start, end=equity_end, timeout=14)
+            global_lppl_market_bars[symbol] = [MarketDailyBar(symbol=symbol, date=bar.date, open=bar.open, high=bar.high, low=bar.low, close=bar.close, volume=bar.volume, source=bar.source) for bar in bars]
+            latest = bars[-1].date.isoformat() if bars else "none"
+            source_status.append({"name": f"Global LPPL {symbol} OHLCV", "status": "ok", "latest": latest})
+        except Exception as exc:  # noqa: BLE001
+            source_status.append({"name": f"Global LPPL {symbol} OHLCV", "status": "warning", "latest": str(exc)})
+
     try:
         option_open_interest = fetch_cboe_option_open_interest("SPY")
         source_status.append({"name": "Cboe SPY option open interest", "status": "ok", "latest": option_open_interest.as_of.isoformat()})
@@ -544,6 +649,7 @@ def build_live_dashboard() -> dict[str, Any]:
         calendar_events=calendar_events,
         announced_auctions=announced_auctions,
         equity_market_bars=equity_market_bars,
+        global_lppl_market_bars=global_lppl_market_bars,
         option_open_interest=option_open_interest,
         overrides=load_content_overrides(),
     )
@@ -643,6 +749,7 @@ def build_dashboard_from_inputs(
     calendar_events: list[CalendarEvent] | None = None,
     announced_auctions: list[dict[str, object]] | None = None,
     equity_market_bars: dict[str, list[MarketDailyBar]] | None = None,
+    global_lppl_market_bars: dict[str, list[MarketDailyBar]] | None = None,
     option_open_interest: OptionOpenInterestSnapshot | None = None,
     overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -695,6 +802,9 @@ def build_dashboard_from_inputs(
         calendar_events=calendar_events or [],
         option_open_interest=option_open_interest,
     )
+    lppl_bars = dict(equity_market_bars or {})
+    lppl_bars.update(global_lppl_market_bars or {})
+    global_lppl_risk = build_global_lppl_risk_index(market_bars=lppl_bars)
     bhadial_coverage = build_bhadial_coverage(groups)
     source_status = [
         {"name": "Fed path", "status": "modeled", "latest": "public futures proxy + curve/macro model" if fed_funds_futures else "curve/macro proxy"},
@@ -719,6 +829,8 @@ def build_dashboard_from_inputs(
         source_status.append({"name": "Official news flow", "status": "manual-placeholder", "latest": "official news feeds unavailable"})
     if not equity_market_bars:
         source_status.append({"name": "Nasdaq equity OHLCV", "status": "manual-placeholder", "latest": "daily equity market-structure feeds unavailable"})
+    if not lppl_bars:
+        source_status.append({"name": "Global LPPL index OHLCV", "status": "manual-placeholder", "latest": "global index replay feeds unavailable"})
     if option_open_interest is None:
         source_status.append({"name": "Cboe SPY option open interest", "status": "manual-placeholder", "latest": "option OI snapshot unavailable"})
     conclusion_audit = build_conclusion_audit(groups, source_status=source_status)
@@ -759,6 +871,7 @@ def build_dashboard_from_inputs(
         "macroLiquidityEquity": macro_liquidity_equity,
         "spyEarlyWarning": spy_early_warning,
         "equityShortTermRisk": equity_short_term_risk,
+        "globalLpplRisk": global_lppl_risk,
         "policy": policy,
         "auctions": build_auctions(auctions),
         "fiscal": build_fiscal(indicators, quarterly_refunding=quarterly_refunding, debt_limit_status=debt_limit_status),
@@ -3087,6 +3200,721 @@ SPY_WARNING_LATE_RALLY_ROLLOVER_BOOST = 3.0
 SPY_WARNING_LOW_SCORE_STALL_BOOST = 4.0
 
 
+def build_global_lppl_risk_index(
+    *,
+    market_bars: dict[str, list[MarketDailyBar]] | None = None,
+    as_of: date | None = None,
+) -> dict[str, Any]:
+    bars_by_symbol = normalize_market_bars(market_bars or {})
+    index_rows = build_global_lppl_index_rows(bars_by_symbol, as_of=as_of)
+    index_validation = build_global_lppl_index_validation(index_rows, bars_by_symbol)
+    index_rows = apply_global_lppl_index_validation(index_rows, index_validation)
+    available_rows = [row for row in index_rows if row.get("available") and optional_float(row.get("score")) is not None]
+    if len(available_rows) < 2:
+        return unavailable_global_lppl_risk(index_rows, "全球LPPL需要至少两个可回放指数样本; 当前公开日线源不足。")
+
+    aggregate_score = aggregate_global_lppl_score(available_rows)
+    regime, regime_cn = global_lppl_regime(aggregate_score)
+    latest_date = latest_global_lppl_date(available_rows)
+    history = build_global_lppl_history(bars_by_symbol, index_validation=index_validation)
+    backtest = build_global_lppl_backtest(history.get("points", []) if isinstance(history, dict) else [], bars_by_symbol.get("SPY", []))
+    return global_lppl_payload(
+        score=aggregate_score,
+        regime=regime,
+        regime_cn=regime_cn,
+        latest_date=latest_date,
+        available_rows=available_rows,
+        index_rows=index_rows,
+        index_validation=index_validation,
+        history=history,
+        backtest=backtest,
+    )
+
+
+def build_global_lppl_index_rows(
+    bars_by_symbol: dict[str, list[MarketDailyBar]],
+    *,
+    as_of: date | None = None,
+) -> list[dict[str, Any]]:
+    return [
+        global_lppl_index_row(spec, bars_by_symbol.get(str(spec["symbol"]).upper(), []), as_of=as_of)
+        for spec in GLOBAL_LPPL_INDEX_SPECS
+    ]
+
+
+def latest_global_lppl_date(available_rows: list[dict[str, Any]]) -> date:
+    dated_rows = [
+        date.fromisoformat(str(row["asOf"]))
+        for row in available_rows
+        if parse_payload_date(row.get("asOf"))
+    ]
+    return max(dated_rows) if dated_rows else date.today()
+
+
+def global_lppl_summary(score: float, regime_cn: str, available_rows: list[dict[str, Any]]) -> str:
+    high_risk_count = sum(
+        1
+        for row in available_rows
+        if (optional_float(row.get("score")) or 0.0) >= GLOBAL_LPPL_ALERT_THRESHOLD
+    )
+    nearest = min(
+        (
+            int(days)
+            for row in available_rows
+            for days in [optional_float(row.get("daysToCritical"))]
+            if days is not None
+        ),
+        default=None,
+    )
+    return (
+        f"LPPL独立指标{score:.1f}({regime_cn}); "
+        f"{high_risk_count}/{len(available_rows)}个可用指数处于风险阈值上方"
+        + (f", 最近临界窗口约{nearest}天。" if nearest is not None else "。")
+    )
+
+
+def global_lppl_payload(
+    *,
+    score: float,
+    regime: str,
+    regime_cn: str,
+    latest_date: date,
+    available_rows: list[dict[str, Any]],
+    index_rows: list[dict[str, Any]],
+    index_validation: dict[str, Any],
+    history: dict[str, Any],
+    backtest: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "available": True,
+        "title": "Global LPPL Risk · 全球指数泡沫临界风险",
+        "score": round(score, 1),
+        "scoreUse": "independent",
+        "regime": regime,
+        "regimeCn": regime_cn,
+        "asOf": latest_date.isoformat(),
+        "summary": global_lppl_summary(score, regime_cn, available_rows),
+        "method": "LPPL grid search over constrained tc/m/omega with linear least-squares fit; shown as an independent global index-risk diagnostic, not an equityShortTermRisk input.",
+        "indices": index_rows,
+        "indexValidation": index_validation,
+        "history": history,
+        "backtest": backtest,
+        "lookAheadGuard": {
+            "dataThrough": latest_date.isoformat(),
+            "scoreInputs": "Only same-day or earlier daily OHLCV bars are used. Forward SPY drawdowns are audit-only backtest outputs.",
+            "scoreUse": "independent; not included in equityShortTermRisk.",
+        },
+    }
+
+
+def unavailable_global_lppl_risk(index_rows: list[dict[str, Any]], reason: str) -> dict[str, Any]:
+    return {
+        "available": False,
+        "title": "Global LPPL Risk · 全球指数泡沫临界风险",
+        "score": None,
+        "scoreUse": "independent",
+        "regime": "Unavailable",
+        "regimeCn": "不可用",
+        "asOf": "",
+        "summary": reason,
+        "method": "LPPL grid search over constrained tc/m/omega with linear least-squares fit.",
+        "indices": index_rows,
+        "indexValidation": {"available": False, "rows": [], "summary": reason},
+        "history": {"available": False, "points": [], "summary": reason},
+        "backtest": {"available": False, "sampleSize": 0, "threshold": GLOBAL_LPPL_ALERT_THRESHOLD, "horizonTests": [], "summary": reason},
+        "lookAheadGuard": {"scoreUse": "independent; not included in equityShortTermRisk."},
+    }
+
+
+def global_lppl_index_row(
+    spec: dict[str, Any],
+    bars: list[MarketDailyBar],
+    *,
+    as_of: date | None = None,
+    fast: bool = False,
+) -> dict[str, Any]:
+    symbol = str(spec.get("symbol") or "").upper()
+    clean = normalize_market_bars({symbol: bars}).get(symbol, [])
+    target_index = bar_index_at_or_before(clean, as_of) if as_of else (len(clean) - 1 if clean else None)
+    if target_index is None or target_index + 1 < GLOBAL_LPPL_MIN_OBSERVATIONS:
+        return {
+            "symbol": symbol,
+            "name": str(spec.get("name") or symbol),
+            "region": str(spec.get("region") or ""),
+            "available": False,
+            "score": None,
+            "confidence": 0.0,
+            "status": "missing",
+            "statusCn": "缺失",
+            "criticalDate": None,
+            "daysToCritical": None,
+            "fitR2": None,
+            "windowDays": None,
+            "observations": len(clean),
+            "source": str(spec.get("source") or ""),
+            "sourceSymbol": str(spec.get("sourceSymbol") or symbol),
+            "sourceQuality": str(spec.get("sourceQuality") or "low"),
+            "reason": "source unavailable or sample shorter than LPPL minimum window",
+        }
+    fit = fit_global_lppl_signal(clean[: target_index + 1], fast=fast)
+    latest = clean[target_index]
+    if not fit.get("available"):
+        return {
+            "symbol": symbol,
+            "name": str(spec.get("name") or symbol),
+            "region": str(spec.get("region") or ""),
+            "available": False,
+            "score": None,
+            "confidence": 0.0,
+            "status": "missing",
+            "statusCn": "缺失",
+            "criticalDate": None,
+            "daysToCritical": None,
+            "fitR2": None,
+            "windowDays": None,
+            "observations": target_index + 1,
+            "source": str(spec.get("source") or ""),
+            "sourceSymbol": str(spec.get("sourceSymbol") or symbol),
+            "sourceQuality": str(spec.get("sourceQuality") or "low"),
+            "asOf": latest.date.isoformat(),
+            "reason": str(fit.get("reason") or "LPPL fit unavailable"),
+        }
+    score = bounded_score(float(fit["score"]))
+    confidence = max(0.0, min(1.0, float(fit.get("confidence") or 0.0)))
+    status, status_cn = global_lppl_status(score, confidence)
+    days_to_critical = int(fit["daysToCritical"])
+    critical_date = latest.date + timedelta(days=days_to_critical)
+    return {
+        "symbol": symbol,
+        "name": str(spec.get("name") or symbol),
+        "region": str(spec.get("region") or ""),
+        "available": True,
+        "score": round(score, 1),
+        "confidence": round(confidence, 2),
+        "status": status,
+        "statusCn": status_cn,
+        "criticalDate": critical_date.isoformat(),
+        "daysToCritical": days_to_critical,
+        "fitR2": round(float(fit["fitR2"]), 3),
+        "windowDays": int(fit["windowDays"]),
+        "observations": target_index + 1,
+        "asOf": latest.date.isoformat(),
+        "source": str(spec.get("source") or ""),
+        "sourceSymbol": str(spec.get("sourceSymbol") or symbol),
+        "sourceQuality": str(spec.get("sourceQuality") or "low"),
+        "weight": float(spec.get("weight") or 0.0),
+        "trailingReturn63d": pct_metric(fit.get("trailingReturn63d")),
+        "acceleration": pct_metric(fit.get("acceleration")),
+        "bubbleCoefficient": round(float(fit.get("bubbleCoefficient") or 0.0), 4),
+        "oscillationAmplitude": round(float(fit.get("oscillationAmplitude") or 0.0), 4),
+        "reason": str(fit.get("reason") or ""),
+    }
+
+
+def fit_global_lppl_signal(bars: list[MarketDailyBar], *, fast: bool = False) -> dict[str, Any]:
+    clean = [bar for bar in bars if bar.close > 0 and math.isfinite(bar.close)]
+    if len(clean) < GLOBAL_LPPL_MIN_OBSERVATIONS:
+        return {"available": False, "reason": "sample shorter than LPPL minimum window"}
+    windows = [GLOBAL_LPPL_DEFAULT_WINDOW] if fast and len(clean) >= GLOBAL_LPPL_DEFAULT_WINDOW else [window for window in (180, GLOBAL_LPPL_DEFAULT_WINDOW, 378) if len(clean) >= min(window, GLOBAL_LPPL_MIN_OBSERVATIONS)]
+    fits = []
+    for window in windows:
+        sample = clean[-min(window, len(clean)):]
+        fit = fit_lppl_window(sample, fast=fast)
+        if fit.get("available"):
+            fits.append(fit)
+    if not fits:
+        return {"available": False, "reason": "bounded LPPL fit did not converge"}
+    best = max(fits, key=lambda item: (float(item.get("score") or 0.0), float(item.get("confidence") or 0.0), float(item.get("fitR2") or 0.0)))
+    return best
+
+
+def fit_lppl_window(sample: list[MarketDailyBar], *, fast: bool = False) -> dict[str, Any]:
+    closes = [bar.close for bar in sample if bar.close > 0]
+    if len(closes) != len(sample) or len(sample) < GLOBAL_LPPL_MIN_OBSERVATIONS:
+        return {"available": False, "reason": "invalid close values"}
+    ys = [math.log(value) for value in closes]
+    n = len(sample)
+    best: dict[str, Any] | None = None
+    tc_offsets = (25, 60, 130) if fast else (15, 25, 40, 60, 90, 130, 170)
+    m_values = (0.35, 0.55, 0.75) if fast else (0.2, 0.35, 0.5, 0.65, 0.8)
+    omega_values = (7.0, 10.0, 12.0) if fast else (6.0, 8.0, 10.0, 12.0)
+    for tc_offset in tc_offsets:
+        tc = (n - 1) + tc_offset
+        for m in m_values:
+            for omega in omega_values:
+                rows = []
+                valid = True
+                for t in range(n):
+                    distance = tc - t
+                    if distance <= 0:
+                        valid = False
+                        break
+                    power = distance ** m
+                    log_distance = math.log(distance)
+                    rows.append([1.0, power, power * math.cos(omega * log_distance), power * math.sin(omega * log_distance)])
+                if not valid:
+                    continue
+                coefficients = linear_least_squares(rows, ys)
+                if coefficients is None:
+                    continue
+                fitted = [sum(coef * value for coef, value in zip(coefficients, row)) for row in rows]
+                fit_r2 = regression_r_squared(ys, fitted)
+                if fit_r2 is None:
+                    continue
+                bubble_coefficient = coefficients[1]
+                oscillation = math.sqrt(coefficients[2] ** 2 + coefficients[3] ** 2)
+                trailing_63 = closes[-1] / closes[max(0, n - 64)] - 1 if n >= 65 else 0.0
+                recent_63 = closes[-1] / closes[-64] - 1 if n >= 128 else trailing_63
+                prior_63 = closes[-64] / closes[-127] - 1 if n >= 128 else 0.0
+                acceleration = recent_63 - prior_63
+                fit_score = bounded_score(100 * fit_r2)
+                critical_score = bounded_score(100 * (1 - (tc_offset - 10) / 170))
+                trend_score = risk_linear(trailing_63, 0.04, 0.35)
+                acceleration_score = risk_linear(acceleration, 0.0, 0.12)
+                coherent_bubble = bubble_coefficient < 0 and acceleration > 0 and trailing_63 > 0.03
+                raw_score = 0.38 * fit_score + 0.24 * critical_score + 0.18 * trend_score + 0.20 * acceleration_score
+                if not coherent_bubble:
+                    raw_score = min(raw_score, 35.0)
+                confidence = (
+                    0.45 * max(0.0, min(1.0, fit_r2))
+                    + 0.25 * (critical_score / 100)
+                    + 0.20 * (acceleration_score / 100)
+                    + 0.10 * min(1.0, abs(oscillation) / max(abs(bubble_coefficient), 1e-6))
+                )
+                if not coherent_bubble:
+                    confidence = min(confidence, 0.45)
+                candidate = {
+                    "available": True,
+                    "score": bounded_score(raw_score),
+                    "confidence": max(0.0, min(1.0, confidence)),
+                    "fitR2": fit_r2,
+                    "daysToCritical": tc_offset,
+                    "windowDays": n,
+                    "bubbleCoefficient": bubble_coefficient,
+                    "oscillationAmplitude": oscillation,
+                    "trailingReturn63d": trailing_63,
+                    "acceleration": acceleration,
+                    "reason": (
+                        "coherent LPPL acceleration with positive trailing return"
+                        if coherent_bubble
+                        else "LPPL fit lacks acceleration or bubble-sign confirmation"
+                    ),
+                }
+                if best is None or (candidate["score"], candidate["confidence"], candidate["fitR2"]) > (best["score"], best["confidence"], best["fitR2"]):
+                    best = candidate
+    return best or {"available": False, "reason": "bounded LPPL grid produced no stable fit"}
+
+
+def linear_least_squares(rows: list[list[float]], ys: list[float]) -> list[float] | None:
+    if not rows or len(rows) != len(ys):
+        return None
+    width = len(rows[0])
+    normal = [[0.0 for _ in range(width)] for _ in range(width)]
+    target = [0.0 for _ in range(width)]
+    for row, y in zip(rows, ys):
+        if len(row) != width or not all(math.isfinite(value) for value in row):
+            return None
+        for i in range(width):
+            target[i] += row[i] * y
+            for j in range(width):
+                normal[i][j] += row[i] * row[j]
+    return solve_linear_system(normal, target)
+
+
+def solve_linear_system(matrix: list[list[float]], target: list[float]) -> list[float] | None:
+    n = len(target)
+    augmented = [list(row) + [target[index]] for index, row in enumerate(matrix)]
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda row_index: abs(augmented[row_index][col]))
+        if abs(augmented[pivot][col]) < 1e-10:
+            return None
+        if pivot != col:
+            augmented[col], augmented[pivot] = augmented[pivot], augmented[col]
+        pivot_value = augmented[col][col]
+        for j in range(col, n + 1):
+            augmented[col][j] /= pivot_value
+        for row_index in range(n):
+            if row_index == col:
+                continue
+            factor = augmented[row_index][col]
+            if factor == 0:
+                continue
+            for j in range(col, n + 1):
+                augmented[row_index][j] -= factor * augmented[col][j]
+    return [augmented[row][n] for row in range(n)]
+
+
+def regression_r_squared(actual: list[float], fitted: list[float]) -> float | None:
+    if len(actual) != len(fitted) or len(actual) < 3:
+        return None
+    mean_y = sum(actual) / len(actual)
+    total = sum((value - mean_y) ** 2 for value in actual)
+    if total <= 0:
+        return None
+    residual = sum((value - fit) ** 2 for value, fit in zip(actual, fitted))
+    return max(0.0, min(1.0, 1 - residual / total))
+
+
+def aggregate_global_lppl_score(rows: list[dict[str, Any]]) -> float:
+    weighted_values = []
+    for row in rows:
+        score = optional_float(row.get("score"))
+        confidence = optional_float(row.get("confidence")) or 0.0
+        weight = optional_float(row.get("weight")) or 0.1
+        evidence_multiplier = optional_float(row.get("effectiveWeightMultiplier")) or 1.0
+        if score is None:
+            continue
+        evidence_multiplier = max(0.1, min(1.0, evidence_multiplier))
+        weighted_values.append((score, max(0.1, confidence) * weight * evidence_multiplier, score * evidence_multiplier))
+    if not weighted_values:
+        return 0.0
+    weighted_average = sum(score * weight for score, weight, _ in weighted_values) / sum(weight for _, weight, _ in weighted_values)
+    top_score = max(adjusted_score for _, _, adjusted_score in weighted_values)
+    return bounded_score(0.65 * weighted_average + 0.35 * top_score)
+
+
+def apply_global_lppl_index_validation(
+    index_rows: list[dict[str, Any]],
+    validation: dict[str, Any],
+) -> list[dict[str, Any]]:
+    validation_by_symbol = {
+        str(row.get("symbol") or "").upper(): row
+        for row in validation.get("rows", [])
+        if isinstance(row, dict)
+    } if isinstance(validation, dict) else {}
+    adjusted_rows: list[dict[str, Any]] = []
+    for row in index_rows:
+        adjusted = dict(row)
+        symbol = str(adjusted.get("symbol") or "").upper()
+        validation_row = validation_by_symbol.get(symbol)
+        if validation_row:
+            adjusted["validation"] = validation_row
+            adjusted["effectiveWeightMultiplier"] = validation_row.get("effectiveWeightMultiplier")
+        elif adjusted.get("available"):
+            adjusted["effectiveWeightMultiplier"] = 0.75
+        adjusted_rows.append(adjusted)
+    return adjusted_rows
+
+
+def build_global_lppl_index_validation(
+    index_rows: list[dict[str, Any]],
+    bars_by_symbol: dict[str, list[MarketDailyBar]],
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for index_row in index_rows:
+        if not index_row.get("available"):
+            continue
+        symbol = str(index_row.get("symbol") or "").upper()
+        bars = bars_by_symbol.get(symbol, [])
+        row = build_global_lppl_single_index_validation(index_row, bars)
+        if row:
+            rows.append(row)
+    if not rows:
+        return {"available": False, "rows": [], "summary": "No index-level LPPL validation samples were available."}
+    validated = sum(1 for row in rows if row.get("validationRole") == "validated")
+    weak = sum(1 for row in rows if row.get("validationRole") == "weak")
+    summary = f"{len(rows)} indices replayed; {validated} validated, {weak} weak by own-market 15D drawdown audit."
+    return {"available": True, "rows": rows, "summary": summary}
+
+
+def build_global_lppl_single_index_validation(
+    index_row: dict[str, Any],
+    bars: list[MarketDailyBar],
+    *,
+    drawdown_threshold_pct: float = -2.0,
+) -> dict[str, Any] | None:
+    symbol = str(index_row.get("symbol") or "").upper()
+    clean = normalize_market_bars({symbol: bars}).get(symbol, [])
+    if len(clean) < GLOBAL_LPPL_MIN_OBSERVATIONS + 20:
+        return None
+    points = build_single_index_lppl_history_points(symbol, clean)
+    observations = build_global_lppl_validation_observations(points, clean, drawdown_threshold_pct)
+    if not observations:
+        return None
+    calibration_grid = [
+        equity_backtest_threshold_test(candidate_threshold, observations, drawdown_threshold_pct, horizon=15)
+        for candidate_threshold in (55, 60, 65, 70, 75, 80, 85, 90)
+    ]
+    recommended = global_lppl_recommended_threshold(calibration_grid, len(observations))
+    threshold = int(recommended.get("threshold") or GLOBAL_LPPL_ALERT_THRESHOLD)
+    test_15d = equity_backtest_threshold_test(threshold, observations, drawdown_threshold_pct, horizon=15)
+    multiplier, role, role_cn = global_lppl_validation_weight(test_15d)
+    precision = optional_float(test_15d.get("precision"))
+    recall = optional_float(test_15d.get("recall"))
+    return {
+        "symbol": symbol,
+        "sourceSymbol": str(index_row.get("sourceSymbol") or symbol),
+        "sampleSize": len(observations),
+        "historyPoints": len(points),
+        "threshold": threshold,
+        "alertDays": int(test_15d.get("alertDays") or 0),
+        "truePositives": int(test_15d.get("truePositives") or 0),
+        "falsePositives": int(test_15d.get("falsePositives") or 0),
+        "precision15d": round(precision, 1) if precision is not None else None,
+        "recall15d": round(recall, 1) if recall is not None else None,
+        "baseRate15d": test_15d.get("baseRate"),
+        "avgMaxDrawdown15dWhenAlert": test_15d.get("avgMaxDrawdownWhenAlert"),
+        "avgDrawdownLeadDaysWhenHit": test_15d.get("avgDrawdownLeadDaysWhenHit"),
+        "effectiveWeightMultiplier": multiplier,
+        "validationRole": role,
+        "validationRoleCn": role_cn,
+        "summary": global_lppl_validation_summary(symbol, test_15d, multiplier, role_cn),
+    }
+
+
+def build_single_index_lppl_history_points(symbol: str, bars: list[MarketDailyBar]) -> list[dict[str, Any]]:
+    if len(bars) < GLOBAL_LPPL_MIN_OBSERVATIONS:
+        return []
+    points: list[dict[str, Any]] = []
+    start_index = GLOBAL_LPPL_MIN_OBSERVATIONS - 1
+    step = max(GLOBAL_LPPL_HISTORY_STEP, len(bars) // 36)
+    replay_indices = list(range(start_index, len(bars), step))
+    if replay_indices[-1] != len(bars) - 1:
+        replay_indices.append(len(bars) - 1)
+    spec = {"symbol": symbol, "name": symbol, "region": symbol, "sourceQuality": "validation", "sourceSymbol": symbol}
+    for index in replay_indices:
+        target = bars[index].date
+        row = global_lppl_index_row(spec, bars, as_of=target, fast=True)
+        score = optional_float(row.get("score"))
+        if row.get("available") and score is not None:
+            points.append({"date": target.isoformat(), "score": round(bounded_score(score), 1)})
+    return points
+
+
+def build_global_lppl_validation_observations(
+    points: list[dict[str, Any]],
+    bars: list[MarketDailyBar],
+    drawdown_threshold_pct: float,
+) -> list[dict[str, Any]]:
+    index_by_date = {bar.date: index for index, bar in enumerate(bars)}
+    observations: list[dict[str, Any]] = []
+    for point in points:
+        try:
+            point_date = date.fromisoformat(str(point.get("date") or ""))
+        except ValueError:
+            continue
+        score = optional_float(point.get("score"))
+        index = index_by_date.get(point_date)
+        if score is None or index is None or index + 1 >= len(bars):
+            continue
+        row = {"date": point_date.isoformat(), "score": round(bounded_score(score), 1)}
+        for horizon in (5, 10, 15, 20):
+            row[f"forward{horizon}d"] = equity_forward_return_pct(bars, index, horizon)
+            drawdown = equity_forward_max_drawdown_pct(bars, index, horizon)
+            row[f"maxDrawdown{horizon}d"] = drawdown
+            row[f"drawdownEvent{horizon}d"] = drawdown is not None and drawdown <= drawdown_threshold_pct
+            row[f"drawdownLeadDays{horizon}d"] = equity_forward_drawdown_lead_days(bars, index, horizon, drawdown_threshold_pct)
+        observations.append(row)
+    return observations
+
+
+def global_lppl_validation_weight(test_15d: dict[str, Any]) -> tuple[float, str, str]:
+    alert_days = optional_float(test_15d.get("alertDays")) or 0.0
+    precision = optional_float(test_15d.get("precision"))
+    base_rate = optional_float(test_15d.get("baseRate")) or 0.0
+    if alert_days < 3 or precision is None:
+        return 0.75, "thin", "样本偏少"
+    if precision >= max(60.0, base_rate + 15.0):
+        return 1.0, "validated", "验证支持"
+    if precision >= base_rate + 5.0:
+        return 0.85, "mixed", "部分支持"
+    return 0.60, "weak", "历史偏弱"
+
+
+def global_lppl_validation_summary(symbol: str, test_15d: dict[str, Any], multiplier: float, role_cn: str) -> str:
+    return (
+        f"{symbol} own-market 15D audit: threshold {test_15d.get('threshold')}, "
+        f"precision {format_optional_percent_value(test_15d.get('precision'))}, "
+        f"recall {format_optional_percent_value(test_15d.get('recall'))}, "
+        f"false {test_15d.get('falsePositives', 0)}, weight x{multiplier:.2f} ({role_cn})."
+    )
+
+
+def global_lppl_status(score: float, confidence: float) -> tuple[str, str]:
+    if score >= GLOBAL_LPPL_ALERT_THRESHOLD and confidence >= 0.35:
+        return "risk", "泡沫风险"
+    if score >= 45:
+        return "watch", "观察"
+    return "quiet", "低风险"
+
+
+def global_lppl_regime(score: float) -> tuple[str, str]:
+    if score >= 70:
+        return "High Risk", "高风险"
+    if score >= GLOBAL_LPPL_ALERT_THRESHOLD:
+        return "Risk", "泡沫风险"
+    if score >= 45:
+        return "Watch", "观察"
+    return "Quiet", "低风险"
+
+
+def build_global_lppl_history(
+    bars_by_symbol: dict[str, list[MarketDailyBar]],
+    *,
+    index_validation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    benchmark = bars_by_symbol.get("SPY") or bars_by_symbol.get("QQQ") or []
+    if len(benchmark) < GLOBAL_LPPL_MIN_OBSERVATIONS:
+        return {"available": False, "points": [], "summary": "SPY/QQQ历史样本不足,暂不能生成LPPL历史曲线。"}
+    points: list[dict[str, Any]] = []
+    start_index = GLOBAL_LPPL_MIN_OBSERVATIONS - 1
+    history_specs = [spec for spec in GLOBAL_LPPL_INDEX_SPECS if str(spec.get("symbol") or "").upper() in {"SPY", "QQQ"}]
+    step = max(GLOBAL_LPPL_HISTORY_STEP, len(benchmark) // 80)
+    replay_indices = list(range(start_index, len(benchmark), step))
+    if replay_indices[-1] != len(benchmark) - 1:
+        replay_indices.append(len(benchmark) - 1)
+    for index in replay_indices:
+        target = benchmark[index].date
+        rows = [
+            global_lppl_index_row(spec, bars_by_symbol.get(str(spec["symbol"]).upper(), []), as_of=target, fast=True)
+            for spec in history_specs
+        ]
+        rows = apply_global_lppl_index_validation(rows, index_validation or {})
+        available = [row for row in rows if row.get("available") and optional_float(row.get("score")) is not None]
+        if len(available) < 1:
+            continue
+        score = aggregate_global_lppl_score(available)
+        point = {
+            "date": target.isoformat(),
+            "score": round(score, 1),
+            "availableIndices": len(available),
+            "topSymbol": max(available, key=lambda row: optional_float(row.get("score")) or 0.0).get("symbol"),
+        }
+        spy_index = bar_index_at_or_before(bars_by_symbol.get("SPY", []), target)
+        qqq_index = bar_index_at_or_before(bars_by_symbol.get("QQQ", []), target)
+        if spy_index is not None and bars_by_symbol["SPY"][0].close > 0:
+            point["spyClose"] = round(bars_by_symbol["SPY"][spy_index].close, 2)
+            point["spyIndexed"] = round(100 * bars_by_symbol["SPY"][spy_index].close / bars_by_symbol["SPY"][0].close, 2)
+        if qqq_index is not None and bars_by_symbol["QQQ"][0].close > 0:
+            point["qqqClose"] = round(bars_by_symbol["QQQ"][qqq_index].close, 2)
+            point["qqqIndexed"] = round(100 * bars_by_symbol["QQQ"][qqq_index].close / bars_by_symbol["QQQ"][0].close, 2)
+        points.append(point)
+    if not points:
+        return {"available": False, "points": [], "summary": "LPPL历史回放没有足够可用点。"}
+    return {
+        "available": True,
+        "summary": "Global LPPL daily replay; high score indicates fitted bubble critical-window risk across available indices.",
+        "points": points,
+        "dateRange": {"start": points[0]["date"], "end": points[-1]["date"]},
+    }
+
+
+def build_global_lppl_backtest(
+    history_points: list[dict[str, Any]],
+    spy_bars: list[MarketDailyBar],
+    *,
+    threshold: int = GLOBAL_LPPL_ALERT_THRESHOLD,
+    drawdown_threshold_pct: float = -2.0,
+) -> dict[str, Any]:
+    clean_spy = normalize_market_bars({"SPY": spy_bars}).get("SPY", [])
+    if len(clean_spy) < 30 or not history_points:
+        return {"available": False, "sampleSize": 0, "threshold": threshold, "horizonTests": [], "summary": "SPY或LPPL历史样本不足。"}
+    index_by_date = {bar.date: index for index, bar in enumerate(clean_spy)}
+    observations: list[dict[str, Any]] = []
+    for point in history_points:
+        try:
+            point_date = date.fromisoformat(str(point.get("date") or ""))
+        except ValueError:
+            continue
+        score = optional_float(point.get("score"))
+        index = index_by_date.get(point_date)
+        if score is None or index is None or index + 1 >= len(clean_spy):
+            continue
+        row = {"date": point_date.isoformat(), "score": round(bounded_score(score), 1)}
+        for horizon in (5, 10, 15, 20):
+            row[f"forward{horizon}d"] = equity_forward_return_pct(clean_spy, index, horizon)
+            drawdown = equity_forward_max_drawdown_pct(clean_spy, index, horizon)
+            row[f"maxDrawdown{horizon}d"] = drawdown
+            row[f"drawdownEvent{horizon}d"] = drawdown is not None and drawdown <= drawdown_threshold_pct
+            row[f"drawdownLeadDays{horizon}d"] = equity_forward_drawdown_lead_days(clean_spy, index, horizon, drawdown_threshold_pct)
+        observations.append(row)
+    if not observations:
+        return {"available": False, "sampleSize": 0, "threshold": threshold, "horizonTests": [], "summary": "LPPL历史点没有足够后续SPY交易日。"}
+    calibration_grid = [
+        equity_backtest_threshold_test(candidate_threshold, observations, drawdown_threshold_pct, horizon=15)
+        for candidate_threshold in (55, 60, 65, 70, 75, 80, 85, 90)
+    ]
+    recommended_threshold_test = global_lppl_recommended_threshold(calibration_grid, len(observations))
+    threshold = int(recommended_threshold_test.get("threshold") or threshold)
+    horizon_tests = [
+        equity_backtest_threshold_test(threshold, observations, drawdown_threshold_pct, horizon=horizon)
+        for horizon in (5, 10, 15, 20)
+    ]
+    preferred = next((row for row in horizon_tests if row["horizon"] == 15), horizon_tests[-1])
+    alert_cluster_test = equity_backtest_alert_cluster_test(
+        threshold,
+        observations,
+        drawdown_threshold_pct,
+        horizon=15,
+    )
+    summary = (
+        f"LPPL score≥{threshold}历史告警{preferred.get('alertDays', 0)}次; "
+        f"15D精确率{format_optional_percent_value(preferred.get('precision'))}, "
+        f"误报{preferred.get('falsePositives', 0)}次; "
+        f"最大误报簇{alert_cluster_test.get('maxFalseClusterDays', 0)}个点。"
+    )
+    return {
+        "available": True,
+        "sampleSize": len(observations),
+        "threshold": threshold,
+        "drawdownEvent": f"next 5/10/15/20 trading days max drawdown <= {drawdown_threshold_pct:.1f}%",
+        "horizonTests": horizon_tests,
+        "calibrationGrid": calibration_grid,
+        "recommendedThreshold": recommended_threshold_test,
+        "alertClusterTest": alert_cluster_test,
+        "summary": summary,
+    }
+
+
+def global_lppl_recommended_threshold(calibration_grid: list[dict[str, Any]], sample_size: int) -> dict[str, Any]:
+    candidates = [
+        row
+        for row in calibration_grid
+        if (optional_float(row.get("alertDays")) or 0.0) >= max(3.0, min(10.0, sample_size / 25.0))
+    ]
+    if not candidates:
+        candidates = [
+            row
+            for row in calibration_grid
+            if (optional_float(row.get("alertDays")) or 0.0) > 0
+        ]
+    if not candidates:
+        return {}
+    base_rate = max(optional_float(row.get("baseRate")) or 0.0 for row in candidates)
+    min_precision = max(45.0, base_rate + 8.0)
+    qualifying = [row for row in candidates if (optional_float(row.get("precision")) or 0.0) >= min_precision]
+    if not qualifying:
+        qualifying = candidates
+
+    def threshold_score(row: dict[str, Any]) -> tuple[float, float, float, float]:
+        precision = optional_float(row.get("precision")) or 0.0
+        recall = optional_float(row.get("recall")) or 0.0
+        alert_days = optional_float(row.get("alertDays")) or 0.0
+        threshold = optional_float(row.get("threshold")) or 0.0
+        return (precision, recall, alert_days, threshold)
+
+    selected = dict(max(qualifying, key=threshold_score))
+    selected.update(
+        {
+            "key": "globalLpplRecommendedThreshold",
+            "label": "LPPL推荐告警阈值",
+            "labelEn": "Global LPPL Recommended Threshold",
+            "useCase": "用历史SPY前瞻回撤验证后选择; 优先提高精确率,再考虑覆盖率。",
+        }
+    )
+    return selected
+
+
+def parse_payload_date(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        date.fromisoformat(value)
+        return True
+    except ValueError:
+        return False
+
+
 def build_equity_short_term_risk_index(
     *,
     market_bars: dict[str, list[MarketDailyBar]] | None = None,
@@ -3124,6 +3952,10 @@ def build_equity_short_term_risk_index(
             "title": "短期股市风险预警",
             "trend": trend,
             "backtest": backtest,
+            "weightCalibration": equity_weight_calibration_summary(
+                signal.get("components", []) if isinstance(signal.get("components"), list) else [],
+                backtest.get("componentDiagnostics", []) if isinstance(backtest.get("componentDiagnostics"), list) else [],
+            ),
             "nextSessionShock": next_shock,
             "lookAheadGuard": {
                 "dataThrough": target.isoformat(),
@@ -3166,6 +3998,8 @@ def unavailable_equity_short_term_risk(reason: str) -> dict[str, Any]:
             "tieredThresholdTests": [],
             "calibrationGrid": [],
             "recommendedCautionThreshold": {},
+            "precisionThresholdTests": [],
+            "highPrecisionThresholdTest": {},
             "componentDiagnostics": [],
             "preferredThresholdTest": {},
             "alertClusterTest": {},
@@ -3173,6 +4007,7 @@ def unavailable_equity_short_term_risk(reason: str) -> dict[str, Any]:
             "worstWindows": [],
             "alertWindows": [],
         },
+        "weightCalibration": {"available": False, "summary": reason, "rows": []},
         "lookAheadGuard": {},
         "dataCoverage": [],
         "nextSessionShock": {},
@@ -4080,6 +4915,98 @@ def equity_source_quality_summary(components: list[dict[str, Any]], target: date
     }
 
 
+def equity_weight_calibration_summary(
+    components: list[dict[str, Any]],
+    component_diagnostics: list[dict[str, Any]],
+) -> dict[str, Any]:
+    diagnostic_by_key = {
+        str(row.get("component") or ""): row
+        for row in component_diagnostics
+        if isinstance(row, dict) and row.get("component")
+    }
+    rows: list[dict[str, Any]] = []
+    total_weight = 0.0
+    validated_weight = 0.0
+    downweighted_weight = 0.0
+    context_weight = 0.0
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        key = str(component.get("key") or "")
+        if not key:
+            continue
+        weight = float(component.get("weight") or 0.0)
+        total_weight += weight
+        diagnostic = diagnostic_by_key.get(key, {})
+        decision = str(diagnostic.get("decision") or ("missing" if component.get("scoreUse") == "missing" else "context"))
+        score_use = str(component.get("scoreUse") or "missing")
+        source_quality = str(component.get("sourceQuality") or "")
+        replayable = bool(component.get("historicalReplay"))
+        if decision in {"core", "support"} and score_use == "scored":
+            calibrated_role = "validated"
+            calibrated_role_cn = "验证保留"
+            validated_weight += weight
+        elif decision == "trim" or score_use != "scored":
+            calibrated_role = "downweighted"
+            calibrated_role_cn = "降权/审计"
+            downweighted_weight += weight
+        else:
+            calibrated_role = "context"
+            calibrated_role_cn = "背景低权重"
+            context_weight += weight
+        precision = optional_float(diagnostic.get("precision")) if isinstance(diagnostic, dict) else None
+        recall = optional_float(diagnostic.get("recall")) if isinstance(diagnostic, dict) else None
+        false_positives = diagnostic.get("falsePositives") if isinstance(diagnostic, dict) else None
+        rows.append(
+            {
+                "component": key,
+                "label": str(component.get("label") or key),
+                "configuredWeight": round(weight, 4),
+                "configuredWeightPct": round(weight * 100, 1),
+                "scoreUse": score_use,
+                "sourceQuality": source_quality,
+                "historicalReplay": replayable,
+                "diagnosticDecision": decision,
+                "diagnosticDecisionCn": str(diagnostic.get("decisionCn") or calibrated_role_cn) if isinstance(diagnostic, dict) else calibrated_role_cn,
+                "calibratedRole": calibrated_role,
+                "calibratedRoleCn": calibrated_role_cn,
+                "precision": round(precision, 1) if precision is not None else None,
+                "recall": round(recall, 1) if recall is not None else None,
+                "falsePositives": int(false_positives) if isinstance(false_positives, int) else None,
+                "recommendation": str(diagnostic.get("recommendation") or "") if isinstance(diagnostic, dict) else "",
+            }
+        )
+    denominator = total_weight if total_weight > 0 else 1.0
+    downweighted = sorted(
+        [row for row in rows if row["calibratedRole"] == "downweighted"],
+        key=lambda item: float(item.get("configuredWeight") or 0.0),
+        reverse=True,
+    )
+    validated = sorted(
+        [row for row in rows if row["calibratedRole"] == "validated"],
+        key=lambda item: float(item.get("configuredWeight") or 0.0),
+        reverse=True,
+    )
+    summary = (
+        f"按历史分项诊断重配: 验证保留{validated_weight / denominator * 100:.1f}%权重,"
+        f"降权/审计{downweighted_weight / denominator * 100:.1f}%,"
+        f"背景{context_weight / denominator * 100:.1f}%。"
+    )
+    if downweighted:
+        summary += " 最大降权: " + "、".join(str(row.get("label") or row.get("component")) for row in downweighted[:2]) + "。"
+    return {
+        "available": bool(rows),
+        "basis": "componentDiagnostics from the current historical replay backtest; low-replay or weak standalone factors are kept low-weight instead of dominating the score.",
+        "summary": summary,
+        "validatedWeightPct": round(validated_weight / denominator * 100, 1),
+        "downweightedWeightPct": round(downweighted_weight / denominator * 100, 1),
+        "contextWeightPct": round(context_weight / denominator * 100, 1),
+        "topValidatedComponents": [str(row.get("component") or "") for row in validated[:4]],
+        "downweightedComponents": [str(row.get("component") or "") for row in downweighted],
+        "rows": rows,
+    }
+
+
 def equity_forward_catalyst_risk(components: list[dict[str, Any]]) -> dict[str, Any]:
     event_component = next((component for component in components if component.get("key") == "eventRisk"), None)
     if not isinstance(event_component, dict):
@@ -4135,6 +5062,7 @@ def equity_convexity_amplifier(components: list[dict[str, Any]]) -> float:
     qqq_tlt_score = 0.0
     vol_target_score = 0.0
     turnover_score = 0.0
+    event_score = 0.0
     spy20_return = None
     for component in components:
         key = component.get("key")
@@ -4154,6 +5082,8 @@ def equity_convexity_amplifier(components: list[dict[str, Any]]) -> float:
             vol_target_score = optional_float(component.get("score")) or 0.0
         elif key == "turnover":
             turnover_score = optional_float(component.get("score")) or 0.0
+        elif key == "eventRisk":
+            event_score = optional_float(component.get("score")) or 0.0
     if (
         sector_score >= 85
         and hot_stock_score >= 85
@@ -4161,6 +5091,22 @@ def equity_convexity_amplifier(components: list[dict[str, Any]]) -> float:
         and max(qqq_tlt_score, vol_target_score) >= 75
     ):
         amplifier += 4.0
+    if (
+        sector_score >= 90
+        and hot_stock_score >= 90
+        and market_flow_score >= 80
+        and qqq_tlt_score >= 80
+        and event_score >= 78
+    ):
+        amplifier += 4.0
+    if (
+        sector_score >= 95
+        and hot_stock_score >= 95
+        and market_flow_score >= 88
+        and qqq_tlt_score >= 75
+        and turnover_score >= 75
+    ):
+        amplifier += 14.0
     if downtrend_score >= 75 and max(hot_stock_score, turnover_score) >= 70:
         amplifier += 8.0
     elif downtrend_score >= 75:
@@ -4208,6 +5154,8 @@ def equity_noise_dampener(components: list[dict[str, Any]]) -> float:
     downtrend_sell_pressure = optional_float(market_metrics.get("downtrendSellPressureScore")) or 0.0
     defensive_gap = optional_float(market_metrics.get("defensiveGap20d"))
     spy20_return = optional_float(market_metrics.get("spy20dReturn"))
+    spy63_return = optional_float(market_metrics.get("spy63dReturn"))
+    qqq63_return = optional_float(market_metrics.get("qqq63dReturn"))
     smh63_return = optional_float(market_metrics.get("smh63dReturn"))
     smh_rsp_gap = optional_float(sector_metrics.get("smhRspGap"))
     heavy_reversal_count = optional_float(hot_metrics.get("heavyReversalCount")) or 0.0
@@ -4269,6 +5217,23 @@ def equity_noise_dampener(components: list[dict[str, Any]]) -> float:
         and sector_score >= 80
         and hot_stock_score >= 90
         and turnover_score >= 75
+        and event_score < 60
+        and macro_score < 60
+    ):
+        return -18.0
+    if (
+        downtrend_sell_pressure >= 78
+        and hot_stock_score >= 85
+        and turnover_score >= 80
+        and qqq_tlt_score < 60
+        and vol_target_score < 70
+        and sector_score < 70
+        and spy63_return is not None
+        and spy63_return > -2.0
+        and qqq63_return is not None
+        and qqq63_return > -3.0
+        and smh63_return is not None
+        and smh63_return > -3.0
         and event_score < 60
         and macro_score < 60
     ):
@@ -4467,6 +5432,8 @@ def build_equity_short_term_risk_backtest(
             "tieredThresholdTests": [],
             "calibrationGrid": [],
             "recommendedCautionThreshold": {},
+            "precisionThresholdTests": [],
+            "highPrecisionThresholdTest": {},
             "componentDiagnostics": [],
             "preferredThresholdTest": {},
             "alertClusterTest": {},
@@ -4565,6 +5532,10 @@ def build_equity_short_term_risk_backtest(
         equity_backtest_threshold_test(threshold, observations, drawdown_threshold_pct, horizon=preferred_horizon)
         for threshold in (50, 55, 60, 65, 70, 75)
     ]
+    precision_threshold_tests = [
+        equity_backtest_threshold_test(threshold, observations, drawdown_threshold_pct, horizon=preferred_horizon)
+        for threshold in (75, 78, 80, 82, 85, 88, 90)
+    ]
     component_diagnostics = equity_backtest_component_diagnostics(
         observations,
         drawdown_threshold_pct,
@@ -4572,6 +5543,7 @@ def build_equity_short_term_risk_backtest(
     )
     tiered_threshold_tests = equity_backtest_tiered_threshold_tests(horizon_tests, horizon=preferred_horizon)
     recommended_caution_threshold = equity_recommended_caution_threshold(calibration_grid)
+    high_precision_threshold_test = equity_high_precision_threshold(precision_threshold_tests)
     preferred_threshold_test = next(
         (item for item in horizon_tests if item["threshold"] == 75 and item["horizon"] == preferred_horizon),
         {},
@@ -4624,6 +5596,8 @@ def build_equity_short_term_risk_backtest(
         "tieredThresholdTests": tiered_threshold_tests,
         "calibrationGrid": calibration_grid,
         "recommendedCautionThreshold": recommended_caution_threshold,
+        "precisionThresholdTests": precision_threshold_tests,
+        "highPrecisionThresholdTest": high_precision_threshold_test,
         "componentDiagnostics": component_diagnostics,
         "preferredThresholdTest": preferred_threshold_test,
         "alertClusterTest": alert_cluster_test,
@@ -4823,6 +5797,41 @@ def equity_recommended_caution_threshold(calibration_grid: list[dict[str, Any]])
     return selected
 
 
+def equity_high_precision_threshold(precision_grid: list[dict[str, Any]]) -> dict[str, Any]:
+    max_alert_days = max((optional_float(row.get("alertDays")) or 0.0 for row in precision_grid), default=0.0)
+    minimum_alert_days = min(5.0, max(1.0, max_alert_days))
+    candidates = [
+        row
+        for row in precision_grid
+        if (optional_float(row.get("alertDays")) or 0.0) >= minimum_alert_days
+    ]
+    if not candidates:
+        return {}
+    base_rate = max(optional_float(row.get("baseRate")) or 0.0 for row in candidates)
+    min_precision = max(75.0, base_rate + 25.0)
+    qualifying = [row for row in candidates if (optional_float(row.get("precision")) or 0.0) >= min_precision]
+    if not qualifying:
+        qualifying = candidates
+
+    def precision_score(row: dict[str, Any]) -> tuple[float, float, float, float]:
+        precision = optional_float(row.get("precision")) or 0.0
+        recall = optional_float(row.get("recall")) or 0.0
+        alert_days = optional_float(row.get("alertDays")) or 0.0
+        threshold = optional_float(row.get("threshold")) or 0.0
+        return (precision, recall, alert_days, -threshold)
+
+    selected = dict(max(qualifying, key=precision_score))
+    selected.update(
+        {
+            "key": "highPrecisionThreshold",
+            "label": "高精度强告警阈值",
+            "labelEn": "High-Precision Strong Alert Threshold",
+            "useCase": "更偏执行层的高置信降风险阈值; 牺牲覆盖率来提高历史精确率。",
+        }
+    )
+    return selected
+
+
 def equity_backtest_component_diagnostics(
     observations: list[dict[str, Any]],
     drawdown_threshold_pct: float,
@@ -4972,6 +5981,8 @@ def equity_backtest_alert_cluster_test(
         )
     hit_clusters = sum(1 for row in cluster_rows if row.get("hit"))
     hit_leads = [int(row["leadDays"]) for row in cluster_rows if isinstance(row.get("leadDays"), (int, float))]
+    false_clusters = [row for row in cluster_rows if not row.get("hit")]
+    max_false_cluster = max(false_clusters, key=lambda row: int(row.get("days") or 0), default={})
     return {
         "threshold": threshold,
         "horizon": horizon,
@@ -4979,6 +5990,9 @@ def equity_backtest_alert_cluster_test(
         "clusterCount": len(cluster_rows),
         "hitClusters": hit_clusters,
         "falseClusters": len(cluster_rows) - hit_clusters,
+        "maxFalseClusterDays": int(max_false_cluster.get("days") or 0),
+        "maxFalseClusterStart": max_false_cluster.get("start"),
+        "maxFalseClusterEnd": max_false_cluster.get("end"),
         "precision": equity_rate_pct(hit_clusters, len(cluster_rows)),
         "avgLeadDays": round(sum(hit_leads) / len(hit_leads), 1) if hit_leads else None,
         "clusters": cluster_rows[:8],

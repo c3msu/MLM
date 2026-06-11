@@ -3,9 +3,12 @@ from datetime import date, timedelta
 
 from scripts.smoke_check import (
     REQUIRED_EQUITY_COMPONENT_KEYS,
+    REQUIRED_EQUITY_PANEL_COMPONENT_KEYS,
     REQUIRED_EQUITY_SOURCE_STATUS_NAMES,
     has_equity_short_term_risk_contract,
+    has_global_lppl_risk_contract,
     has_spy_early_warning_contract,
+    validate_health_payload,
     validate_dashboard,
 )
 
@@ -20,6 +23,8 @@ class SmokeCheckTests(unittest.TestCase):
                 {"name": "U.S. Treasury yield curve XML", "status": "ok", "latest": "2026-05-19"},
                 {"name": "Stooq gold spot XAUUSD", "status": "ok", "latest": "2026-05-20"},
                 {"name": "Fed path", "status": "modeled", "latest": "public futures proxy + curve/macro model"},
+                {"name": "Global LPPL SPY OHLCV", "status": "ok", "latest": "2026-06-05"},
+                {"name": "Global LPPL QQQ OHLCV", "status": "ok", "latest": "2026-06-05"},
                 *[
                     {"name": name, "status": "ok", "latest": "2026-06-05"}
                     for name in REQUIRED_EQUITY_SOURCE_STATUS_NAMES
@@ -145,6 +150,36 @@ class SmokeCheckTests(unittest.TestCase):
                     "scoredComponentCount": 5,
                     "auditOnlyComponentCount": 1,
                 },
+                "weightCalibration": {
+                    "available": True,
+                    "basis": "componentDiagnostics from the current historical replay backtest",
+                    "summary": "按历史分项诊断重配: 验证保留90.0%权重,降权/审计7.0%,背景3.0%。",
+                    "validatedWeightPct": 90.0,
+                    "downweightedWeightPct": 7.0,
+                    "contextWeightPct": 3.0,
+                    "topValidatedComponents": ["marketFlow", "hotStockReversal"],
+                    "downweightedComponents": ["sectorRotation", "eventRisk"],
+                    "rows": [
+                        {
+                            "component": component,
+                            "label": component,
+                            "configuredWeight": 0.1,
+                            "configuredWeightPct": 10.0,
+                            "scoreUse": "missing" if component == "optionOI" else "scored",
+                            "sourceQuality": "low" if component == "optionOI" else "high",
+                            "historicalReplay": component != "optionOI",
+                            "diagnosticDecision": "trim" if component in {"sectorRotation", "eventRisk", "optionOI"} else "support",
+                            "diagnosticDecisionCn": "降权/审计" if component in {"sectorRotation", "eventRisk", "optionOI"} else "辅助保留",
+                            "calibratedRole": "downweighted" if component in {"sectorRotation", "eventRisk", "optionOI"} else "validated",
+                            "calibratedRoleCn": "降权/审计" if component in {"sectorRotation", "eventRisk", "optionOI"} else "验证保留",
+                            "precision": 75.0,
+                            "recall": 12.0,
+                            "falsePositives": 2,
+                            "recommendation": "保留低到中权重。",
+                        }
+                        for component in REQUIRED_EQUITY_PANEL_COMPONENT_KEYS
+                    ],
+                },
                 "forwardCatalystRisk": {
                     "available": True,
                     "score": 90.0,
@@ -187,6 +222,19 @@ class SmokeCheckTests(unittest.TestCase):
                         "precision": 75.0,
                         "avgDrawdownLeadDaysWhenHit": 3.7,
                         "medianDrawdownLeadDaysWhenHit": 4.0,
+                    },
+                    "precisionThresholdTests": [
+                        {"threshold": 75, "horizon": 15, "alertDays": 4, "precision": 75.0, "recall": 10.0, "falsePositives": 1},
+                        {"threshold": 85, "horizon": 15, "alertDays": 2, "precision": 100.0, "recall": 6.0, "falsePositives": 0},
+                    ],
+                    "highPrecisionThresholdTest": {
+                        "threshold": 85,
+                        "horizon": 15,
+                        "alertDays": 2,
+                        "precision": 100.0,
+                        "recall": 6.0,
+                        "falsePositives": 0,
+                        "label": "高精度强告警阈值",
                     },
                     "alertClusterTest": {
                         "threshold": 75,
@@ -244,9 +292,216 @@ class SmokeCheckTests(unittest.TestCase):
                     "auditOnly": "next-session shock is audit-only",
                 },
             },
+            "globalLpplRisk": {
+                "available": True,
+                "title": "Global LPPL Risk · 全球指数泡沫临界风险",
+                "score": 64.2,
+                "scoreUse": "independent",
+                "regime": "Risk",
+                "regimeCn": "泡沫风险",
+                "asOf": "2026-06-05",
+                "summary": "LPPL独立评估显示部分全球指数接近临界窗口。",
+                "method": "LPPL grid search over tc/m/omega with linear least-squares fit.",
+                "indices": [
+                    {
+                        "symbol": "SPY",
+                        "name": "SPY",
+                        "region": "US",
+                        "available": True,
+                        "score": 64.2,
+                        "confidence": 0.58,
+                        "status": "risk",
+                        "statusCn": "泡沫风险",
+                        "criticalDate": "2026-07-10",
+                        "daysToCritical": 25,
+                        "fitR2": 0.91,
+                        "windowDays": 252,
+                        "observations": 252,
+                        "sourceQuality": "high",
+                        "reason": "LPPL fit is coherent and critical window is near.",
+                        "effectiveWeightMultiplier": 0.85,
+                        "validation": {
+                            "symbol": "SPY",
+                            "sourceSymbol": "SPY",
+                            "sampleSize": 40,
+                            "threshold": 65,
+                            "alertDays": 8,
+                            "truePositives": 5,
+                            "falsePositives": 3,
+                            "precision15d": 62.5,
+                            "recall15d": 10.0,
+                            "effectiveWeightMultiplier": 0.85,
+                            "validationRole": "mixed",
+                            "validationRoleCn": "部分支持",
+                            "summary": "SPY own-market 15D audit.",
+                        },
+                    },
+                    {
+                        "symbol": "QQQ",
+                        "name": "Nasdaq / QQQ proxy",
+                        "region": "US tech",
+                        "available": True,
+                        "score": 68.0,
+                        "confidence": 0.61,
+                        "status": "risk",
+                        "statusCn": "泡沫风险",
+                        "criticalDate": "2026-07-08",
+                        "daysToCritical": 23,
+                        "fitR2": 0.92,
+                        "windowDays": 252,
+                        "observations": 252,
+                        "sourceQuality": "high",
+                        "reason": "LPPL fit is coherent and critical window is near.",
+                        "effectiveWeightMultiplier": 1.0,
+                        "validation": {
+                            "symbol": "QQQ",
+                            "sourceSymbol": "QQQ",
+                            "sampleSize": 40,
+                            "threshold": 65,
+                            "alertDays": 8,
+                            "truePositives": 6,
+                            "falsePositives": 2,
+                            "precision15d": 75.0,
+                            "recall15d": 12.0,
+                            "effectiveWeightMultiplier": 1.0,
+                            "validationRole": "validated",
+                            "validationRoleCn": "验证支持",
+                            "summary": "QQQ own-market 15D audit.",
+                        },
+                    },
+                    {
+                        "symbol": "KOSPI",
+                        "name": "KOSPI Composite",
+                        "region": "Korea",
+                        "available": False,
+                        "score": None,
+                        "confidence": 0.0,
+                        "status": "missing",
+                        "statusCn": "缺失",
+                        "reason": "source unavailable",
+                        "sourceQuality": "medium",
+                    },
+                    {
+                        "symbol": "HSI",
+                        "name": "Hang Seng",
+                        "region": "Hong Kong",
+                        "available": False,
+                        "score": None,
+                        "confidence": 0.0,
+                        "status": "missing",
+                        "statusCn": "缺失",
+                        "reason": "source unavailable",
+                        "sourceQuality": "medium",
+                    },
+                    {
+                        "symbol": "TWII",
+                        "name": "Taiwan Weighted",
+                        "region": "Taiwan",
+                        "available": False,
+                        "score": None,
+                        "confidence": 0.0,
+                        "status": "missing",
+                        "statusCn": "缺失",
+                        "reason": "source unavailable",
+                        "sourceQuality": "medium",
+                    },
+                    {
+                        "symbol": "NIKKEI",
+                        "name": "Nikkei 225",
+                        "region": "Japan",
+                        "available": False,
+                        "score": None,
+                        "confidence": 0.0,
+                        "status": "missing",
+                        "statusCn": "缺失",
+                        "reason": "source unavailable",
+                        "sourceQuality": "medium",
+                    },
+                ],
+                "indexValidation": {
+                    "available": True,
+                    "summary": "2 indices replayed; 1 validated, 0 weak by own-market 15D drawdown audit.",
+                    "rows": [
+                        {
+                            "symbol": "SPY",
+                            "sourceSymbol": "SPY",
+                            "sampleSize": 40,
+                            "threshold": 65,
+                            "alertDays": 8,
+                            "truePositives": 5,
+                            "falsePositives": 3,
+                            "precision15d": 62.5,
+                            "recall15d": 10.0,
+                            "effectiveWeightMultiplier": 0.85,
+                            "validationRole": "mixed",
+                            "validationRoleCn": "部分支持",
+                            "summary": "SPY own-market 15D audit.",
+                        },
+                        {
+                            "symbol": "QQQ",
+                            "sourceSymbol": "QQQ",
+                            "sampleSize": 40,
+                            "threshold": 65,
+                            "alertDays": 8,
+                            "truePositives": 6,
+                            "falsePositives": 2,
+                            "precision15d": 75.0,
+                            "recall15d": 12.0,
+                            "effectiveWeightMultiplier": 1.0,
+                            "validationRole": "validated",
+                            "validationRoleCn": "验证支持",
+                            "summary": "QQQ own-market 15D audit.",
+                        },
+                    ],
+                },
+                "history": {
+                    "available": True,
+                    "points": [
+                        {"date": "2026-06-03", "score": 52.1, "spyIndexed": 100.0, "qqqIndexed": 100.0},
+                        {"date": "2026-06-04", "score": 58.0, "spyIndexed": 101.0, "qqqIndexed": 102.0},
+                        {"date": "2026-06-05", "score": 64.2, "spyIndexed": 99.5, "qqqIndexed": 98.8},
+                    ],
+                },
+                "backtest": {
+                    "available": True,
+                    "sampleSize": 120,
+                    "threshold": 65,
+                    "horizonTests": [
+                        {"horizon": 5, "alertDays": 8, "truePositives": 5, "precision": 62.5, "recall": 10.0, "falsePositives": 3},
+                        {"horizon": 10, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                        {"horizon": 15, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                        {"horizon": 20, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                    ],
+                    "calibrationGrid": [
+                        {"threshold": 60, "horizon": 15, "alertDays": 10, "truePositives": 6, "precision": 60.0, "recall": 12.0, "falsePositives": 4},
+                        {"threshold": 65, "horizon": 15, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                        {"threshold": 70, "horizon": 15, "alertDays": 5, "truePositives": 4, "precision": 80.0, "recall": 8.0, "falsePositives": 1},
+                    ],
+                    "recommendedThreshold": {"threshold": 65, "horizon": 15, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                    "alertClusterTest": {"clusterCount": 3, "hitClusters": 2, "falseClusters": 1, "maxFalseClusterDays": 2, "precision": 66.7},
+                },
+            },
         }
 
         self.assertEqual(validate_dashboard(dashboard), [])
+
+    def test_global_lppl_risk_contract_rejects_missing_scores_as_available(self):
+        payload = {
+            "available": True,
+            "title": "Global LPPL Risk · 全球指数泡沫临界风险",
+            "score": None,
+            "scoreUse": "independent",
+            "regime": "Unavailable",
+            "regimeCn": "不可用",
+            "asOf": "2026-06-05",
+            "summary": "missing",
+            "method": "LPPL",
+            "indices": [],
+            "history": {"available": False, "points": []},
+            "backtest": {"available": False, "sampleSize": 0, "horizonTests": []},
+        }
+
+        self.assertFalse(has_global_lppl_risk_contract(payload))
 
     def test_validate_dashboard_reports_missing_equity_daily_source_monitoring(self):
         dashboard = {
@@ -264,7 +519,68 @@ class SmokeCheckTests(unittest.TestCase):
 
         issues = validate_dashboard(dashboard)
 
-        self.assertIn("missing equity daily OHLCV source monitoring", issues)
+        self.assertIn("equity daily OHLCV source monitoring incomplete", issues[0])
+
+    def test_validate_dashboard_reports_non_ok_equity_daily_source_name(self):
+        dashboard = {
+            "asOf": "2026-05-19",
+            "generatedAt": "2026-05-20T15:30:34+00:00",
+            "meta": {"dataMode": "real-public-sources"},
+            "sourceStatus": [
+                {"name": "Fed path", "status": "modeled", "latest": "public futures proxy + curve/macro model"},
+                *[
+                    {"name": name, "status": "ok", "latest": "2026-06-05"}
+                    for name in REQUIRED_EQUITY_SOURCE_STATUS_NAMES
+                ],
+            ],
+            "events": [["2026-06-10", "BLS Consumer Price Index", "高"], ["2026-06-17", "FOMC decision", "高"], ["2026-05-28", "BEA GDP", "高"], ["2026-08-05", "Treasury quarterly refunding statement", "高"]],
+            "news": [["05/18", "U.S. Treasury", "Treasury International Capital Data for March"]],
+            "cross": {"inflation": [["黄金现货", "$4536.70", "Stooq XAUUSD"]], "historySeries": [{"series": [{"category": "risk", "name": "S&P 500"}]}, {"series": [{"category": "commodity", "name": "WTI原油"}]}]},
+            "ideas": [],
+            "spyEarlyWarning": {},
+            "equityShortTermRisk": {},
+            "globalLpplRisk": {},
+        }
+        dashboard["sourceStatus"][-1] = {"name": REQUIRED_EQUITY_SOURCE_STATUS_NAMES[-1], "status": "warning", "latest": "timeout"}
+
+        issues = validate_dashboard(dashboard)
+
+        self.assertTrue(any(REQUIRED_EQUITY_SOURCE_STATUS_NAMES[-1] in issue for issue in issues))
+
+    def test_validate_health_payload_requires_equity_freshness_timing_fields(self):
+        health = {
+            "status": "degraded",
+            "equityRiskFreshness": {
+                "expectedDate": "2026-06-08",
+                "sourceDate": "2026-06-05",
+                "stale": True,
+                "lagDays": 1,
+            },
+        }
+
+        issues = validate_health_payload(health)
+
+        self.assertIn("equityRiskFreshness missing phase", issues)
+        self.assertIn("equityRiskFreshness missing timeliness", issues)
+
+    def test_validate_health_payload_accepts_equity_freshness_timing_contract(self):
+        health = {
+            "status": "degraded",
+            "equityRiskFreshness": {
+                "expectedDate": "2026-06-08",
+                "sourceDate": "2026-06-05",
+                "stale": True,
+                "lagDays": 1,
+                "phase": "catchup",
+                "timeliness": "catchup",
+                "marketTime": "2026-06-08T16:40:00-04:00",
+                "readyAt": "2026-06-08T16:20:00-04:00",
+                "minutesSinceExpected": 20,
+                "minutesUntilExpected": 0,
+            },
+        }
+
+        self.assertEqual(validate_health_payload(health), [])
 
     def test_equity_short_term_risk_contract_requires_component_diagnostics(self):
         payload = {
