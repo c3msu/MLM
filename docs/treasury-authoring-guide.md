@@ -132,16 +132,19 @@ payload contracts:
 When changing `globalLpplRisk`:
 
 1. Keep `scoreUse: "independent"` and preserve the top-level
-   `summary`, `indices`, `history`, `backtest`, `indexValidation`, and
-   `lookAheadGuard` fields.
+   `summary`, `indices`, `history`, `backtest`, `perIndexHistory`,
+   `perIndexBacktests`, `indexValidation`, and `lookAheadGuard` fields. The
+   top-level `score` must stay `null`; `history` and `backtest` remain
+   unavailable placeholders so the UI cannot imply a mixed global score.
 2. Label ETF proxies explicitly. Current public proxies are `EWY` for
    KOSPI/Korea, `EWH` for Hang Seng/Hong Kong, `EWT` for Taiwan Weighted, and
    `EWJ` for Nikkei/Japan.
 3. Do not fabricate missing direct index histories. Missing sources should
    produce unavailable rows, not synthetic scores.
 4. Keep `indexValidation.rows` aligned with visible index cards. Each available
-   index should carry `validation` and `effectiveWeightMultiplier` so the UI
-   can show own-market 15D historical precision beside the LPPL fit.
+   index should carry `validation`, `history`, and `backtest` so the UI can
+   show own-market 15D historical precision and its own LPPL curve beside the
+   current fit.
 5. Update `scripts/smoke_check.py` and `tests/test_smoke_check.py` whenever the
    LPPL contract changes.
 

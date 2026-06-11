@@ -79,8 +79,9 @@ history, and optional daily background updates.
   global ETF proxies for KOSPI (`EWY`), Hang Seng (`EWH`), Taiwan Weighted
   (`EWT`), and Nikkei (`EWJ`). It is not an input to `equityShortTermRisk`.
   Its payload includes per-index `validation` rows, an `indexValidation`
-  summary, and `effectiveWeightMultiplier` values so markets with weaker
-  own-history LPPL drawdown evidence are downweighted in the global aggregate.
+  summary, and separate per-index `history`/`backtest` blocks. The top-level
+  LPPL `score` stays `null`; markets are reviewed separately rather than
+  combined into one score.
 - Local REST API routes when using `scripts/serve.py`.
 - Daily background update entrypoints through the local Python server or macOS
   LaunchAgent.
@@ -276,13 +277,12 @@ Current real public sources:
   exposure. The model searches constrained `tc/m/omega` grids and solves the
   linear LPPL coefficients by least squares. The dashboard stores current
   per-index `score`, `confidence`, `criticalDate`, `fitR2`, and source
-  metadata; `history.points` replays the SPY/QQQ global risk curve; `backtest`
-  validates the global score against future SPY drawdown windows; and
+  metadata; each available index carries its own `history.points` curve and
+  `backtest` against that same market's future drawdown windows; and
   `indexValidation` validates each available index against its own
-  15-trading-day forward drawdown history. `effectiveWeightMultiplier` is
-  applied during aggregation so a high LPPL score with only partial own-market
-  validation cannot dominate the global reading. This block is intentionally
-  not included in `equityShortTermRisk`.
+  15-trading-day forward drawdown history. The top-level `history`/`backtest`
+  remain unavailable placeholders to prevent an implied blended LPPL score.
+  This block is intentionally not included in `equityShortTermRisk`.
 - The duration/curve conclusion audit uses the editable scorecard, not the
   0-100 Conditions Score. Individual factor contribution is `factor score *
   normalized module weight / factor count`; source modes then discount evidence

@@ -2625,6 +2625,8 @@ h3 {
 .global-lppl-index-card {
   display: grid;
   gap: 3px;
+  position: relative;
+  padding-right: 42px;
 }
 
 .global-lppl-index-card span {
@@ -2656,10 +2658,30 @@ h3 {
   opacity: 0.72;
 }
 
+.global-lppl-index-card .chart-expand-btn {
+  position: absolute;
+  right: 7px;
+  top: 7px;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.global-lppl-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
 .global-lppl-history-chart {
   display: grid;
   gap: 5px;
   min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.36);
 }
 
 .global-lppl-history-chart svg {
@@ -2696,13 +2718,15 @@ h3 {
 }
 
 .global-lppl-spy-line,
-.global-lppl-qqq-line {
+.global-lppl-qqq-line,
+.global-lppl-price-line {
   fill: none;
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 2;
 }
 
+.global-lppl-price-line,
 .global-lppl-spy-line {
   stroke: #3e67b2;
   stroke-dasharray: 6 5;
@@ -4495,6 +4519,7 @@ body.modal-open {
   .equity-risk-modal-stats,
   .equity-risk-modal-alert-grid,
   .global-lppl-index-grid,
+  .global-lppl-chart-grid,
   .global-lppl-backtest {
     grid-template-columns: 1fr 1fr;
   }
@@ -4588,6 +4613,7 @@ body.modal-open {
     .equity-risk-modal-alert-grid,
     .equity-risk-components,
     .global-lppl-index-grid,
+    .global-lppl-chart-grid,
     .global-lppl-backtest,
   .source-status-grid,
   .source-status-controls {

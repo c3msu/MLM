@@ -3210,24 +3210,20 @@ def build_global_lppl_risk_index(
     index_validation = build_global_lppl_index_validation(index_rows, bars_by_symbol)
     index_rows = apply_global_lppl_index_validation(index_rows, index_validation)
     available_rows = [row for row in index_rows if row.get("available") and optional_float(row.get("score")) is not None]
-    if len(available_rows) < 2:
-        return unavailable_global_lppl_risk(index_rows, "全球LPPL需要至少两个可回放指数样本; 当前公开日线源不足。")
+    per_index_history = build_global_lppl_per_index_histories(index_rows, bars_by_symbol)
+    per_index_backtests = build_global_lppl_per_index_backtests(per_index_history, bars_by_symbol)
+    index_rows = attach_global_lppl_per_index_payloads(index_rows, per_index_history, per_index_backtests)
+    if not available_rows:
+        return unavailable_global_lppl_risk(index_rows, "全球LPPL逐市场评估需要至少一个可回放指数样本; 当前公开日线源不足。")
 
-    aggregate_score = aggregate_global_lppl_score(available_rows)
-    regime, regime_cn = global_lppl_regime(aggregate_score)
     latest_date = latest_global_lppl_date(available_rows)
-    history = build_global_lppl_history(bars_by_symbol, index_validation=index_validation)
-    backtest = build_global_lppl_backtest(history.get("points", []) if isinstance(history, dict) else [], bars_by_symbol.get("SPY", []))
     return global_lppl_payload(
-        score=aggregate_score,
-        regime=regime,
-        regime_cn=regime_cn,
         latest_date=latest_date,
         available_rows=available_rows,
         index_rows=index_rows,
         index_validation=index_validation,
-        history=history,
-        backtest=backtest,
+        per_index_history=per_index_history,
+        per_index_backtests=per_index_backtests,
     )
 
 
@@ -3251,7 +3247,7 @@ def latest_global_lppl_date(available_rows: list[dict[str, Any]]) -> date:
     return max(dated_rows) if dated_rows else date.today()
 
 
-def global_lppl_summary(score: float, regime_cn: str, available_rows: list[dict[str, Any]]) -> str:
+def global_lppl_summary(available_rows: list[dict[str, Any]], index_rows: list[dict[str, Any]]) -> str:
     high_risk_count = sum(
         1
         for row in available_rows
@@ -3266,42 +3262,61 @@ def global_lppl_summary(score: float, regime_cn: str, available_rows: list[dict[
         ),
         default=None,
     )
+    leaders = sorted(
+        (
+            (optional_float(row.get("score")) or 0.0, str(row.get("symbol") or ""))
+            for row in available_rows
+        ),
+        reverse=True,
+    )[:3]
+    leader_text = ", ".join(f"{symbol} {score:.0f}" for score, symbol in leaders if symbol)
     return (
-        f"LPPL独立指标{score:.1f}({regime_cn}); "
+        f"LPPL逐市场独立评估; "
         f"{high_risk_count}/{len(available_rows)}个可用指数处于风险阈值上方"
+        + (f", 当前较高: {leader_text}" if leader_text else "")
         + (f", 最近临界窗口约{nearest}天。" if nearest is not None else "。")
+        + f" 不计算混合综合分, 图表和回测按{len(index_rows)}个市场分别展示。"
     )
 
 
 def global_lppl_payload(
     *,
-    score: float,
-    regime: str,
-    regime_cn: str,
     latest_date: date,
     available_rows: list[dict[str, Any]],
     index_rows: list[dict[str, Any]],
     index_validation: dict[str, Any],
-    history: dict[str, Any],
-    backtest: dict[str, Any],
+    per_index_history: dict[str, Any],
+    per_index_backtests: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "available": True,
         "title": "Global LPPL Risk · 全球指数泡沫临界风险",
-        "score": round(score, 1),
+        "score": None,
         "scoreUse": "independent",
-        "regime": regime,
-        "regimeCn": regime_cn,
+        "regime": "Per-Index",
+        "regimeCn": "逐市场",
         "asOf": latest_date.isoformat(),
-        "summary": global_lppl_summary(score, regime_cn, available_rows),
-        "method": "LPPL grid search over constrained tc/m/omega with linear least-squares fit; shown as an independent global index-risk diagnostic, not an equityShortTermRisk input.",
+        "summary": global_lppl_summary(available_rows, index_rows),
+        "method": "LPPL grid search over constrained tc/m/omega with linear least-squares fit; each market is scored, charted, and backtested separately.",
         "indices": index_rows,
         "indexValidation": index_validation,
-        "history": history,
-        "backtest": backtest,
+        "history": {
+            "available": False,
+            "points": [],
+            "summary": "Top-level aggregate LPPL history is disabled; use perIndexHistory or indices[].history.",
+        },
+        "backtest": {
+            "available": False,
+            "sampleSize": 0,
+            "threshold": GLOBAL_LPPL_ALERT_THRESHOLD,
+            "horizonTests": [],
+            "summary": "Top-level aggregate LPPL backtest is disabled; use perIndexBacktests or indices[].backtest.",
+        },
+        "perIndexHistory": per_index_history,
+        "perIndexBacktests": per_index_backtests,
         "lookAheadGuard": {
             "dataThrough": latest_date.isoformat(),
-            "scoreInputs": "Only same-day or earlier daily OHLCV bars are used. Forward SPY drawdowns are audit-only backtest outputs.",
+            "scoreInputs": "Only same-day or earlier daily OHLCV bars are used. Forward drawdowns are audit-only per-market backtest outputs.",
             "scoreUse": "independent; not included in equityShortTermRisk.",
         },
     }
@@ -3320,8 +3335,10 @@ def unavailable_global_lppl_risk(index_rows: list[dict[str, Any]], reason: str) 
         "method": "LPPL grid search over constrained tc/m/omega with linear least-squares fit.",
         "indices": index_rows,
         "indexValidation": {"available": False, "rows": [], "summary": reason},
-        "history": {"available": False, "points": [], "summary": reason},
-        "backtest": {"available": False, "sampleSize": 0, "threshold": GLOBAL_LPPL_ALERT_THRESHOLD, "horizonTests": [], "summary": reason},
+        "history": {"available": False, "points": [], "summary": "Top-level aggregate LPPL history is disabled; use per-index histories."},
+        "backtest": {"available": False, "sampleSize": 0, "threshold": GLOBAL_LPPL_ALERT_THRESHOLD, "horizonTests": [], "summary": "Top-level aggregate LPPL backtest is disabled; use per-index backtests."},
+        "perIndexHistory": {},
+        "perIndexBacktests": {},
         "lookAheadGuard": {"scoreUse": "independent; not included in equityShortTermRisk."},
     }
 
@@ -3555,22 +3572,92 @@ def regression_r_squared(actual: list[float], fitted: list[float]) -> float | No
     return max(0.0, min(1.0, 1 - residual / total))
 
 
-def aggregate_global_lppl_score(rows: list[dict[str, Any]]) -> float:
-    weighted_values = []
-    for row in rows:
-        score = optional_float(row.get("score"))
-        confidence = optional_float(row.get("confidence")) or 0.0
-        weight = optional_float(row.get("weight")) or 0.1
-        evidence_multiplier = optional_float(row.get("effectiveWeightMultiplier")) or 1.0
-        if score is None:
+def build_global_lppl_per_index_histories(
+    index_rows: list[dict[str, Any]],
+    bars_by_symbol: dict[str, list[MarketDailyBar]],
+) -> dict[str, Any]:
+    histories: dict[str, Any] = {}
+    for row in index_rows:
+        symbol = str(row.get("symbol") or "").upper()
+        if not symbol:
             continue
-        evidence_multiplier = max(0.1, min(1.0, evidence_multiplier))
-        weighted_values.append((score, max(0.1, confidence) * weight * evidence_multiplier, score * evidence_multiplier))
-    if not weighted_values:
-        return 0.0
-    weighted_average = sum(score * weight for score, weight, _ in weighted_values) / sum(weight for _, weight, _ in weighted_values)
-    top_score = max(adjusted_score for _, _, adjusted_score in weighted_values)
-    return bounded_score(0.65 * weighted_average + 0.35 * top_score)
+        histories[symbol] = build_global_lppl_single_index_history(row, bars_by_symbol.get(symbol, []))
+    return histories
+
+
+def build_global_lppl_single_index_history(
+    index_row: dict[str, Any],
+    bars: list[MarketDailyBar],
+) -> dict[str, Any]:
+    symbol = str(index_row.get("symbol") or "").upper()
+    clean = normalize_market_bars({symbol: bars}).get(symbol, [])
+    if len(clean) < GLOBAL_LPPL_MIN_OBSERVATIONS:
+        return {"available": False, "symbol": symbol, "points": [], "summary": "source unavailable or sample shorter than LPPL minimum window"}
+    score_points = build_single_index_lppl_history_points(symbol, clean)
+    if not score_points:
+        return {"available": False, "symbol": symbol, "points": [], "summary": "LPPL history replay produced no valid fit points"}
+    first_index = bar_index_at_or_before(clean, parse_lppl_point_date(score_points[0].get("date")) or clean[0].date)
+    base_close = clean[first_index if first_index is not None else 0].close
+    points: list[dict[str, Any]] = []
+    for point in score_points:
+        point_date = parse_lppl_point_date(point.get("date"))
+        bar_index = bar_index_at_or_before(clean, point_date) if point_date else None
+        if bar_index is None:
+            continue
+        close = clean[bar_index].close
+        enriched = {
+            "date": clean[bar_index].date.isoformat(),
+            "score": point["score"],
+            "close": round(close, 2),
+            "indexedClose": round(100 * close / base_close, 2) if base_close > 0 else None,
+        }
+        points.append(enriched)
+    if len(points) < 2:
+        return {"available": False, "symbol": symbol, "points": points, "summary": "LPPL history replay has fewer than two chartable points"}
+    return {
+        "available": True,
+        "symbol": symbol,
+        "name": str(index_row.get("name") or symbol),
+        "sourceSymbol": str(index_row.get("sourceSymbol") or symbol),
+        "summary": f"{symbol} LPPL replay; risk score and indexed own-market price are shown on separate axes.",
+        "points": points,
+        "dateRange": {"start": points[0]["date"], "end": points[-1]["date"]},
+    }
+
+
+def parse_lppl_point_date(value: Any) -> date | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def build_global_lppl_per_index_backtests(
+    histories: dict[str, Any],
+    bars_by_symbol: dict[str, list[MarketDailyBar]],
+) -> dict[str, Any]:
+    backtests: dict[str, Any] = {}
+    for symbol, history in histories.items():
+        points = history.get("points", []) if isinstance(history, dict) else []
+        backtests[symbol] = build_global_lppl_backtest(points, bars_by_symbol.get(symbol, []), symbol=symbol)
+    return backtests
+
+
+def attach_global_lppl_per_index_payloads(
+    index_rows: list[dict[str, Any]],
+    histories: dict[str, Any],
+    backtests: dict[str, Any],
+) -> list[dict[str, Any]]:
+    enriched_rows: list[dict[str, Any]] = []
+    for row in index_rows:
+        enriched = dict(row)
+        symbol = str(enriched.get("symbol") or "").upper()
+        enriched["history"] = histories.get(symbol, {"available": False, "symbol": symbol, "points": []})
+        enriched["backtest"] = backtests.get(symbol, {"available": False, "sampleSize": 0, "horizonTests": []})
+        enriched_rows.append(enriched)
+    return enriched_rows
 
 
 def apply_global_lppl_index_validation(
@@ -3748,68 +3835,19 @@ def global_lppl_regime(score: float) -> tuple[str, str]:
     return "Quiet", "低风险"
 
 
-def build_global_lppl_history(
-    bars_by_symbol: dict[str, list[MarketDailyBar]],
-    *,
-    index_validation: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    benchmark = bars_by_symbol.get("SPY") or bars_by_symbol.get("QQQ") or []
-    if len(benchmark) < GLOBAL_LPPL_MIN_OBSERVATIONS:
-        return {"available": False, "points": [], "summary": "SPY/QQQ历史样本不足,暂不能生成LPPL历史曲线。"}
-    points: list[dict[str, Any]] = []
-    start_index = GLOBAL_LPPL_MIN_OBSERVATIONS - 1
-    history_specs = [spec for spec in GLOBAL_LPPL_INDEX_SPECS if str(spec.get("symbol") or "").upper() in {"SPY", "QQQ"}]
-    step = max(GLOBAL_LPPL_HISTORY_STEP, len(benchmark) // 80)
-    replay_indices = list(range(start_index, len(benchmark), step))
-    if replay_indices[-1] != len(benchmark) - 1:
-        replay_indices.append(len(benchmark) - 1)
-    for index in replay_indices:
-        target = benchmark[index].date
-        rows = [
-            global_lppl_index_row(spec, bars_by_symbol.get(str(spec["symbol"]).upper(), []), as_of=target, fast=True)
-            for spec in history_specs
-        ]
-        rows = apply_global_lppl_index_validation(rows, index_validation or {})
-        available = [row for row in rows if row.get("available") and optional_float(row.get("score")) is not None]
-        if len(available) < 1:
-            continue
-        score = aggregate_global_lppl_score(available)
-        point = {
-            "date": target.isoformat(),
-            "score": round(score, 1),
-            "availableIndices": len(available),
-            "topSymbol": max(available, key=lambda row: optional_float(row.get("score")) or 0.0).get("symbol"),
-        }
-        spy_index = bar_index_at_or_before(bars_by_symbol.get("SPY", []), target)
-        qqq_index = bar_index_at_or_before(bars_by_symbol.get("QQQ", []), target)
-        if spy_index is not None and bars_by_symbol["SPY"][0].close > 0:
-            point["spyClose"] = round(bars_by_symbol["SPY"][spy_index].close, 2)
-            point["spyIndexed"] = round(100 * bars_by_symbol["SPY"][spy_index].close / bars_by_symbol["SPY"][0].close, 2)
-        if qqq_index is not None and bars_by_symbol["QQQ"][0].close > 0:
-            point["qqqClose"] = round(bars_by_symbol["QQQ"][qqq_index].close, 2)
-            point["qqqIndexed"] = round(100 * bars_by_symbol["QQQ"][qqq_index].close / bars_by_symbol["QQQ"][0].close, 2)
-        points.append(point)
-    if not points:
-        return {"available": False, "points": [], "summary": "LPPL历史回放没有足够可用点。"}
-    return {
-        "available": True,
-        "summary": "Global LPPL daily replay; high score indicates fitted bubble critical-window risk across available indices.",
-        "points": points,
-        "dateRange": {"start": points[0]["date"], "end": points[-1]["date"]},
-    }
-
-
 def build_global_lppl_backtest(
     history_points: list[dict[str, Any]],
-    spy_bars: list[MarketDailyBar],
+    market_bars: list[MarketDailyBar],
     *,
+    symbol: str = "SPY",
     threshold: int = GLOBAL_LPPL_ALERT_THRESHOLD,
     drawdown_threshold_pct: float = -2.0,
 ) -> dict[str, Any]:
-    clean_spy = normalize_market_bars({"SPY": spy_bars}).get("SPY", [])
-    if len(clean_spy) < 30 or not history_points:
-        return {"available": False, "sampleSize": 0, "threshold": threshold, "horizonTests": [], "summary": "SPY或LPPL历史样本不足。"}
-    index_by_date = {bar.date: index for index, bar in enumerate(clean_spy)}
+    symbol = symbol.upper()
+    clean_bars = normalize_market_bars({symbol: market_bars}).get(symbol, [])
+    if len(clean_bars) < 30 or not history_points:
+        return {"available": False, "sampleSize": 0, "threshold": threshold, "horizonTests": [], "summary": f"{symbol}或LPPL历史样本不足。"}
+    index_by_date = {bar.date: index for index, bar in enumerate(clean_bars)}
     observations: list[dict[str, Any]] = []
     for point in history_points:
         try:
@@ -3818,18 +3856,18 @@ def build_global_lppl_backtest(
             continue
         score = optional_float(point.get("score"))
         index = index_by_date.get(point_date)
-        if score is None or index is None or index + 1 >= len(clean_spy):
+        if score is None or index is None or index + 1 >= len(clean_bars):
             continue
         row = {"date": point_date.isoformat(), "score": round(bounded_score(score), 1)}
         for horizon in (5, 10, 15, 20):
-            row[f"forward{horizon}d"] = equity_forward_return_pct(clean_spy, index, horizon)
-            drawdown = equity_forward_max_drawdown_pct(clean_spy, index, horizon)
+            row[f"forward{horizon}d"] = equity_forward_return_pct(clean_bars, index, horizon)
+            drawdown = equity_forward_max_drawdown_pct(clean_bars, index, horizon)
             row[f"maxDrawdown{horizon}d"] = drawdown
             row[f"drawdownEvent{horizon}d"] = drawdown is not None and drawdown <= drawdown_threshold_pct
-            row[f"drawdownLeadDays{horizon}d"] = equity_forward_drawdown_lead_days(clean_spy, index, horizon, drawdown_threshold_pct)
+            row[f"drawdownLeadDays{horizon}d"] = equity_forward_drawdown_lead_days(clean_bars, index, horizon, drawdown_threshold_pct)
         observations.append(row)
     if not observations:
-        return {"available": False, "sampleSize": 0, "threshold": threshold, "horizonTests": [], "summary": "LPPL历史点没有足够后续SPY交易日。"}
+        return {"available": False, "sampleSize": 0, "threshold": threshold, "horizonTests": [], "summary": f"LPPL历史点没有足够后续{symbol}交易日。"}
     calibration_grid = [
         equity_backtest_threshold_test(candidate_threshold, observations, drawdown_threshold_pct, horizon=15)
         for candidate_threshold in (55, 60, 65, 70, 75, 80, 85, 90)
@@ -3848,7 +3886,7 @@ def build_global_lppl_backtest(
         horizon=15,
     )
     summary = (
-        f"LPPL score≥{threshold}历史告警{preferred.get('alertDays', 0)}次; "
+        f"{symbol} LPPL score≥{threshold}历史告警{preferred.get('alertDays', 0)}次; "
         f"15D精确率{format_optional_percent_value(preferred.get('precision'))}, "
         f"误报{preferred.get('falsePositives', 0)}次; "
         f"最大误报簇{alert_cluster_test.get('maxFalseClusterDays', 0)}个点。"

@@ -295,12 +295,12 @@ class SmokeCheckTests(unittest.TestCase):
             "globalLpplRisk": {
                 "available": True,
                 "title": "Global LPPL Risk · 全球指数泡沫临界风险",
-                "score": 64.2,
+                "score": None,
                 "scoreUse": "independent",
-                "regime": "Risk",
-                "regimeCn": "泡沫风险",
+                "regime": "Per-Index",
+                "regimeCn": "逐市场",
                 "asOf": "2026-06-05",
-                "summary": "LPPL独立评估显示部分全球指数接近临界窗口。",
+                "summary": "LPPL逐市场独立评估显示部分全球指数接近临界窗口。",
                 "method": "LPPL grid search over tc/m/omega with linear least-squares fit.",
                 "indices": [
                     {
@@ -335,6 +335,32 @@ class SmokeCheckTests(unittest.TestCase):
                             "validationRoleCn": "部分支持",
                             "summary": "SPY own-market 15D audit.",
                         },
+                        "history": {
+                            "available": True,
+                            "points": [
+                                {"date": "2026-06-03", "score": 52.1, "close": 600.0, "indexedClose": 100.0},
+                                {"date": "2026-06-04", "score": 58.0, "close": 606.0, "indexedClose": 101.0},
+                                {"date": "2026-06-05", "score": 64.2, "close": 597.0, "indexedClose": 99.5},
+                            ],
+                        },
+                        "backtest": {
+                            "available": True,
+                            "sampleSize": 120,
+                            "threshold": 65,
+                            "horizonTests": [
+                                {"horizon": 5, "alertDays": 8, "truePositives": 5, "precision": 62.5, "recall": 10.0, "falsePositives": 3},
+                                {"horizon": 10, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                                {"horizon": 15, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                                {"horizon": 20, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                            ],
+                            "calibrationGrid": [
+                                {"threshold": 60, "horizon": 15, "alertDays": 10, "truePositives": 6, "precision": 60.0, "recall": 12.0, "falsePositives": 4},
+                                {"threshold": 65, "horizon": 15, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                                {"threshold": 70, "horizon": 15, "alertDays": 5, "truePositives": 4, "precision": 80.0, "recall": 8.0, "falsePositives": 1},
+                            ],
+                            "recommendedThreshold": {"threshold": 65, "horizon": 15, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                            "alertClusterTest": {"clusterCount": 3, "hitClusters": 2, "falseClusters": 1, "maxFalseClusterDays": 2, "precision": 66.7},
+                        },
                     },
                     {
                         "symbol": "QQQ",
@@ -367,6 +393,32 @@ class SmokeCheckTests(unittest.TestCase):
                             "validationRole": "validated",
                             "validationRoleCn": "验证支持",
                             "summary": "QQQ own-market 15D audit.",
+                        },
+                        "history": {
+                            "available": True,
+                            "points": [
+                                {"date": "2026-06-03", "score": 55.0, "close": 500.0, "indexedClose": 100.0},
+                                {"date": "2026-06-04", "score": 61.0, "close": 510.0, "indexedClose": 102.0},
+                                {"date": "2026-06-05", "score": 68.0, "close": 494.0, "indexedClose": 98.8},
+                            ],
+                        },
+                        "backtest": {
+                            "available": True,
+                            "sampleSize": 120,
+                            "threshold": 65,
+                            "horizonTests": [
+                                {"horizon": 5, "alertDays": 8, "truePositives": 5, "precision": 62.5, "recall": 10.0, "falsePositives": 3},
+                                {"horizon": 10, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                                {"horizon": 15, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                                {"horizon": 20, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                            ],
+                            "calibrationGrid": [
+                                {"threshold": 60, "horizon": 15, "alertDays": 10, "truePositives": 6, "precision": 60.0, "recall": 12.0, "falsePositives": 4},
+                                {"threshold": 65, "horizon": 15, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                                {"threshold": 70, "horizon": 15, "alertDays": 5, "truePositives": 4, "precision": 80.0, "recall": 8.0, "falsePositives": 1},
+                            ],
+                            "recommendedThreshold": {"threshold": 65, "horizon": 15, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                            "alertClusterTest": {"clusterCount": 3, "hitClusters": 2, "falseClusters": 1, "maxFalseClusterDays": 2, "precision": 66.7},
                         },
                     },
                     {
@@ -455,30 +507,71 @@ class SmokeCheckTests(unittest.TestCase):
                     ],
                 },
                 "history": {
-                    "available": True,
-                    "points": [
-                        {"date": "2026-06-03", "score": 52.1, "spyIndexed": 100.0, "qqqIndexed": 100.0},
-                        {"date": "2026-06-04", "score": 58.0, "spyIndexed": 101.0, "qqqIndexed": 102.0},
-                        {"date": "2026-06-05", "score": 64.2, "spyIndexed": 99.5, "qqqIndexed": 98.8},
-                    ],
+                    "available": False,
+                    "points": [],
+                    "summary": "Top-level aggregate LPPL history is disabled; use per-index histories.",
                 },
                 "backtest": {
-                    "available": True,
-                    "sampleSize": 120,
-                    "threshold": 65,
-                    "horizonTests": [
-                        {"horizon": 5, "alertDays": 8, "truePositives": 5, "precision": 62.5, "recall": 10.0, "falsePositives": 3},
-                        {"horizon": 10, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
-                        {"horizon": 15, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
-                        {"horizon": 20, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
-                    ],
-                    "calibrationGrid": [
-                        {"threshold": 60, "horizon": 15, "alertDays": 10, "truePositives": 6, "precision": 60.0, "recall": 12.0, "falsePositives": 4},
-                        {"threshold": 65, "horizon": 15, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
-                        {"threshold": 70, "horizon": 15, "alertDays": 5, "truePositives": 4, "precision": 80.0, "recall": 8.0, "falsePositives": 1},
-                    ],
-                    "recommendedThreshold": {"threshold": 65, "horizon": 15, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
-                    "alertClusterTest": {"clusterCount": 3, "hitClusters": 2, "falseClusters": 1, "maxFalseClusterDays": 2, "precision": 66.7},
+                    "available": False,
+                    "sampleSize": 0,
+                    "horizonTests": [],
+                    "summary": "Top-level aggregate LPPL backtest is disabled; use per-index backtests.",
+                },
+                "perIndexHistory": {
+                    "SPY": {
+                        "available": True,
+                        "points": [
+                            {"date": "2026-06-03", "score": 52.1, "close": 600.0, "indexedClose": 100.0},
+                            {"date": "2026-06-04", "score": 58.0, "close": 606.0, "indexedClose": 101.0},
+                            {"date": "2026-06-05", "score": 64.2, "close": 597.0, "indexedClose": 99.5},
+                        ],
+                    },
+                    "QQQ": {
+                        "available": True,
+                        "points": [
+                            {"date": "2026-06-03", "score": 55.0, "close": 500.0, "indexedClose": 100.0},
+                            {"date": "2026-06-04", "score": 61.0, "close": 510.0, "indexedClose": 102.0},
+                            {"date": "2026-06-05", "score": 68.0, "close": 494.0, "indexedClose": 98.8},
+                        ],
+                    },
+                },
+                "perIndexBacktests": {
+                    "SPY": {
+                        "available": True,
+                        "sampleSize": 120,
+                        "threshold": 65,
+                        "horizonTests": [
+                            {"horizon": 5, "alertDays": 8, "truePositives": 5, "precision": 62.5, "recall": 10.0, "falsePositives": 3},
+                            {"horizon": 10, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                            {"horizon": 15, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                            {"horizon": 20, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                        ],
+                        "calibrationGrid": [
+                            {"threshold": 60, "horizon": 15, "alertDays": 10, "truePositives": 6, "precision": 60.0, "recall": 12.0, "falsePositives": 4},
+                            {"threshold": 65, "horizon": 15, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                            {"threshold": 70, "horizon": 15, "alertDays": 5, "truePositives": 4, "precision": 80.0, "recall": 8.0, "falsePositives": 1},
+                        ],
+                        "recommendedThreshold": {"threshold": 65, "horizon": 15, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                        "alertClusterTest": {"clusterCount": 3, "hitClusters": 2, "falseClusters": 1, "maxFalseClusterDays": 2, "precision": 66.7},
+                    },
+                    "QQQ": {
+                        "available": True,
+                        "sampleSize": 120,
+                        "threshold": 65,
+                        "horizonTests": [
+                            {"horizon": 5, "alertDays": 8, "truePositives": 5, "precision": 62.5, "recall": 10.0, "falsePositives": 3},
+                            {"horizon": 10, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                            {"horizon": 15, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                            {"horizon": 20, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                        ],
+                        "calibrationGrid": [
+                            {"threshold": 60, "horizon": 15, "alertDays": 10, "truePositives": 6, "precision": 60.0, "recall": 12.0, "falsePositives": 4},
+                            {"threshold": 65, "horizon": 15, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                            {"threshold": 70, "horizon": 15, "alertDays": 5, "truePositives": 4, "precision": 80.0, "recall": 8.0, "falsePositives": 1},
+                        ],
+                        "recommendedThreshold": {"threshold": 65, "horizon": 15, "alertDays": 8, "truePositives": 6, "precision": 75.0, "recall": 12.0, "falsePositives": 2},
+                        "alertClusterTest": {"clusterCount": 3, "hitClusters": 2, "falseClusters": 1, "maxFalseClusterDays": 2, "precision": 66.7},
+                    },
                 },
             },
         }

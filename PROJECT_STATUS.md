@@ -18,9 +18,9 @@ The equity-risk surface has three separate contracts:
   market structure, event context, and audited factor weights.
 - `globalLpplRisk`: independent global LPPL research indicator for SPY, QQQ,
   KOSPI/EWY, Hang Seng/EWH, Taiwan/EWT, and Nikkei/EWJ. It is not included in
-  `equityShortTermRisk`; each index carries `indexValidation` and
-  `effectiveWeightMultiplier` so historically weaker LPPL evidence is
-  downweighted.
+  `equityShortTermRisk`; each index carries its own current LPPL fit,
+  `history`, `backtest`, and `indexValidation`. The top-level score stays
+  `null` so markets are not blended into a composite.
 
 Run locally:
 

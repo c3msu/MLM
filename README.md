@@ -18,10 +18,10 @@ independent `globalLpplRisk` research indicator. `equityShortTermRisk` uses
 replayable Nasdaq OHLCV market-structure factors and event context for
 short-horizon SPY risk control. `globalLpplRisk` is intentionally separate: it
 fits constrained LPPL curves for SPY, QQQ, and global ETF proxies, records
-index-level historical validation under `indexValidation`, and applies
-`effectiveWeightMultiplier` so weaker historical evidence cannot dominate the
-global score. LPPL is a research temperature gauge, not an input to the
-short-term equity score.
+per-index historical validation under `indexValidation`, and keeps each
+market's LPPL history/backtest separate. The top-level LPPL score is disabled
+to avoid mixing different equity markets into one composite. LPPL is a
+research temperature gauge, not an input to the short-term equity score.
 Section 07, cross-market, includes a dynamic historical chart backed by the
 SQLite history API for global rates, risk/dollar, and inflation/commodity
 series.

@@ -130,7 +130,9 @@ const DEFAULT_DATA = {
     indices: [],
     indexValidation: { available: false, rows: [] },
     history: { available: false, points: [] },
-    backtest: { available: false, sampleSize: 0, threshold: 65, horizonTests: [] }
+    backtest: { available: false, sampleSize: 0, threshold: 65, horizonTests: [] },
+    perIndexHistory: {},
+    perIndexBacktests: {}
   },
   groups: [
     {
@@ -501,6 +503,7 @@ let historyRangeYears = 5;
 let crossHistoryGroup = "global";
 let selectedCrossHistorySeriesKey = "";
 let crossHistoryRangeYears = 3;
+let selectedGlobalLpplSymbol = "";
 const CORE_PERCENTILE_TRENDS = ["银行准备金", "净流动性", "13周净流动性动量", "TGA偏离度"];
 const DEFAULT_PERCENTILE_TREND_LIMIT = 4;
 const PREFERRED_HISTORY_SERIES = ["10Y收益率", "2Y收益率", "30Y收益率", "2s10s斜率", "净流动性", "13周净流动性动量", "TGA偏离度", "商票-TBill利差", "金融条件指数(NFCI)", "SOFR-EFFR利差", "VIX", "HY信用利差", "拍卖投标倍数"];
@@ -2253,8 +2256,13 @@ function renderEquityRiskHistoryTooltip(tooltip, chartNode, event, point) {
 
 function renderGlobalLpplRisk(payload) {
   const item = payload && typeof payload === "object" ? payload : DEFAULT_DATA.globalLpplRisk;
+  const indices = globalLpplIndexRows(item);
+  const available = indices.filter((row) => row.available && Number.isFinite(Number(row.score)));
+  const leader = available.slice().sort((a, b) => Number(b.score) - Number(a.score))[0] || null;
+  if (!selectedGlobalLpplSymbol || !available.some((row) => row.symbol === selectedGlobalLpplSymbol)) {
+    selectedGlobalLpplSymbol = leader?.symbol || available[0]?.symbol || "";
+  }
   if (!item.available) {
-    const indices = Array.isArray(item.indices) ? item.indices : [];
     return `
       <div class="global-lppl-empty">
         <div>
@@ -2266,35 +2274,76 @@ function renderGlobalLpplRisk(payload) {
       </div>
     `;
   }
-  const score = Number(item.score);
-  const riskClass = spyWarningClass(score);
-  const indices = Array.isArray(item.indices) ? item.indices : [];
-  const backtest = item.backtest && typeof item.backtest === "object" ? item.backtest : {};
   const indexValidation = item.indexValidation && typeof item.indexValidation === "object" ? item.indexValidation : {};
-  const horizonTests = Array.isArray(backtest.horizonTests) ? backtest.horizonTests : [];
-  const preferred = horizonTests.find((row) => Number(row.horizon) === 15) || horizonTests[0] || {};
-  const cluster = backtest.alertClusterTest && typeof backtest.alertClusterTest === "object" ? backtest.alertClusterTest : {};
+  const riskClass = leader ? spyWarningClass(Number(leader.score)) : "neutral";
+  const highRiskCount = available.filter((row) => Number(row.score) >= 65).length;
   return `
     <div class="global-lppl-head ${riskClass}">
       <div>
         <span>Global LPPL Risk · 全球指数泡沫临界风险</span>
-        <strong>${Number.isFinite(score) ? score.toFixed(1) : "--"}</strong>
+        <strong>${leader ? escapeHtml(leader.symbol) : "--"}</strong>
       </div>
       <div>
-        <b>${escapeHtml(item.regimeCn || item.regime || "--")} · ${escapeHtml(item.asOf || "--")}</b>
-        <small>${escapeHtml(item.scoreUse || "independent")} · ${escapeHtml(item.method || "LPPL")}</small>
+        <b>${leader ? `${escapeHtml(leader.name || leader.symbol)} ${Number(leader.score).toFixed(1)}` : escapeHtml(item.regimeCn || item.regime || "--")} · ${escapeHtml(item.asOf || "--")}</b>
+        <small>per-index only · ${available.length}/${indices.length} available · risk ${highRiskCount}</small>
       </div>
     </div>
     <p class="global-lppl-summary">${escapeHtml(item.summary || "")}</p>
     ${indexValidation.summary ? `<p class="global-lppl-validation-summary">${escapeHtml(indexValidation.summary)}</p>` : ""}
-    <div class="global-lppl-backtest">
-      <span><b>历史验证</b><strong>${Number(backtest.sampleSize) || 0} obs</strong><small>threshold score≥${Number(backtest.threshold) || 65}</small></span>
-      <span><b>15D精确率</b><strong>${formatPercentMetric(preferred.precision)}</strong><small>${Number(preferred.alertDays) || 0} alerts · false ${Number(preferred.falsePositives) || 0}</small></span>
-      <span><b>15D覆盖率</b><strong>${formatPercentMetric(preferred.recall)}</strong><small>${escapeHtml(backtest.drawdownEvent || "forward drawdown audit")}</small></span>
-      <span><b>告警簇</b><strong>${formatPercentMetric(cluster.precision)}</strong><small>false clusters ${Number(cluster.falseClusters) || 0} · max ${Number(cluster.maxFalseClusterDays) || 0}</small></span>
-    </div>
+    ${renderGlobalLpplPerIndexBacktestStrip(item)}
     ${renderGlobalLpplIndexGrid(indices)}
-    ${renderGlobalLpplRiskHistoryChart(item)}
+    ${renderGlobalLpplIndexHistoryCharts(item)}
+  `;
+}
+
+function globalLpplIndexRows(item) {
+  return Array.isArray(item?.indices) ? item.indices : [];
+}
+
+function globalLpplIndexRow(item, symbol) {
+  const normalized = String(symbol || "").toUpperCase();
+  return globalLpplIndexRows(item).find((row) => String(row.symbol || "").toUpperCase() === normalized) || null;
+}
+
+function firstGlobalLpplSymbol(item) {
+  const rows = globalLpplIndexRows(item).filter((row) => row.available && Number.isFinite(Number(row.score)));
+  return (rows.slice().sort((a, b) => Number(b.score) - Number(a.score))[0] || rows[0] || {}).symbol || "";
+}
+
+function globalLpplIndexHistory(item, symbol) {
+  const normalized = String(symbol || "").toUpperCase();
+  const row = globalLpplIndexRow(item, normalized);
+  if (row?.history && typeof row.history === "object") return row.history;
+  const map = item?.perIndexHistory && typeof item.perIndexHistory === "object" ? item.perIndexHistory : {};
+  return map[normalized] && typeof map[normalized] === "object" ? map[normalized] : { available: false, points: [] };
+}
+
+function globalLpplIndexBacktest(item, symbol) {
+  const normalized = String(symbol || "").toUpperCase();
+  const row = globalLpplIndexRow(item, normalized);
+  if (row?.backtest && typeof row.backtest === "object") return row.backtest;
+  const map = item?.perIndexBacktests && typeof item.perIndexBacktests === "object" ? item.perIndexBacktests : {};
+  return map[normalized] && typeof map[normalized] === "object" ? map[normalized] : { available: false, horizonTests: [] };
+}
+
+function renderGlobalLpplPerIndexBacktestStrip(item) {
+  const rows = globalLpplIndexRows(item).filter((row) => row.available && Number.isFinite(Number(row.score)));
+  if (!rows.length) return `<div class="global-lppl-backtest"><span><b>逐市场验证</b><strong>--</strong><small>等待可回放指数样本</small></span></div>`;
+  return `
+    <div class="global-lppl-backtest">
+      ${rows.slice(0, 4).map((row) => {
+        const backtest = globalLpplIndexBacktest(item, row.symbol);
+        const horizonTests = Array.isArray(backtest.horizonTests) ? backtest.horizonTests : [];
+        const preferred = horizonTests.find((entry) => Number(entry.horizon) === 15) || horizonTests[0] || {};
+        return `
+          <span>
+            <b>${escapeHtml(row.symbol || "")} 15D验证</b>
+            <strong>${formatPercentMetric(preferred.precision)}</strong>
+            <small>${Number(backtest.sampleSize) || 0} obs · ${Number(preferred.alertDays) || 0} alerts · false ${Number(preferred.falsePositives) || 0}</small>
+          </span>
+        `;
+      }).join("")}
+    </div>
   `;
 }
 
@@ -2302,13 +2351,13 @@ function renderGlobalLpplIndexGrid(indices) {
   return `
     <div class="global-lppl-index-grid">
       ${indices.map((row) => {
+        const symbol = String(row.symbol || "").toUpperCase();
         const score = Number(row.score);
         const confidence = Number(row.confidence);
         const validation = row.validation && typeof row.validation === "object" ? row.validation : {};
-        const weightMultiplier = Number(row.effectiveWeightMultiplier);
         const riskClass = row.available ? spyWarningClass(score) : "neutral";
         const validationText = row.available && validation.symbol
-          ? `15D验证 ${formatPercentMetric(validation.precision15d)} · w×${Number.isFinite(weightMultiplier) ? weightMultiplier.toFixed(2) : "--"} · ${escapeHtml(validation.validationRoleCn || validation.validationRole || "")}`
+          ? `15D验证 ${formatPercentMetric(validation.precision15d)} · ${escapeHtml(validation.validationRoleCn || validation.validationRole || "")}`
           : "";
         return `
           <div class="global-lppl-index-card ${riskClass} ${row.available ? "" : "missing"}">
@@ -2317,6 +2366,7 @@ function renderGlobalLpplIndexGrid(indices) {
             <b>${escapeHtml(row.statusCn || row.status || "--")}</b>
             <small>${row.available ? `criticalDate ${escapeHtml(row.criticalDate || "--")} · ${Number(row.daysToCritical) || "--"}D · fitR2 ${formatNumberMetric(row.fitR2, 2)} · conf ${formatPercentMetric(confidence * 100)}` : escapeHtml(row.reason || "source unavailable")}</small>
             ${validationText ? `<small>${validationText}</small>` : ""}
+            ${row.available ? `<button class="icon-btn chart-expand-btn expandGlobalLpplRiskHistory" type="button" data-global-lppl-symbol="${escapeHtml(symbol)}" title="放大查看${escapeHtml(symbol)} LPPL历史曲线" aria-label="放大查看${escapeHtml(symbol)} LPPL历史曲线">⛶</button>` : ""}
           </div>
         `;
       }).join("")}
@@ -2324,31 +2374,44 @@ function renderGlobalLpplIndexGrid(indices) {
   `;
 }
 
-function prepareGlobalLpplHistorySeries(item) {
-  const raw = Array.isArray(item?.history?.points) ? item.history.points : [];
+function renderGlobalLpplIndexHistoryCharts(item) {
+  const rows = globalLpplIndexRows(item).filter((row) => row.available && globalLpplIndexHistory(item, row.symbol).available);
+  if (!rows.length) return `<div class="empty-state compact">LPPL逐市场历史曲线样本不足</div>`;
+  return `
+    <div class="global-lppl-chart-grid">
+      ${rows.map((row) => renderGlobalLpplRiskHistoryChart(item, { symbol: row.symbol })).join("")}
+    </div>
+  `;
+}
+
+function prepareGlobalLpplHistorySeries(item, symbol) {
+  const activeSymbol = String(symbol || selectedGlobalLpplSymbol || firstGlobalLpplSymbol(item) || "").toUpperCase();
+  const row = globalLpplIndexRow(item, activeSymbol) || {};
+  const history = globalLpplIndexHistory(item, activeSymbol);
+  const raw = Array.isArray(history?.points) ? history.points : [];
   const series = raw.map((point) => ({
     date: point.date,
     time: Date.parse(point.date || ""),
     score: Number(point.score),
-    spyIndexed: Number(point.spyIndexed),
-    qqqIndexed: Number(point.qqqIndexed),
-    topSymbol: point.topSymbol || "",
-    availableIndices: Number(point.availableIndices),
+    indexedClose: Number(point.indexedClose),
+    close: Number(point.close),
   })).filter((point) => Number.isFinite(point.time) && Number.isFinite(point.score));
   return {
+    symbol: activeSymbol,
+    row,
+    history,
     series,
-    spySeries: series.filter((point) => Number.isFinite(point.spyIndexed)),
-    qqqSeries: series.filter((point) => Number.isFinite(point.qqqIndexed)),
+    priceSeries: series.filter((point) => Number.isFinite(point.indexedClose)),
   };
 }
 
-function globalLpplHistoryScale(series, spySeries, qqqSeries, options = {}) {
+function globalLpplHistoryScale(series, priceSeries, options = {}) {
   const W = options.large ? 1180 : 840;
   const H = options.large ? 420 : 190;
   const pad = options.large ? { l: 48, r: 72, t: 34, b: 40 } : { l: 34, r: 48, t: 24, b: 28 };
   const minTime = Math.min(...series.map((point) => point.time));
   const maxTime = Math.max(...series.map((point) => point.time));
-  const priceValues = [...spySeries.map((point) => point.spyIndexed), ...qqqSeries.map((point) => point.qqqIndexed)].filter(Number.isFinite);
+  const priceValues = priceSeries.map((point) => point.indexedClose).filter(Number.isFinite);
   const priceMin = priceValues.length ? Math.min(...priceValues) : 100;
   const priceMax = priceValues.length ? Math.max(...priceValues) : 100;
   const pricePad = Math.max(4, (priceMax - priceMin) * 0.12);
@@ -2361,13 +2424,12 @@ function globalLpplHistoryScale(series, spySeries, qqqSeries, options = {}) {
 }
 
 function renderGlobalLpplRiskHistoryChart(item, options = {}) {
-  const { series, spySeries, qqqSeries } = prepareGlobalLpplHistorySeries(item);
+  const { symbol, row, series, priceSeries } = prepareGlobalLpplHistorySeries(item, options.symbol);
   if (series.length < 2) return `<div class="empty-state compact">LPPL历史曲线样本不足</div>`;
-  const scale = globalLpplHistoryScale(series, spySeries, qqqSeries, options);
+  const scale = globalLpplHistoryScale(series, priceSeries, options);
   const { W, H, pad, priceLow, priceHigh, x, yRisk, yPrice } = scale;
   const riskPath = macroLiquidityPath(series, x, yRisk, "score");
-  const spyPath = spySeries.length >= 2 ? macroLiquidityPath(spySeries, x, yPrice, "spyIndexed") : "";
-  const qqqPath = qqqSeries.length >= 2 ? macroLiquidityPath(qqqSeries, x, yPrice, "qqqIndexed") : "";
+  const pricePath = priceSeries.length >= 2 ? macroLiquidityPath(priceSeries, x, yPrice, "indexedClose") : "";
   const latest = series[series.length - 1];
   const ticks = buildDateTicks(series, options.large ? 8 : 5);
   const interactiveLayer = options.interactive ? `
@@ -2378,26 +2440,24 @@ function renderGlobalLpplRiskHistoryChart(item, options = {}) {
   return `
     <div class="global-lppl-history-chart ${options.large ? "large" : ""}">
       <div class="equity-risk-history-head">
-        <span>LPPL历史曲线</span>
+        <span>${escapeHtml(symbol || "LPPL")} 历史曲线</span>
         <div class="equity-risk-history-actions">
-          <b>Global LPPL risk vs SPY/QQQ indexed</b>
-          ${options.large ? "" : `<button id="expandGlobalLpplRiskHistory" class="icon-btn chart-expand-btn" type="button" title="放大查看全球LPPL风险历史曲线" aria-label="放大查看全球LPPL风险历史曲线">⛶</button>`}
+          <b>${escapeHtml(row.name || symbol || "LPPL")} risk vs own indexed price</b>
+          ${options.large ? "" : `<button class="icon-btn chart-expand-btn expandGlobalLpplRiskHistory" type="button" data-global-lppl-symbol="${escapeHtml(symbol)}" title="放大查看${escapeHtml(symbol)} LPPL历史曲线" aria-label="放大查看${escapeHtml(symbol)} LPPL历史曲线">⛶</button>`}
         </div>
       </div>
-      <svg data-global-lppl-history-chart viewBox="0 0 ${W} ${H}" role="img" aria-label="Global LPPL risk historical curve versus SPY and QQQ indexed price">
+      <svg data-global-lppl-history-chart data-global-lppl-symbol="${escapeHtml(symbol)}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${escapeHtml(symbol)} LPPL risk historical curve versus indexed price">
         <rect x="0" y="0" width="${W}" height="${H}" fill="transparent"></rect>
         ${[45, 65, 75].map((tick) => `
           <line x1="${pad.l}" x2="${W - pad.r}" y1="${yRisk(tick).toFixed(1)}" y2="${yRisk(tick).toFixed(1)}" class="${tick === 65 ? "global-lppl-threshold-line strong" : "global-lppl-threshold-line"}"></line>
           <text x="8" y="${yRisk(tick).toFixed(1)}" dy="4">${tick}</text>
         `).join("")}
         ${ticks.map((point) => `<text x="${x(point.time).toFixed(1)}" y="${H - 8}" text-anchor="middle">${formatMonthLabel(point.time)}</text>`).join("")}
-        ${spyPath ? `<path d="${spyPath}" class="global-lppl-spy-line"></path>` : ""}
-        ${qqqPath ? `<path d="${qqqPath}" class="global-lppl-qqq-line"></path>` : ""}
+        ${pricePath ? `<path d="${pricePath}" class="global-lppl-price-line"></path>` : ""}
         <path d="${riskPath}" class="global-lppl-score-line"></path>
         <circle class="global-lppl-score-dot" cx="${x(latest.time).toFixed(1)}" cy="${yRisk(latest.score).toFixed(1)}" r="4.2"></circle>
-        <text x="${W - pad.r}" y="15" text-anchor="end">Global LPPL Risk ${latest.score.toFixed(1)}</text>
-        ${Number.isFinite(latest.spyIndexed) ? `<text x="${W - pad.r}" y="30" text-anchor="end" class="global-lppl-price-label">SPY indexed ${latest.spyIndexed.toFixed(0)}</text>` : ""}
-        ${Number.isFinite(latest.qqqIndexed) ? `<text x="${W - pad.r}" y="45" text-anchor="end" class="global-lppl-qqq-label">QQQ indexed ${latest.qqqIndexed.toFixed(0)}</text>` : ""}
+        <text x="${W - pad.r}" y="15" text-anchor="end">${escapeHtml(symbol)} LPPL ${latest.score.toFixed(1)}</text>
+        ${Number.isFinite(latest.indexedClose) ? `<text x="${W - pad.r}" y="30" text-anchor="end" class="global-lppl-price-label">${escapeHtml(symbol)} indexed ${latest.indexedClose.toFixed(0)}</text>` : ""}
         <text x="${W - 8}" y="${yPrice(priceHigh).toFixed(1) + 4}" text-anchor="end" class="global-lppl-price-axis">${priceHigh.toFixed(0)}</text>
         <text x="${W - 8}" y="${yPrice(priceLow).toFixed(1) + 4}" text-anchor="end" class="global-lppl-price-axis">${priceLow.toFixed(0)}</text>
         ${interactiveLayer}
@@ -2407,17 +2467,19 @@ function renderGlobalLpplRiskHistoryChart(item, options = {}) {
 }
 
 function renderGlobalLpplRiskHistoryModalStats(item) {
-  const { series } = prepareGlobalLpplHistorySeries(item);
-  const backtest = item?.backtest && typeof item.backtest === "object" ? item.backtest : {};
+  const { symbol, row, series } = prepareGlobalLpplHistorySeries(item, selectedGlobalLpplSymbol);
+  const backtest = globalLpplIndexBacktest(item, symbol);
   const horizonTests = Array.isArray(backtest.horizonTests) ? backtest.horizonTests : [];
   const preferred = horizonTests.find((row) => Number(row.horizon) === 15) || horizonTests[0] || {};
   const cluster = backtest.alertClusterTest && typeof backtest.alertClusterTest === "object" ? backtest.alertClusterTest : {};
   if (series.length < 2) return `<div class="empty-state compact">LPPL历史样本不足</div>`;
   const latest = series[series.length - 1];
   return [
+    ["指数", `${symbol || "--"} ${row.name ? `· ${row.name}` : ""}`],
     ["样本", `${series.length} pts`],
     ["区间", `${series[0].date} / ${latest.date}`],
     ["最新LPPL", latest.score.toFixed(1)],
+    ["价格指数", Number.isFinite(latest.indexedClose) ? latest.indexedClose.toFixed(1) : "--"],
     ["阈值", `score≥${Number(backtest.threshold) || 65}`],
     ["15D精确率", formatPercentMetric(preferred.precision)],
     ["误报", `${Number(preferred.falsePositives) || 0}`],
@@ -2431,9 +2493,11 @@ function renderGlobalLpplRiskHistoryModalStats(item) {
   `).join("");
 }
 
-function openGlobalLpplRiskHistoryModal() {
+function openGlobalLpplRiskHistoryModal(symbol = "") {
   const modal = $("#globalLpplRiskHistoryModal");
   if (!modal) return;
+  const item = state.globalLpplRisk || DEFAULT_DATA.globalLpplRisk;
+  selectedGlobalLpplSymbol = String(symbol || selectedGlobalLpplSymbol || firstGlobalLpplSymbol(item) || "").toUpperCase();
   modal.hidden = false;
   document.body.classList.add("modal-open");
   renderGlobalLpplRiskHistoryModalChart();
@@ -2451,19 +2515,22 @@ function renderGlobalLpplRiskHistoryModalChart() {
   const item = state.globalLpplRisk || DEFAULT_DATA.globalLpplRisk;
   const chartNode = $("#globalLpplRiskHistoryModalChart");
   const statsNode = $("#globalLpplRiskHistoryModalStats");
+  const titleNode = $("#globalLpplRiskHistoryModalTitle");
+  const symbol = selectedGlobalLpplSymbol || firstGlobalLpplSymbol(item);
+  if (titleNode) titleNode.textContent = `Global LPPL Risk · ${symbol || "--"} 历史验证`;
   if (statsNode) statsNode.innerHTML = renderGlobalLpplRiskHistoryModalStats(item);
   if (!chartNode) return;
-  chartNode.innerHTML = renderGlobalLpplRiskHistoryChart(item, { large: true, interactive: true });
-  bindGlobalLpplRiskHistoryInteractions(chartNode, item, { large: true, tooltipSelector: "#globalLpplRiskHistoryModalTooltip" });
+  chartNode.innerHTML = renderGlobalLpplRiskHistoryChart(item, { symbol, large: true, interactive: true });
+  bindGlobalLpplRiskHistoryInteractions(chartNode, item, { symbol, large: true, tooltipSelector: "#globalLpplRiskHistoryModalTooltip" });
 }
 
 function bindGlobalLpplRiskHistoryInteractions(chartNode, item, options = {}) {
   const svg = chartNode?.querySelector("[data-global-lppl-history-chart]");
   const tooltip = $(options.tooltipSelector || "#globalLpplRiskHistoryModalTooltip");
   if (!svg || !tooltip) return;
-  const { series, spySeries, qqqSeries } = prepareGlobalLpplHistorySeries(item);
+  const { symbol, series, priceSeries } = prepareGlobalLpplHistorySeries(item, options.symbol);
   if (series.length < 2) return;
-  const scale = globalLpplHistoryScale(series, spySeries, qqqSeries, options);
+  const scale = globalLpplHistoryScale(series, priceSeries, options);
   const guide = svg.querySelector(".global-lppl-hover-guide");
   const riskDot = svg.querySelector(".global-lppl-hover-dot.risk");
   svg.addEventListener("mousemove", (event) => {
@@ -2479,9 +2546,9 @@ function bindGlobalLpplRiskHistoryInteractions(chartNode, item, options = {}) {
     riskDot?.setAttribute("cy", scale.yRisk(point.score).toFixed(1));
     riskDot?.setAttribute("opacity", "1");
     tooltip.innerHTML = `
-      <b>${escapeHtml(point.date)} · LPPL ${point.score.toFixed(1)}</b>
-      <span>SPY ${Number.isFinite(point.spyIndexed) ? point.spyIndexed.toFixed(1) : "--"} · QQQ ${Number.isFinite(point.qqqIndexed) ? point.qqqIndexed.toFixed(1) : "--"}</span>
-      <small>top ${escapeHtml(point.topSymbol || "--")} · indices ${Number(point.availableIndices) || "--"}</small>
+      <b>${escapeHtml(point.date)} · ${escapeHtml(symbol)} LPPL ${point.score.toFixed(1)}</b>
+      <span>${escapeHtml(symbol)} indexed ${Number.isFinite(point.indexedClose) ? point.indexedClose.toFixed(1) : "--"} · close ${Number.isFinite(point.close) ? point.close.toFixed(2) : "--"}</span>
+      <small>per-index LPPL replay · no blended global score</small>
     `;
     const parentRect = (tooltip.offsetParent || chartNode).getBoundingClientRect();
     tooltip.hidden = false;
@@ -4014,7 +4081,8 @@ $$("[data-close-macro-liquidity-trend-modal]").forEach((node) => {
 });
 document.addEventListener("click", (event) => {
   if (event.target.closest("#expandEquityRiskHistory")) openEquityRiskHistoryModal();
-  if (event.target.closest("#expandGlobalLpplRiskHistory")) openGlobalLpplRiskHistoryModal();
+  const lpplHistoryButton = event.target.closest("[data-global-lppl-symbol], .expandGlobalLpplRiskHistory, #expandGlobalLpplRiskHistory");
+  if (lpplHistoryButton) openGlobalLpplRiskHistoryModal(lpplHistoryButton.dataset.globalLpplSymbol || "");
 });
 $("#closeEquityRiskHistoryModal")?.addEventListener("click", closeEquityRiskHistoryModal);
 $$("[data-close-equity-risk-history-modal]").forEach((node) => {

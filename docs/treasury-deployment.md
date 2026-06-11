@@ -87,10 +87,11 @@ evidence quality, source warnings/errors, and whether proxy or modeled inputs
 make the conclusion unsuitable for a high-confidence narrative.
 The same payload includes three separate equity-risk contracts:
 `spyEarlyWarning`, `equityShortTermRisk`, and `globalLpplRisk`. `globalLpplRisk`
-is independent from `equityShortTermRisk`; it exposes current LPPL fits,
-SPY/QQQ replay history, global-score backtests, and per-index
-`indexValidation`/`effectiveWeightMultiplier` rows for SPY, QQQ, and global ETF
-proxies.
+is independent from `equityShortTermRisk`; it exposes current LPPL fits plus
+separate `history` and `backtest` payloads for each available market. The
+top-level LPPL score/history/backtest are deliberately unavailable so SPY,
+QQQ, Korea/EWY, Hong Kong/EWH, Taiwan/EWT, and Japan/EWJ are not blended into
+one composite.
 The `/api/cross` slice includes the section-07 `historySeries` registry used by
 the UI to request global-rate, risk/dollar, and inflation/commodity history
 through `/api/history/series`.

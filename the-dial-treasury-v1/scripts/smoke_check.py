@@ -509,8 +509,9 @@ def has_global_lppl_risk_contract(payload: Any) -> bool:
     if "Global LPPL Risk" not in payload.get("title", ""):
         return False
     if payload.get("available") is True:
-        score = payload.get("score")
-        if not isinstance(score, (int, float)) or not 0 <= float(score) <= 100:
+        if payload.get("score") is not None:
+            return False
+        if payload.get("regime") != "Per-Index" or payload.get("regimeCn") != "逐市场":
             return False
         if not parse_iso_date(payload.get("asOf")):
             return False
@@ -546,6 +547,10 @@ def has_global_lppl_risk_contract(payload: Any) -> bool:
             validation = row.get("validation")
             if not isinstance(validation, dict) or validation.get("symbol") != row.get("symbol"):
                 return False
+            if not has_lppl_history_contract(row.get("history"), require_available=True):
+                return False
+            if not has_lppl_backtest_contract(row.get("backtest"), require_available=True):
+                return False
         elif row_score is not None:
             return False
     index_validation = payload.get("indexValidation")
@@ -574,46 +579,86 @@ def has_global_lppl_risk_contract(payload: Any) -> bool:
     history = payload.get("history")
     if not isinstance(history, dict):
         return False
-    if history.get("available") is True:
-        points = history.get("points")
-        if not isinstance(points, list) or len(points) < 2:
-            return False
-        for point in points[:5]:
-            if not isinstance(point, dict) or not parse_iso_date(point.get("date")):
-                return False
-            if not isinstance(point.get("score"), (int, float)) or not 0 <= float(point.get("score")) <= 100:
-                return False
-    elif not isinstance(history.get("points"), list):
+    if history.get("available") is True or not isinstance(history.get("points"), list):
         return False
     backtest = payload.get("backtest")
     if not isinstance(backtest, dict):
         return False
-    if backtest.get("available") is True:
-        if not isinstance(backtest.get("sampleSize"), int):
-            return False
-        horizon_tests = backtest.get("horizonTests")
-        if not isinstance(horizon_tests, list) or [row.get("horizon") for row in horizon_tests] != [5, 10, 15, 20]:
-            return False
-        for row in horizon_tests:
-            if not isinstance(row, dict):
-                return False
-            for key in ("alertDays", "truePositives", "falsePositives"):
-                if not isinstance(row.get(key), int):
-                    return False
-        calibration_grid = backtest.get("calibrationGrid")
-        if not isinstance(calibration_grid, list) or len(calibration_grid) < 3:
-            return False
-        recommended = backtest.get("recommendedThreshold")
-        if not isinstance(recommended, dict) or not isinstance(recommended.get("threshold"), int):
-            return False
-        cluster = backtest.get("alertClusterTest")
-        if not isinstance(cluster, dict):
-            return False
-        for key in ("clusterCount", "hitClusters", "falseClusters", "maxFalseClusterDays"):
-            if not isinstance(cluster.get(key), int):
-                return False
-    elif not isinstance(backtest.get("horizonTests"), list):
+    if backtest.get("available") is True or not isinstance(backtest.get("horizonTests"), list):
         return False
+    per_index_history = payload.get("perIndexHistory")
+    per_index_backtests = payload.get("perIndexBacktests")
+    if not isinstance(per_index_history, dict) or not isinstance(per_index_backtests, dict):
+        return False
+    for row in indices:
+        if not isinstance(row, dict) or not row.get("available"):
+            continue
+        symbol = str(row.get("symbol") or "")
+        if not has_lppl_history_contract(per_index_history.get(symbol), require_available=True):
+            return False
+        if not has_lppl_backtest_contract(per_index_backtests.get(symbol), require_available=True):
+            return False
+    return True
+
+
+def has_lppl_history_contract(payload: Any, *, require_available: bool = False) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if require_available and payload.get("available") is not True:
+        return False
+    points = payload.get("points")
+    if not isinstance(points, list):
+        return False
+    if payload.get("available") is not True:
+        return not require_available
+    if len(points) < 2:
+        return False
+    for point in points[:5]:
+        if not isinstance(point, dict) or not parse_iso_date(point.get("date")):
+            return False
+        if not isinstance(point.get("score"), (int, float)) or not 0 <= float(point.get("score")) <= 100:
+            return False
+        close = point.get("close")
+        indexed = point.get("indexedClose")
+        if not isinstance(close, (int, float)) or float(close) <= 0:
+            return False
+        if not isinstance(indexed, (int, float)) or float(indexed) <= 0:
+            return False
+    return True
+
+
+def has_lppl_backtest_contract(payload: Any, *, require_available: bool = False) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if require_available and payload.get("available") is not True:
+        return False
+    horizon_tests = payload.get("horizonTests")
+    if not isinstance(horizon_tests, list):
+        return False
+    if payload.get("available") is not True:
+        return not require_available
+    if not isinstance(payload.get("sampleSize"), int):
+        return False
+    if [row.get("horizon") for row in horizon_tests] != [5, 10, 15, 20]:
+        return False
+    for row in horizon_tests:
+        if not isinstance(row, dict):
+            return False
+        for key in ("alertDays", "truePositives", "falsePositives"):
+            if not isinstance(row.get(key), int):
+                return False
+    calibration_grid = payload.get("calibrationGrid")
+    if not isinstance(calibration_grid, list) or len(calibration_grid) < 3:
+        return False
+    recommended = payload.get("recommendedThreshold")
+    if not isinstance(recommended, dict) or not isinstance(recommended.get("threshold"), int):
+        return False
+    cluster = payload.get("alertClusterTest")
+    if not isinstance(cluster, dict):
+        return False
+    for key in ("clusterCount", "hitClusters", "falseClusters", "maxFalseClusterDays"):
+        if not isinstance(cluster.get(key), int):
+            return False
     return True
 
 

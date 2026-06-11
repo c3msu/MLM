@@ -1483,9 +1483,10 @@ class DashboardBuilderTests(unittest.TestCase):
 
         self.assertTrue(risk["available"])
         self.assertEqual(risk["title"], "Global LPPL Risk · 全球指数泡沫临界风险")
-        self.assertGreaterEqual(risk["score"], 60)
+        self.assertIsNone(risk["score"])
+        self.assertEqual(risk["regime"], "Per-Index")
         self.assertIn("independent", risk["scoreUse"])
-        self.assertIn("LPPL", risk["summary"])
+        self.assertIn("逐市场", risk["summary"])
         self.assertGreaterEqual(len(risk["indices"]), 2)
         qqq = next(row for row in risk["indices"] if row["symbol"] == "QQQ")
         self.assertEqual(qqq["status"], "risk")
@@ -1494,10 +1495,19 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertRegex(qqq["criticalDate"], r"^2026-")
         self.assertGreaterEqual(qqq["daysToCritical"], 10)
         self.assertLessEqual(qqq["daysToCritical"], 180)
-        self.assertTrue(risk["history"]["available"])
-        self.assertGreaterEqual(len(risk["history"]["points"]), 40)
-        self.assertTrue(risk["backtest"]["available"])
-        self.assertEqual([row["horizon"] for row in risk["backtest"]["horizonTests"]], [5, 10, 15, 20])
+        self.assertFalse(risk["history"]["available"])
+        self.assertFalse(risk["backtest"]["available"])
+        for symbol in ("SPY", "QQQ"):
+            row = next(item for item in risk["indices"] if item["symbol"] == symbol)
+            self.assertTrue(row["history"]["available"])
+            self.assertGreaterEqual(len(row["history"]["points"]), 20)
+            self.assertTrue(all("indexedClose" in point for point in row["history"]["points"][:3]))
+            self.assertTrue(row["backtest"]["available"])
+            self.assertEqual([item["horizon"] for item in row["backtest"]["horizonTests"]], [5, 10, 15, 20])
+        self.assertIn("perIndexHistory", risk)
+        self.assertIn("perIndexBacktests", risk)
+        self.assertTrue(risk["perIndexHistory"]["QQQ"]["available"])
+        self.assertTrue(risk["perIndexBacktests"]["QQQ"]["available"])
         self.assertTrue(risk["indexValidation"]["available"])
         validation_rows = {row["symbol"]: row for row in risk["indexValidation"]["rows"]}
         self.assertIn("SPY", validation_rows)
@@ -1520,9 +1530,11 @@ class DashboardBuilderTests(unittest.TestCase):
         risk = dashboard_builder.build_global_lppl_risk_index(market_bars=market_bars)
 
         self.assertTrue(risk["available"])
-        self.assertLessEqual(risk["score"], 35)
         self.assertTrue(all(row["status"] in {"quiet", "watch"} for row in risk["indices"] if row["available"]))
         self.assertLessEqual(max(row["confidence"] for row in risk["indices"] if row["available"]), 0.45)
+        self.assertIsNone(risk["score"])
+        self.assertFalse(risk["history"]["available"])
+        self.assertFalse(risk["backtest"]["available"])
 
     def test_global_lppl_risk_reports_missing_indices_without_fabricated_scores(self):
         risk = dashboard_builder.build_global_lppl_risk_index(market_bars={"SPY": self.make_equity_bars_from_closes("SPY", [100 + index for index in range(80)])})
@@ -1533,16 +1545,6 @@ class DashboardBuilderTests(unittest.TestCase):
         missing = [row for row in risk["indices"] if not row["available"]]
         self.assertTrue(missing)
         self.assertTrue(all(row["score"] is None for row in missing))
-
-    def test_global_lppl_aggregate_does_not_let_weak_single_market_dominate(self):
-        score = dashboard_builder.aggregate_global_lppl_score(
-            [
-                {"score": 100.0, "confidence": 0.9, "weight": 0.1, "effectiveWeightMultiplier": 0.5},
-                {"score": 62.0, "confidence": 0.8, "weight": 0.9, "effectiveWeightMultiplier": 1.0},
-            ]
-        )
-
-        self.assertLess(score, 70.0)
 
     def test_equity_short_term_risk_flags_downtrend_continuation(self):
         market_bars = {

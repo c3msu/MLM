@@ -333,6 +333,10 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn("globalLpplRisk", app_js)
         self.assertIn("renderGlobalLpplRisk", app_js)
         self.assertIn("renderGlobalLpplRiskHistoryChart", app_js)
+        self.assertIn("renderGlobalLpplIndexHistoryCharts", app_js)
+        self.assertIn("perIndexHistory", app_js)
+        self.assertIn("data-global-lppl-symbol", app_js)
+        self.assertIn("selectedGlobalLpplSymbol", app_js)
         self.assertIn("openGlobalLpplRiskHistoryModal", app_js)
         self.assertIn("Global LPPL Risk", app_js)
         self.assertIn("全球指数泡沫临界风险", app_js)
@@ -343,6 +347,7 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn(".global-lppl-risk-panel", css)
         self.assertIn(".global-lppl-index-grid", css)
         self.assertIn(".global-lppl-history-chart", css)
+        self.assertIn(".global-lppl-chart-grid", css)
         self.assertIn(".global-lppl-modal-panel", css)
 
     def test_investment_views_render_historical_spy_proxy_impact(self):
