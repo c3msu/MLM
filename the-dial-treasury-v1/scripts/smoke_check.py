@@ -554,6 +554,26 @@ def has_global_lppl_risk_contract(payload: Any) -> bool:
             residual_diagnostics = row.get("residualDiagnostics")
             if not isinstance(residual_diagnostics, dict) or not isinstance(residual_diagnostics.get("meanReverting"), bool):
                 return False
+            for key in ("adfProxyPass", "kpssProxyPass", "ljungBoxProxyPass"):
+                if not isinstance(residual_diagnostics.get(key), bool):
+                    return False
+            fit_ensemble = row.get("fitEnsemble")
+            if not isinstance(fit_ensemble, dict) or fit_ensemble.get("available") is not True:
+                return False
+            for key in ("totalFitCount", "validFitCount"):
+                if not isinstance(fit_ensemble.get(key), int):
+                    return False
+            if not isinstance(fit_ensemble.get("windowDays"), list) or not fit_ensemble.get("windowDays"):
+                return False
+            tc_aggregation = row.get("tcAggregation")
+            if not isinstance(tc_aggregation, dict) or tc_aggregation.get("available") is not True:
+                return False
+            for key in ("tcQ20", "tcMedian", "tcQ80"):
+                if not parse_iso_date(tc_aggregation.get(key)):
+                    return False
+            for key in ("validFitCount", "totalFitCount"):
+                if not isinstance(tc_aggregation.get(key), int):
+                    return False
             clip_state = row.get("clipState")
             if not isinstance(clip_state, dict) or not isinstance(clip_state.get("available"), bool):
                 return False
@@ -569,6 +589,9 @@ def has_global_lppl_risk_contract(payload: Any) -> bool:
             if not isinstance(forward_signal.get("score"), (int, float)) or not 0 <= float(forward_signal.get("score")) <= 100:
                 return False
             if not isinstance(forward_signal.get("clipLock"), bool):
+                return False
+            ensemble_multiplier = forward_signal.get("ensembleMultiplier")
+            if not isinstance(ensemble_multiplier, (int, float)) or not 0 < float(ensemble_multiplier) <= 1:
                 return False
             for key in ("regime", "regimeCn", "summary"):
                 if not isinstance(forward_signal.get(key), str) or not forward_signal.get(key):
@@ -605,6 +628,21 @@ def has_global_lppl_risk_contract(payload: Any) -> bool:
                 return False
     elif not isinstance(index_validation.get("rows"), list):
         return False
+    breadth = payload.get("breadthConfirmation")
+    if not isinstance(breadth, dict):
+        return False
+    if payload.get("available") is True:
+        if breadth.get("available") is not True:
+            return False
+        for key in ("sampleSize", "riskCount", "forwardRiskCount", "clipLockCount"):
+            if not isinstance(breadth.get(key), int):
+                return False
+        for key in ("riskSharePct", "weightedRiskSharePct"):
+            if not isinstance(breadth.get(key), (int, float)):
+                return False
+        for key in ("regime", "regimeCn", "summary"):
+            if not isinstance(breadth.get(key), str) or not breadth.get(key):
+                return False
     history = payload.get("history")
     if not isinstance(history, dict):
         return False

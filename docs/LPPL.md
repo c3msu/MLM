@@ -4,6 +4,35 @@
 
 ---
 
+## 0. 当前代码库落地状态
+
+当前 `the-dial-treasury-v1` 已把本文的完整研究方案收敛成一个可部署的
+`globalLpplRisk` 指数/ETF 代理层，不是全市场个股扫描平台。按本文 16 个
+核心模块拆分，当前看板层覆盖或部分覆盖 10 项；其中本次已补齐 4 个直接
+影响当前 payload 契约的缺口。
+
+| 模块 | 当前状态 |
+| --- | --- |
+| 线性化 LPPL 主模型 | 已覆盖：使用对数价格、给定 `(tc,m,omega)` 后 OLS 解 `A,B,C1,C2`。 |
+| 多窗口 | 已补齐：日常窗口为 `120/180/252/375/500/750` 个交易日；快速历史回放仍使用单窗口以控制运行时间。 |
+| 参数过滤 | 已覆盖：约束未来 `tc`、`m/omega` 网格、`B<0`、LPPL 相对 power-law 改善、振荡次数和趋势加速。 |
+| 残差检验 | 部分覆盖并已补齐契约：输出 `adfProxyPass`、`kpssProxyPass`、`ljungBoxProxyPass`，目前是 lag-1 自相关、符号翻转和低残差方差的启发式 proxy，不是 `statsmodels` 的正式 ADF/KPSS/Ljung-Box。 |
+| 临界时间聚合 | 已补齐：每个指数行输出 `fitEnsemble` 和日期化 `tcAggregation`，含 `tcQ20/tcMedian/tcQ80`、有效窗口数、残差通过率和窗口一致性。 |
+| CLIP | 已覆盖：逐市场 `history.points` 保留 replayed `criticalDate`，`clipState` 判断 scattered/converging/locked。 |
+| 预警分数 | 部分覆盖：当前保留 raw LPPL score，并用 validation、multi-window ensemble 与 residual proxy pass rate 加权 `forwardSignal`；尚未把 full formula 的 `S_breadth` 反向写入 raw score。 |
+| 市场宽度确认 | 已补齐当前范围：顶层 `breadthConfirmation` 基于 6 个市场/ETF 代理统计 raw risk、forward risk、CLIP lock 和加权风险宽度。 |
+| 逐市场回测 | 已覆盖当前范围：每个可用指数有 own-market 5/10/15/20D forward drawdown audit、threshold grid 和 alert cluster test。 |
+| 数据源与复权 | 部分覆盖：使用 Nasdaq daily rows，失败时 Stooq fallback；当前 ETF/指数代理不等同于 CRSP/HKEX/TWSE/KRX 研究级复权个股数据。 |
+| 全市场个股池 | 未覆盖：CRSP/Russell 3000、KRX/TWSE/TPEX/HKEX 成分与高成交额个股扫描仍是后续工程。 |
+| 多优化器 | 未覆盖：当前是确定性网格 + OLS，不含 differential evolution、LM/BFGS 精修或多 optimizer agreement。 |
+| 微观结构/资金流 | 未覆盖：外资、融资融券、南向、short turnover、options IV 等仍未接入 LPPL 主模型。 |
+
+因此，当前代码库和本文完整方案的差距不是“公式未实现”，而是**从指数级
+风险层扩展到研究级全市场平台**的差距。当前看板已经不再是单资产单窗口
+LPPL；仍未完成的是个股 universe、研究级复权数据、正式统计检验和多优化器。
+
+---
+
 ## 1. 最适合四个市场统一落地的 LPPL 主模型
 
 建议主模型采用对数价格形式：

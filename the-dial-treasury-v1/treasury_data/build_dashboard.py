@@ -422,6 +422,7 @@ GLOBAL_LPPL_INDEX_SPECS: list[dict[str, Any]] = [
 ]
 GLOBAL_LPPL_MIN_OBSERVATIONS = 120
 GLOBAL_LPPL_DEFAULT_WINDOW = 252
+GLOBAL_LPPL_SIGNAL_WINDOWS = (120, 180, GLOBAL_LPPL_DEFAULT_WINDOW, 375, 500, 750)
 GLOBAL_LPPL_HISTORY_STEP = 1
 GLOBAL_LPPL_ALERT_THRESHOLD = 65
 FRED_TREASURY_CURVE_SERIES: dict[str, str] = {
@@ -552,7 +553,7 @@ def annotate_source_status_freshness(
     annotated: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
-        cadence = EXPECTED_SOURCE_CADENCE_DAYS.get(str(item.get("name") or ""))
+        cadence = expected_source_cadence_days(str(item.get("name") or ""))
         latest_date = parse_source_latest_date(item.get("latest"))
         if cadence is not None:
             item["expectedMaxAgeDays"] = cadence
@@ -568,6 +569,17 @@ def annotate_source_status_freshness(
             item["note"] = f"Latest observation is {item['ageDays']} days old; expected <= {cadence} days."
         annotated.append(item)
     return annotated
+
+
+def expected_source_cadence_days(name: str) -> int | None:
+    configured = EXPECTED_SOURCE_CADENCE_DAYS.get(name)
+    if configured is not None:
+        return configured
+    if name.startswith("Nasdaq ") and name.endswith(" OHLCV"):
+        return 2
+    if name.startswith("Global LPPL ") and name.endswith(" OHLCV"):
+        return 2
+    return None
 
 
 def build_live_dashboard() -> dict[str, Any]:
@@ -3383,12 +3395,14 @@ def build_global_lppl_risk_index(
     index_rows = apply_global_lppl_index_validation(index_rows, index_validation)
     per_index_backtests = build_global_lppl_per_index_backtests(per_index_history, bars_by_symbol)
     index_rows = attach_global_lppl_per_index_payloads(index_rows, per_index_history, per_index_backtests)
+    index_rows = attach_global_lppl_tc_aggregations(index_rows)
     index_rows = attach_global_lppl_forward_signals(index_rows)
     available_rows = [row for row in index_rows if row.get("available") and optional_float(row.get("score")) is not None]
     if not available_rows:
         return unavailable_global_lppl_risk(index_rows, "全球LPPL逐市场评估需要至少一个可回放指数样本; 当前公开日线源不足。")
 
     latest_date = latest_global_lppl_date(available_rows)
+    breadth_confirmation = build_global_lppl_breadth_confirmation(index_rows)
     return global_lppl_payload(
         latest_date=latest_date,
         available_rows=available_rows,
@@ -3396,6 +3410,7 @@ def build_global_lppl_risk_index(
         index_validation=index_validation,
         per_index_history=per_index_history,
         per_index_backtests=per_index_backtests,
+        breadth_confirmation=breadth_confirmation,
     )
 
 
@@ -3453,12 +3468,20 @@ def global_lppl_summary(available_rows: list[dict[str, Any]], index_rows: list[d
     forward_count = sum(1 for score, _symbol in forward_rows if score >= GLOBAL_LPPL_ALERT_THRESHOLD)
     forward_leaders = sorted(forward_rows, reverse=True)[:3]
     forward_text = ", ".join(f"{symbol} {score:.0f}" for score, symbol in forward_leaders if symbol)
+    breadth = build_global_lppl_breadth_confirmation(index_rows)
+    breadth_text = (
+        f" 市场宽度{breadth.get('riskCount')}/{breadth.get('sampleSize')}个风险, "
+        f"加权{breadth.get('weightedRiskSharePct')}%。"
+        if breadth.get("available")
+        else ""
+    )
     return (
         f"LPPL逐市场独立评估; "
         f"{high_risk_count}/{len(available_rows)}个可用指数处于风险阈值上方"
         + (f", 当前较高: {leader_text}" if leader_text else "")
         + (f", 最近临界窗口约{nearest}天。" if nearest is not None else "。")
         + (f" 前瞻压力{forward_count}/{len(available_rows)}个市场高于阈值" + (f", 领先: {forward_text}。" if forward_text else "。") if forward_rows else "")
+        + breadth_text
         + f" 不计算混合综合分, 图表和回测按{len(index_rows)}个市场分别展示。"
     )
 
@@ -3471,6 +3494,7 @@ def global_lppl_payload(
     index_validation: dict[str, Any],
     per_index_history: dict[str, Any],
     per_index_backtests: dict[str, Any],
+    breadth_confirmation: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "available": True,
@@ -3484,6 +3508,7 @@ def global_lppl_payload(
         "method": "LPPL grid search over constrained tc/m/omega with linear least-squares fit; each market is scored, charted, and backtested separately.",
         "indices": index_rows,
         "indexValidation": index_validation,
+        "breadthConfirmation": breadth_confirmation,
         "history": {
             "available": False,
             "points": [],
@@ -3506,6 +3531,81 @@ def global_lppl_payload(
     }
 
 
+def build_global_lppl_breadth_confirmation(index_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    available = [
+        row
+        for row in index_rows
+        if isinstance(row, dict) and row.get("available") and optional_float(row.get("score")) is not None
+    ]
+    if not available:
+        return {
+            "available": False,
+            "sampleSize": 0,
+            "riskCount": 0,
+            "riskSharePct": 0.0,
+            "weightedRiskSharePct": 0.0,
+            "forwardRiskCount": 0,
+            "clipLockCount": 0,
+            "regime": "Unavailable",
+            "regimeCn": "不可用",
+            "summary": "LPPL breadth unavailable; no current market rows with scores.",
+        }
+    risk_rows = [
+        row
+        for row in available
+        if (optional_float(row.get("score")) or 0.0) >= GLOBAL_LPPL_ALERT_THRESHOLD
+    ]
+    forward_risk_rows = [
+        row
+        for row in available
+        if isinstance(row.get("forwardSignal"), dict)
+        and (row.get("forwardSignal") or {}).get("available")
+        and (optional_float((row.get("forwardSignal") or {}).get("score")) or 0.0) >= GLOBAL_LPPL_ALERT_THRESHOLD
+    ]
+    clip_lock_count = sum(
+        1
+        for row in available
+        if isinstance(row.get("clipState"), dict) and bool((row.get("clipState") or {}).get("clipLock"))
+    )
+    validated_count = sum(
+        1
+        for row in available
+        if optional_float(row.get("effectiveWeightMultiplier")) is not None
+        and (optional_float(row.get("effectiveWeightMultiplier")) or 0.0) >= 0.75
+    )
+    total_weight = sum(max(0.0, optional_float(row.get("weight")) or 0.0) for row in available)
+    risk_weight = sum(max(0.0, optional_float(row.get("weight")) or 0.0) for row in risk_rows)
+    risk_share = 100 * len(risk_rows) / max(1, len(available))
+    weighted_risk_share = 100 * risk_weight / total_weight if total_weight > 0 else risk_share
+    if weighted_risk_share >= 50 or len(risk_rows) >= 4:
+        regime, regime_cn = "Broad Risk", "宽度风险"
+    elif len(risk_rows) >= 2 or clip_lock_count >= 2:
+        regime, regime_cn = "Clustered Watch", "集群观察"
+    elif len(risk_rows) >= 1 or len(forward_risk_rows) >= 1:
+        regime, regime_cn = "Narrow Watch", "局部观察"
+    else:
+        regime, regime_cn = "Quiet", "宽度平静"
+    leaders = ", ".join(str(row.get("symbol") or "") for row in risk_rows[:3] if row.get("symbol"))
+    return {
+        "available": True,
+        "sampleSize": len(available),
+        "riskCount": len(risk_rows),
+        "riskSharePct": round(risk_share, 1),
+        "weightedRiskSharePct": round(weighted_risk_share, 1),
+        "forwardRiskCount": len(forward_risk_rows),
+        "clipLockCount": clip_lock_count,
+        "validatedCount": validated_count,
+        "regime": regime,
+        "regimeCn": regime_cn,
+        "leaders": [str(row.get("symbol") or "") for row in risk_rows[:3] if row.get("symbol")],
+        "summary": (
+            f"LPPL breadth {len(risk_rows)}/{len(available)} markets above raw threshold"
+            f"{f' ({leaders})' if leaders else ''}; weighted breadth {weighted_risk_share:.1f}%, "
+            f"forward risk {len(forward_risk_rows)}, CLIP locks {clip_lock_count}."
+        ),
+    }
+
+
 def unavailable_global_lppl_risk(index_rows: list[dict[str, Any]], reason: str) -> dict[str, Any]:
     return {
         "available": False,
@@ -3519,6 +3619,18 @@ def unavailable_global_lppl_risk(index_rows: list[dict[str, Any]], reason: str) 
         "method": "LPPL grid search over constrained tc/m/omega with linear least-squares fit.",
         "indices": index_rows,
         "indexValidation": {"available": False, "rows": [], "summary": reason},
+        "breadthConfirmation": {
+            "available": False,
+            "sampleSize": 0,
+            "riskCount": 0,
+            "riskSharePct": 0.0,
+            "weightedRiskSharePct": 0.0,
+            "forwardRiskCount": 0,
+            "clipLockCount": 0,
+            "regime": "Unavailable",
+            "regimeCn": "不可用",
+            "summary": reason,
+        },
         "history": {"available": False, "points": [], "summary": "Top-level aggregate LPPL history is disabled; use per-index histories."},
         "backtest": {"available": False, "sampleSize": 0, "threshold": GLOBAL_LPPL_ALERT_THRESHOLD, "horizonTests": [], "summary": "Top-level aggregate LPPL backtest is disabled; use per-index backtests."},
         "perIndexHistory": {},
@@ -3604,6 +3716,7 @@ def global_lppl_index_row(
         "passesLpplCoreDiagnostics": bool(fit.get("passesLpplCoreDiagnostics")),
         "passesLpplDiagnostics": bool(fit.get("passesLpplDiagnostics")),
         "residualDiagnostics": fit.get("residualDiagnostics"),
+        "fitEnsemble": fit.get("fitEnsemble"),
         "windowDays": int(fit["windowDays"]),
         "windowDaysRange": fit.get("windowDaysRange"),
         "selectionBasis": str(fit.get("selectionBasis") or "fit_quality"),
@@ -3628,17 +3741,19 @@ def fit_global_lppl_signal(bars: list[MarketDailyBar], *, fast: bool = False) ->
     windows = (
         [min(GLOBAL_LPPL_DEFAULT_WINDOW, len(clean))]
         if fast
-        else [window for window in (180, GLOBAL_LPPL_DEFAULT_WINDOW, 378) if len(clean) >= min(window, GLOBAL_LPPL_MIN_OBSERVATIONS)]
+        else [window for window in GLOBAL_LPPL_SIGNAL_WINDOWS if len(clean) >= window]
     )
     fits = []
     for window in windows:
-        sample = clean[-min(window, len(clean)):]
+        sample = clean[-window:]
         fit = fit_lppl_window(sample, fast=fast)
         if fit.get("available"):
             fits.append(fit)
     if not fits:
         return {"available": False, "reason": "bounded LPPL fit did not converge"}
-    return select_lppl_fit_candidate(fits)
+    selected = select_lppl_fit_candidate(fits)
+    selected["fitEnsemble"] = build_lppl_fit_ensemble(fits, total_fit_count=len(windows), attempted_windows=windows)
+    return selected
 
 
 def select_lppl_fit_candidate(fits: list[dict[str, Any]]) -> dict[str, Any]:
@@ -3649,6 +3764,8 @@ def select_lppl_fit_candidate(fits: list[dict[str, Any]]) -> dict[str, Any]:
         max(
             available,
             key=lambda item: (
+                bool(item.get("passesLpplCoreDiagnostics")),
+                bool(item.get("passesLpplDiagnostics")),
                 float(item.get("fitR2") or 0.0),
                 -(float(item.get("fitSse") or 0.0)),
                 float(item.get("confidence") or 0.0),
@@ -3674,6 +3791,73 @@ def select_lppl_fit_candidate(fits: list[dict[str, Any]]) -> dict[str, Any]:
         best["windowDaysRange"] = {"min": min(window_values), "max": max(window_values), "values": window_values}
     best["selectionBasis"] = "fit_quality"
     return best
+
+
+def build_lppl_fit_ensemble(
+    fits: list[dict[str, Any]],
+    *,
+    total_fit_count: int,
+    attempted_windows: list[int],
+) -> dict[str, Any]:
+    available = [fit for fit in fits if fit.get("available")]
+    valid_fit_count = len(available)
+    if not available:
+        return {
+            "available": False,
+            "totalFitCount": total_fit_count,
+            "validFitCount": 0,
+            "validFitRatioPct": 0.0,
+            "residualPassRatioPct": 0.0,
+            "windowDays": attempted_windows,
+            "windowAgreement": "unavailable",
+            "optimizerAgreement": "not-modeled",
+            "summary": "LPPL ensemble produced no valid fits.",
+        }
+    lead_days = sorted(
+        int(days)
+        for fit in available
+        for days in [optional_float(fit.get("daysToCritical"))]
+        if days is not None
+    )
+    window_days = sorted(
+        int(window)
+        for fit in available
+        for window in [optional_float(fit.get("windowDays"))]
+        if window is not None
+    )
+    q20 = int(round(lppl_percentile(lead_days, 0.20))) if lead_days else None
+    q50 = int(round(lppl_percentile(lead_days, 0.50))) if lead_days else None
+    q80 = int(round(lppl_percentile(lead_days, 0.80))) if lead_days else None
+    tc_window_days = (q80 - q20) if q20 is not None and q80 is not None else None
+    residual_pass_count = sum(1 for fit in available if fit.get("passesLpplDiagnostics") is True)
+    residual_pass_ratio = 100 * residual_pass_count / max(1, valid_fit_count)
+    if tc_window_days is None:
+        agreement = "unavailable"
+    elif tc_window_days <= 30:
+        agreement = "tight"
+    elif tc_window_days <= 75:
+        agreement = "moderate"
+    else:
+        agreement = "scattered"
+    return {
+        "available": True,
+        "totalFitCount": int(total_fit_count),
+        "validFitCount": int(valid_fit_count),
+        "validFitRatioPct": round(100 * valid_fit_count / max(1, total_fit_count), 1),
+        "residualPassRatioPct": round(residual_pass_ratio, 1),
+        "windowDays": window_days,
+        "attemptedWindowDays": list(attempted_windows),
+        "tcLeadDaysQ20": q20,
+        "tcLeadDaysMedian": q50,
+        "tcLeadDaysQ80": q80,
+        "tcWindowDays": tc_window_days,
+        "windowAgreement": agreement,
+        "optimizerAgreement": "not-modeled",
+        "summary": (
+            f"{valid_fit_count}/{total_fit_count} LPPL windows valid; "
+            f"tc lead 20/50/80% = {q20}/{q50}/{q80}D; residual pass {residual_pass_ratio:.0f}%."
+        ),
+    }
 
 
 def fit_lppl_window(sample: list[MarketDailyBar], *, fast: bool = False) -> dict[str, Any]:
@@ -3809,6 +3993,11 @@ def lppl_residual_diagnostics(residuals: list[float]) -> dict[str, Any]:
         return {
             "available": True,
             "meanReverting": True,
+            "adfProxyPass": True,
+            "kpssProxyPass": True,
+            "ljungBoxProxyPass": True,
+            "passRatioPct": 100.0,
+            "method": "low-variance residual proxy for ADF/KPSS/Ljung-Box checks",
             "lag1Autocorrelation": 0.0,
             "residualStd": round(residual_std, 6),
             "lowResidualVariance": True,
@@ -3818,10 +4007,19 @@ def lppl_residual_diagnostics(residuals: list[float]) -> dict[str, Any]:
     lag1 = lag_num / lag_den if lag_den > 1e-12 else 0.0
     sign_changes = sum(1 for index in range(1, len(centered)) if centered[index - 1] * centered[index] < 0)
     sign_change_ratio = sign_changes / max(1, len(centered) - 1)
-    mean_reverting = abs(lag1) < 0.98 and sign_change_ratio >= 0.03
+    adf_proxy_pass = abs(lag1) < 0.98 and sign_change_ratio >= 0.03
+    kpss_proxy_pass = abs(lag1) < 0.95 or residual_std <= 0.01
+    ljung_box_proxy_pass = abs(lag1) < 0.90
+    pass_ratio = 100 * sum((adf_proxy_pass, kpss_proxy_pass, ljung_box_proxy_pass)) / 3
+    mean_reverting = adf_proxy_pass and kpss_proxy_pass
     return {
         "available": True,
         "meanReverting": mean_reverting,
+        "adfProxyPass": adf_proxy_pass,
+        "kpssProxyPass": kpss_proxy_pass,
+        "ljungBoxProxyPass": ljung_box_proxy_pass,
+        "passRatioPct": round(pass_ratio, 1),
+        "method": "lag-1 autocorrelation and sign-change proxy for ADF/KPSS/Ljung-Box checks",
         "lag1Autocorrelation": round(lag1, 4),
         "residualStd": round(residual_std, 6),
         "signChangeRatio": round(sign_change_ratio, 4),
@@ -4062,6 +4260,63 @@ def attach_global_lppl_per_index_payloads(
     return enriched_rows
 
 
+def attach_global_lppl_tc_aggregations(index_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    enriched_rows: list[dict[str, Any]] = []
+    for row in index_rows:
+        enriched = dict(row)
+        enriched["tcAggregation"] = build_global_lppl_tc_aggregation(enriched)
+        enriched_rows.append(enriched)
+    return enriched_rows
+
+
+def build_global_lppl_tc_aggregation(row: dict[str, Any]) -> dict[str, Any]:
+    symbol = str(row.get("symbol") or "").upper()
+    ensemble = row.get("fitEnsemble") if isinstance(row.get("fitEnsemble"), dict) else {}
+    as_of_raw = row.get("asOf")
+    try:
+        as_of_date = date.fromisoformat(str(as_of_raw))
+    except (TypeError, ValueError):
+        as_of_date = None
+    if not ensemble.get("available") or as_of_date is None:
+        return {
+            "available": False,
+            "symbol": symbol,
+            "summary": "LPPL tc aggregation unavailable; fit ensemble or asOf date missing.",
+        }
+
+    def lead_date(key: str) -> str | None:
+        lead = optional_float(ensemble.get(key))
+        if lead is None:
+            return None
+        return (as_of_date + timedelta(days=int(round(lead)))).isoformat()
+
+    q20 = lead_date("tcLeadDaysQ20")
+    median = lead_date("tcLeadDaysMedian")
+    q80 = lead_date("tcLeadDaysQ80")
+    return {
+        "available": True,
+        "symbol": symbol,
+        "tcQ20": q20,
+        "tcMedian": median,
+        "tcQ80": q80,
+        "tcLeadDaysQ20": ensemble.get("tcLeadDaysQ20"),
+        "tcLeadDaysMedian": ensemble.get("tcLeadDaysMedian"),
+        "tcLeadDaysQ80": ensemble.get("tcLeadDaysQ80"),
+        "tcWindowDays": ensemble.get("tcWindowDays"),
+        "validFitCount": ensemble.get("validFitCount"),
+        "totalFitCount": ensemble.get("totalFitCount"),
+        "validFitRatioPct": ensemble.get("validFitRatioPct"),
+        "residualPassRatioPct": ensemble.get("residualPassRatioPct"),
+        "windowDays": ensemble.get("windowDays", []),
+        "windowAgreement": ensemble.get("windowAgreement") or "",
+        "optimizerAgreement": ensemble.get("optimizerAgreement") or "",
+        "summary": (
+            f"{symbol} tc aggregation {q20 or '--'} / {median or '--'} / {q80 or '--'}; "
+            f"{ensemble.get('validFitCount')}/{ensemble.get('totalFitCount')} windows valid."
+        ),
+    }
+
+
 def attach_global_lppl_forward_signals(index_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     enriched_rows: list[dict[str, Any]] = []
     for row in index_rows:
@@ -4069,6 +4324,37 @@ def attach_global_lppl_forward_signals(index_rows: list[dict[str, Any]]) -> list
         enriched["forwardSignal"] = build_global_lppl_forward_signal(enriched)
         enriched_rows.append(enriched)
     return enriched_rows
+
+
+def global_lppl_ensemble_multiplier(row: dict[str, Any]) -> float:
+    ensemble = row.get("fitEnsemble") if isinstance(row.get("fitEnsemble"), dict) else {}
+    if not ensemble or ensemble.get("available") is not True:
+        return 1.0
+    valid_ratio = optional_float(ensemble.get("validFitRatioPct"))
+    residual_ratio = optional_float(ensemble.get("residualPassRatioPct"))
+    valid_ratio = 1.0 if valid_ratio is None else max(0.0, min(1.0, valid_ratio / 100.0))
+    residual_ratio = 1.0 if residual_ratio is None else max(0.0, min(1.0, residual_ratio / 100.0))
+    agreement = str(ensemble.get("windowAgreement") or "").lower()
+    agreement_multiplier = {
+        "tight": 1.0,
+        "moderate": 0.90,
+        "scattered": 0.65,
+        "unavailable": 0.80,
+    }.get(agreement, 0.85)
+    tc_window_days = optional_float(ensemble.get("tcWindowDays"))
+    if tc_window_days is None:
+        tc_multiplier = 1.0
+    elif tc_window_days > 120:
+        tc_multiplier = 0.75
+    elif tc_window_days > 75:
+        tc_multiplier = 0.85
+    elif tc_window_days > 45:
+        tc_multiplier = 0.93
+    else:
+        tc_multiplier = 1.0
+    valid_multiplier = 0.70 + 0.30 * valid_ratio
+    residual_multiplier = 0.60 + 0.40 * residual_ratio
+    return round(max(0.45, min(1.0, agreement_multiplier, tc_multiplier, valid_multiplier, residual_multiplier)), 3)
 
 
 def build_global_lppl_forward_signal(row: dict[str, Any]) -> dict[str, Any]:
@@ -4096,6 +4382,7 @@ def build_global_lppl_forward_signal(row: dict[str, Any]) -> dict[str, Any]:
     if validation_multiplier is None:
         validation_multiplier = optional_float(row.get("effectiveWeightMultiplier"))
     validation_multiplier = max(0.0, min(1.0, validation_multiplier if validation_multiplier is not None else 0.75))
+    ensemble_multiplier = global_lppl_ensemble_multiplier(row)
     threshold_pressure = risk_linear(threshold_distance, -15.0, 10.0)
     momentum_pressure = risk_linear(score_momentum_20d if score_momentum_20d is not None else 0.0, -8.0, 12.0)
     critical_pressure = risk_linear(180.0 - days_to_critical, 0.0, 140.0) if days_to_critical is not None else 50.0
@@ -4109,7 +4396,12 @@ def build_global_lppl_forward_signal(row: dict[str, Any]) -> dict[str, Any]:
         raw_score = min(100.0, raw_score + 8.0)
     elif isinstance(clip_state, dict) and clip_state.get("status") == "converging":
         raw_score = min(100.0, raw_score + 3.0)
-    forward_score = bounded_score(raw_score * (0.65 + 0.35 * validation_multiplier) * (0.75 + 0.25 * confidence))
+    forward_score = bounded_score(
+        raw_score
+        * (0.65 + 0.35 * validation_multiplier)
+        * (0.75 + 0.25 * confidence)
+        * ensemble_multiplier
+    )
     drivers: list[str] = []
     if threshold_distance >= 0:
         drivers.append("above_threshold")
@@ -4125,6 +4417,8 @@ def build_global_lppl_forward_signal(row: dict[str, Any]) -> dict[str, Any]:
         drivers.append("clip_lock")
     if validation_multiplier < 0.75:
         drivers.append("weak_validation")
+    if ensemble_multiplier < 0.85:
+        drivers.append("weak_ensemble")
     regime, regime_cn = global_lppl_forward_regime(forward_score, score_momentum_20d)
     return {
         "available": True,
@@ -4140,8 +4434,9 @@ def build_global_lppl_forward_signal(row: dict[str, Any]) -> dict[str, Any]:
         "clipLock": clip_lock,
         "clipStatus": str(clip_state.get("status") or "") if isinstance(clip_state, dict) else "",
         "validationMultiplier": round(validation_multiplier, 2),
+        "ensembleMultiplier": round(ensemble_multiplier, 2),
         "drivers": drivers,
-        "summary": global_lppl_forward_summary(symbol, forward_score, regime_cn, score_momentum_20d, threshold_distance, validation_multiplier),
+        "summary": global_lppl_forward_summary(symbol, forward_score, regime_cn, score_momentum_20d, threshold_distance, validation_multiplier, ensemble_multiplier),
     }
 
 
@@ -4177,11 +4472,13 @@ def global_lppl_forward_summary(
     score_momentum_20d: float | None,
     threshold_distance: float,
     validation_multiplier: float,
+    ensemble_multiplier: float,
 ) -> str:
     momentum_text = "20D动量不足" if score_momentum_20d is None else f"20D动量{score_momentum_20d:+.1f}"
     threshold_text = f"距阈值{threshold_distance:+.1f}"
     validation_text = f"验证权重x{validation_multiplier:.2f}"
-    return f"{symbol} LPPL前瞻压力{score:.1f} ({regime_cn}); {momentum_text}, {threshold_text}, {validation_text}."
+    ensemble_text = f"窗口一致性x{ensemble_multiplier:.2f}"
+    return f"{symbol} LPPL前瞻压力{score:.1f} ({regime_cn}); {momentum_text}, {threshold_text}, {validation_text}, {ensemble_text}."
 
 
 def apply_global_lppl_index_validation(

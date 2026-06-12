@@ -2323,6 +2323,7 @@ function renderGlobalLpplRisk(payload) {
       </div>
     </div>
     <p class="global-lppl-summary">${escapeHtml(item.summary || "")}</p>
+    ${renderGlobalLpplBreadthConfirmation(item.breadthConfirmation)}
     ${indexValidation.summary ? `<p class="global-lppl-validation-summary">${escapeHtml(indexValidation.summary)}</p>` : ""}
     ${renderGlobalLpplPerIndexBacktestStrip(item)}
     ${renderGlobalLpplIndexGrid(indices)}
@@ -2364,6 +2365,24 @@ function globalLpplForwardSignal(row) {
   return row?.forwardSignal && typeof row.forwardSignal === "object" && row.forwardSignal.available ? row.forwardSignal : null;
 }
 
+function renderGlobalLpplBreadthConfirmation(breadth) {
+  if (!breadth || typeof breadth !== "object" || !breadth.available) return "";
+  return `
+    <div class="global-lppl-backtest breadth">
+      <span>
+        <b>市场宽度</b>
+        <strong>${Number(breadth.riskCount) || 0}/${Number(breadth.sampleSize) || 0}</strong>
+        <small>${escapeHtml(breadth.regimeCn || breadth.regime || "--")} · weighted ${formatPercentMetric(breadth.weightedRiskSharePct)}</small>
+      </span>
+      <span>
+        <b>前瞻/CLIP</b>
+        <strong>${Number(breadth.forwardRiskCount) || 0}/${Number(breadth.clipLockCount) || 0}</strong>
+        <small>${escapeHtml(breadth.summary || "")}</small>
+      </span>
+    </div>
+  `;
+}
+
 function globalLpplClipState(row, history = null) {
   if (row?.clipState && typeof row.clipState === "object" && row.clipState.available) return row.clipState;
   if (history?.clipState && typeof history.clipState === "object" && history.clipState.available) return history.clipState;
@@ -2387,6 +2406,20 @@ function globalLpplPointCriticalSummary(point) {
   if (!point?.criticalDate) return "";
   const days = Number(point.daysToCritical);
   return `critical ${point.criticalDate}${Number.isFinite(days) ? ` · ${days.toFixed(0)}D` : ""}`;
+}
+
+function globalLpplTcAggregationSummary(row) {
+  const tc = row?.tcAggregation && typeof row.tcAggregation === "object" && row.tcAggregation.available ? row.tcAggregation : null;
+  if (!tc) return "";
+  const valid = Number(tc.validFitCount);
+  const total = Number(tc.totalFitCount);
+  const residual = Number(tc.residualPassRatioPct);
+  return [
+    `tc ${tc.tcMedian || "--"}`,
+    Number.isFinite(valid) && Number.isFinite(total) ? `${valid}/${total} windows` : "",
+    Number.isFinite(residual) ? `resid ${residual.toFixed(0)}%` : "",
+    tc.windowAgreement ? `agree ${tc.windowAgreement}` : "",
+  ].filter(Boolean).join(" · ");
 }
 
 function renderGlobalLpplPerIndexBacktestStrip(item) {
@@ -2420,6 +2453,7 @@ function renderGlobalLpplIndexGrid(indices) {
         const validation = row.validation && typeof row.validation === "object" ? row.validation : {};
         const forwardSignal = globalLpplForwardSignal(row);
         const clipText = globalLpplClipSummary(globalLpplClipState(row));
+        const tcText = globalLpplTcAggregationSummary(row);
         const riskClass = row.available ? spyWarningClass(score) : "neutral";
         const validationText = row.available && validation.symbol
           ? `15D验证 ${formatPercentMetric(validation.precision15d)} · ${escapeHtml(validation.validationRoleCn || validation.validationRole || "")}`
@@ -2433,6 +2467,7 @@ function renderGlobalLpplIndexGrid(indices) {
             <strong>${row.available && Number.isFinite(score) ? score.toFixed(0) : "--"}</strong>
             <b>${escapeHtml(row.statusCn || row.status || "--")}</b>
             <small>${row.available ? `criticalDate ${escapeHtml(row.criticalDate || "--")} · ${Number(row.daysToCritical) || "--"}D · fitR2 ${formatNumberMetric(row.fitR2, 2)} · conf ${formatPercentMetric(confidence * 100)}` : escapeHtml(row.reason || "source unavailable")}</small>
+            ${tcText ? `<small>${escapeHtml(tcText)}</small>` : ""}
             ${forwardText ? `<small>${forwardText}</small>` : ""}
             ${clipText ? `<small class="global-lppl-clip-note">${escapeHtml(clipText)}</small>` : ""}
             ${validationText ? `<small>${validationText}</small>` : ""}

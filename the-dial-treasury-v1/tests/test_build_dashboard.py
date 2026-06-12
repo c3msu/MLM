@@ -2274,6 +2274,41 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(selected["daysToCriticalRange"]["max"], 60)
         self.assertEqual(selected["selectionBasis"], "fit_quality")
 
+    def test_lppl_signal_reports_documented_multi_window_ensemble(self):
+        bars = self.make_equity_bars_from_closes(
+            "SPY",
+            [100 + index * 0.22 for index in range(780)],
+        )
+        windows: list[int] = []
+
+        def fake_fit_lppl_window(sample, *, fast=False):
+            window = len(sample)
+            windows.append(window)
+            return {
+                "available": True,
+                "score": 60.0 + len(windows),
+                "confidence": 0.55 + len(windows) * 0.01,
+                "fitR2": 0.80 + len(windows) * 0.01,
+                "fitSse": 10.0 - len(windows),
+                "daysToCritical": 20 + len(windows) * 10,
+                "windowDays": window,
+                "passesLpplDiagnostics": len(windows) <= 4,
+            }
+
+        with patch.object(dashboard_builder, "fit_lppl_window", side_effect=fake_fit_lppl_window):
+            fit = dashboard_builder.fit_global_lppl_signal(bars)
+
+        self.assertEqual(windows, [120, 180, 252, 375, 500, 750])
+        ensemble = fit["fitEnsemble"]
+        self.assertEqual(ensemble["totalFitCount"], 6)
+        self.assertEqual(ensemble["validFitCount"], 6)
+        self.assertEqual(ensemble["windowDays"], [120, 180, 252, 375, 500, 750])
+        self.assertEqual(ensemble["tcLeadDaysQ20"], 40)
+        self.assertEqual(ensemble["tcLeadDaysMedian"], 55)
+        self.assertEqual(ensemble["tcLeadDaysQ80"], 70)
+        self.assertEqual(ensemble["residualPassRatioPct"], 66.7)
+        self.assertIn(ensemble["windowAgreement"], {"tight", "moderate", "scattered"})
+
     def test_lppl_window_reports_power_law_improvement_and_oscillation_count(self):
         n = dashboard_builder.GLOBAL_LPPL_DEFAULT_WINDOW
         tc = n - 1 + 60
@@ -2297,7 +2332,104 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertLessEqual(fit["oscillationCount"], 10.0)
         self.assertTrue(fit["passesLpplDiagnostics"])
         self.assertEqual(fit["residualDiagnostics"]["meanReverting"], True)
+        self.assertIn("adfProxyPass", fit["residualDiagnostics"])
+        self.assertIn("kpssProxyPass", fit["residualDiagnostics"])
+        self.assertIn("ljungBoxProxyPass", fit["residualDiagnostics"])
         self.assertIn("power-law", fit["reason"])
+
+    def test_global_lppl_risk_exposes_tc_aggregation_and_breadth_confirmation(self):
+        def fake_global_lppl_index_row(spec, source_bars, *, as_of=None, fast=False):
+            symbol = str(spec.get("symbol") or "").upper()
+            score = 72.0 if symbol in {"SPY", "QQQ"} else 52.0
+            return {
+                "available": True,
+                "symbol": symbol,
+                "name": symbol,
+                "region": "test",
+                "score": score,
+                "confidence": 0.72,
+                "status": "risk" if score >= 65 else "watch",
+                "statusCn": "风险" if score >= 65 else "观察",
+                "criticalDate": "2026-08-15",
+                "asOf": "2026-06-02",
+                "daysToCritical": 60,
+                "fitR2": 0.91,
+                "lpplImprovementPct": 12.0,
+                "oscillationCount": 2.6,
+                "passesLpplCoreDiagnostics": True,
+                "passesLpplDiagnostics": True,
+                "residualDiagnostics": {
+                    "available": True,
+                    "meanReverting": True,
+                    "adfProxyPass": True,
+                    "kpssProxyPass": True,
+                    "ljungBoxProxyPass": True,
+                },
+                "windowDays": 252,
+                "fitEnsemble": {
+                    "available": True,
+                    "totalFitCount": 6,
+                    "validFitCount": 6,
+                    "validFitRatioPct": 100.0,
+                    "residualPassRatioPct": 100.0,
+                    "windowDays": [120, 180, 252, 375, 500, 750],
+                    "tcLeadDaysQ20": 40,
+                    "tcLeadDaysMedian": 60,
+                    "tcLeadDaysQ80": 80,
+                    "tcWindowDays": 40,
+                    "windowAgreement": "moderate",
+                    "optimizerAgreement": "not-modeled",
+                    "summary": "test ensemble",
+                },
+                "observations": len(source_bars),
+                "source": "unit-test",
+                "sourceSymbol": symbol,
+                "sourceQuality": "high",
+                "reason": "test fit",
+            }
+
+        def fake_history(index_row, bars):
+            symbol = str(index_row.get("symbol") or "").upper()
+            return {
+                "available": True,
+                "symbol": symbol,
+                "points": [
+                    {"date": "2026-06-01", "score": 62, "close": 100, "indexedClose": 100, "criticalDate": "2026-08-10", "daysToCritical": 70, "passesLpplCoreDiagnostics": True},
+                    {"date": "2026-06-02", "score": 66, "close": 101, "indexedClose": 101, "criticalDate": "2026-08-15", "daysToCritical": 74, "passesLpplCoreDiagnostics": True},
+                ],
+                "clipState": {"available": True, "clipLock": True, "status": "locked"},
+            }
+
+        def fake_backtest(points, bars, *, symbol, threshold=65):
+            return {
+                "available": True,
+                "sampleSize": 30,
+                "threshold": threshold,
+                "horizonTests": [{"horizon": h, "alertDays": 3, "truePositives": 2, "falsePositives": 1} for h in (5, 10, 15, 20)],
+                "calibrationGrid": [{"threshold": t, "horizon": 15, "alertDays": 3, "truePositives": 2, "falsePositives": 1} for t in (60, 65, 70)],
+                "recommendedThreshold": {"threshold": threshold},
+                "alertClusterTest": {"clusterCount": 1, "hitClusters": 1, "falseClusters": 0, "maxFalseClusterDays": 0},
+            }
+
+        market_bars = {
+            symbol: self.make_equity_bars_from_closes(symbol, [100 + index for index in range(140)])
+            for symbol in ("SPY", "QQQ", "KOSPI", "HSI", "TWII", "NIKKEI")
+        }
+        with patch.object(dashboard_builder, "global_lppl_index_row", side_effect=fake_global_lppl_index_row), patch.object(
+            dashboard_builder,
+            "build_global_lppl_single_index_history",
+            side_effect=fake_history,
+        ), patch.object(dashboard_builder, "build_global_lppl_backtest", side_effect=fake_backtest):
+            risk = dashboard_builder.build_global_lppl_risk_index(market_bars=market_bars)
+
+        self.assertTrue(risk["breadthConfirmation"]["available"])
+        self.assertEqual(risk["breadthConfirmation"]["riskCount"], 2)
+        self.assertEqual(risk["breadthConfirmation"]["sampleSize"], 6)
+        self.assertGreater(risk["breadthConfirmation"]["riskSharePct"], 30)
+        self.assertIn("breadth", risk["breadthConfirmation"]["summary"])
+        qqq = next(row for row in risk["indices"] if row["symbol"] == "QQQ")
+        self.assertEqual(qqq["tcAggregation"]["tcMedian"], "2026-08-01")
+        self.assertEqual(qqq["tcAggregation"]["validFitCount"], 6)
 
     def test_lppl_signal_downgrades_random_walk_without_diagnostics(self):
         close = 100.0
@@ -2520,6 +2652,40 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(signal["regime"], "Fading")
         self.assertLess(signal["scoreMomentum20d"], -10)
         self.assertIn("weak_validation", signal["drivers"])
+
+    def test_global_lppl_forward_signal_penalizes_scattered_ensemble(self):
+        history = {
+            "available": True,
+            "points": [
+                {"date": f"2026-05-{day:02d}", "score": 58.0 + day * 0.6}
+                for day in range(1, 22)
+            ],
+        }
+        row = {
+            "symbol": "SPY",
+            "available": True,
+            "score": 82.0,
+            "confidence": 0.80,
+            "daysToCritical": 45,
+            "effectiveWeightMultiplier": 1.0,
+            "validation": {"effectiveWeightMultiplier": 1.0},
+            "history": history,
+            "backtest": {"threshold": 65},
+            "fitEnsemble": {
+                "available": True,
+                "validFitRatioPct": 100.0,
+                "residualPassRatioPct": 33.3,
+                "windowAgreement": "scattered",
+                "tcWindowDays": 145,
+            },
+        }
+
+        signal = dashboard_builder.build_global_lppl_forward_signal(row)
+
+        self.assertTrue(signal["available"])
+        self.assertLess(signal["score"], 70)
+        self.assertLess(signal["ensembleMultiplier"], 0.80)
+        self.assertIn("weak_ensemble", signal["drivers"])
 
     def test_equity_backtest_reports_walk_forward_and_lift_against_base_rate(self):
         bars: list[MarketDailyBar] = []

@@ -16,6 +16,7 @@ from scripts.update_data import DEFAULT_OUTPUT, write_dashboard_json  # noqa: E4
 from treasury_data.build_dashboard import (  # noqa: E402
     EQUITY_RISK_SYMBOLS,
     GLOBAL_LPPL_INDEX_SPECS,
+    annotate_source_status_freshness,
     build_equity_short_term_risk_index,
     build_global_lppl_risk_index,
     fetch_daily_bars_with_stooq_fallback,
@@ -87,6 +88,7 @@ def build_updated_dashboard(
     source_status_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     updated = copy.deepcopy(dashboard)
+    generated_at_value = (generated_at or datetime.now(timezone.utc)).replace(microsecond=0)
     risk = build_equity_short_term_risk_index(
         market_bars=market_bars,
         macro_liquidity_equity=dashboard.get("macroLiquidityEquity") if isinstance(dashboard.get("macroLiquidityEquity"), dict) else {},
@@ -95,10 +97,13 @@ def build_updated_dashboard(
     )
     updated["equityShortTermRisk"] = risk
     updated["globalLpplRisk"] = build_global_lppl_risk_index(market_bars=market_bars)
-    updated["generatedAt"] = (generated_at or datetime.now(timezone.utc)).replace(microsecond=0).isoformat()
-    updated["sourceStatus"] = merge_source_status(
-        dashboard.get("sourceStatus", []),
-        source_status_rows or build_source_status_rows(market_bars),
+    updated["generatedAt"] = generated_at_value.isoformat()
+    updated["sourceStatus"] = annotate_source_status_freshness(
+        merge_source_status(
+            dashboard.get("sourceStatus", []),
+            source_status_rows or build_source_status_rows(market_bars),
+        ),
+        as_of=generated_at_value.date(),
     )
     return updated
 

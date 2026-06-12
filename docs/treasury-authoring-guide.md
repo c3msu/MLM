@@ -154,7 +154,23 @@ When changing `globalLpplRisk`:
    `daysToCritical`; `history.clipState` and row-level `clipState` summarize
    whether recent replayed critical dates are scattered, converging, or locked.
    `forwardSignal.drivers` should include `clip_lock` only when the CLIP state
-   is genuinely locked, not merely because the raw LPPL score is high.
+   is genuinely locked, not merely because the raw LPPL score is high. The
+   forward signal also carries `ensembleMultiplier`; scattered tc windows,
+   weak residual proxy pass rates, or a wide tc span should attenuate the
+   forward score and add `weak_ensemble` to the drivers.
+   Each available index row must also expose `fitEnsemble` and
+   `tcAggregation`: the ensemble records the current multi-window fit set
+   (`120/180/252/375/500/750` trading days for daily scoring), residual proxy
+   pass ratio, and window agreement; `tcAggregation` converts the ensemble
+   lead-day percentiles into visible `tcQ20`/`tcMedian`/`tcQ80` dates. Residual
+   diagnostics currently use explicit proxy fields
+   `adfProxyPass`/`kpssProxyPass`/`ljungBoxProxyPass`; do not describe these as
+   formal statistical-test p-values unless a stats package implementation is
+   added.
+   The top-level payload must include `breadthConfirmation`, which summarizes
+   how many available market proxies are above the raw and forward LPPL
+   thresholds and how many have CLIP locks. This is a market-proxy breadth
+   check, not a full individual-stock breadth scan.
 5. Update `scripts/smoke_check.py` and `tests/test_smoke_check.py` whenever the
    LPPL contract changes.
 

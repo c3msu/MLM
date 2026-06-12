@@ -82,9 +82,9 @@ history, and optional daily background updates.
   summary, and separate per-index `history`/`backtest` blocks. The top-level
   LPPL `score` stays `null`; markets are reviewed separately rather than
   combined into one score. Each index also carries a `forwardSignal` that
-  converts the raw LPPL fit into a validation-weighted forward-pressure read
-  using same-day-or-earlier LPPL history momentum, threshold distance, and
-  critical-window timing.
+  converts the raw LPPL fit into a validation- and ensemble-weighted
+  forward-pressure read using same-day-or-earlier LPPL history momentum,
+  threshold distance, critical-window timing, and multi-window tc agreement.
 - Local REST API routes when using `scripts/serve.py`.
 - Daily background update entrypoints through the local Python server or macOS
   LaunchAgent.
@@ -293,7 +293,15 @@ Current real public sources:
   15-trading-day forward drawdown history. The raw `score` remains the current
   LPPL fit score; `forwardSignal.score` is a separate no-look-ahead pressure
   read that blends LPPL score momentum, distance to the recommended threshold,
-  critical-window timing, confidence, and the validation weight. The top-level
+  critical-window timing, confidence, the validation weight, and an
+  `ensembleMultiplier` from tc-window agreement plus residual proxy pass ratio.
+  Each available index row also exposes `fitEnsemble` and `tcAggregation`, so
+  the UI and smoke check can distinguish single-fit noise from multi-window
+  `(tc)` convergence.
+  The top-level `breadthConfirmation` summarizes how many current market
+  proxies are above raw/forward thresholds or have CLIP locks; it is a
+  dashboard proxy breadth check, not a full CRSP/KRX/TWSE/HKEX stock-universe
+  scan. The top-level
   `history`/`backtest` remain unavailable placeholders to prevent an implied
   blended LPPL score. This block is intentionally not included in
   `equityShortTermRisk`.

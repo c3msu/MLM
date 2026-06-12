@@ -151,6 +151,37 @@ class EquityRiskUpdateTests(unittest.TestCase):
         self.assertEqual(spy_status["latest"], "2026-06-10")
         self.assertIn("SPY blocked", spy_status["note"])
 
+    def test_build_updated_dashboard_annotates_equity_source_freshness(self):
+        dashboard = {
+            "asOf": "2026-06-05",
+            "generatedAt": "2026-06-07T09:09:09+00:00",
+            "events": [],
+            "macroLiquidityEquity": {"currentSignal": {"score3mChange": 0.0}},
+            "spyEarlyWarning": {"available": True, "score": 42.0, "regime": "Neutral"},
+            "sourceStatus": [],
+        }
+        market_bars = {
+            symbol: self.make_bars(symbol, start_price=100 + offset * 5, days=180)
+            for offset, symbol in enumerate(EQUITY_RISK_SYMBOLS)
+        }
+        source_status_rows = [
+            {"name": "Nasdaq SPY OHLCV", "status": "ok", "latest": "2026-06-10", "source": "nasdaq"},
+            {"name": "Global LPPL SPY OHLCV", "status": "ok", "latest": "2026-06-10", "source": "nasdaq"},
+        ]
+
+        updated = build_updated_dashboard(
+            dashboard,
+            market_bars,
+            generated_at=datetime(2026, 6, 12, 10, 30, tzinfo=timezone.utc),
+            source_status_rows=source_status_rows,
+        )
+
+        by_name = {row["name"]: row for row in updated["sourceStatus"]}
+        self.assertEqual(by_name["Nasdaq SPY OHLCV"]["expectedMaxAgeDays"], 2)
+        self.assertEqual(by_name["Nasdaq SPY OHLCV"]["ageDays"], 2)
+        self.assertEqual(by_name["Global LPPL SPY OHLCV"]["expectedMaxAgeDays"], 2)
+        self.assertEqual(by_name["Global LPPL SPY OHLCV"]["ageDays"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
