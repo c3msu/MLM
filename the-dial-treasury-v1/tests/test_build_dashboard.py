@@ -2059,14 +2059,17 @@ class DashboardBuilderTests(unittest.TestCase):
             "fetch_debt_limit_status": None,
             "fetch_fed_funds_futures_quote": None,
             "fetch_gold_spot_quote": None,
+            "fetch_cboe_option_open_interest": None,
             "fetch_federal_reserve_press_releases": [],
             "fetch_treasury_press_releases": [],
             "load_content_overrides": {},
+            "fetch_bhadial_public_score": 43.4,
         }
         with ExitStack() as stack:
             for name, return_value in patches.items():
                 stack.enter_context(patch.object(dashboard_builder, name, return_value=return_value))
             stack.enter_context(patch.object(dashboard_builder, "fetch_announced_auctions", side_effect=RuntimeError("HTTP 500")))
+            stack.enter_context(patch.object(dashboard_builder, "fetch_daily_bars_with_stooq_fallback", side_effect=RuntimeError("skip market fetch")))
             stack.enter_context(patch.object(dashboard_builder, "build_dashboard_from_inputs", return_value={"sourceStatus": []}))
 
             dashboard = dashboard_builder.build_live_dashboard()
@@ -2097,6 +2100,7 @@ class DashboardBuilderTests(unittest.TestCase):
             "fetch_debt_limit_status": None,
             "fetch_fed_funds_futures_quote": None,
             "fetch_gold_spot_quote": None,
+            "fetch_cboe_option_open_interest": None,
             "fetch_federal_reserve_press_releases": [],
             "fetch_treasury_press_releases": [],
             "load_content_overrides": {},
@@ -2108,6 +2112,7 @@ class DashboardBuilderTests(unittest.TestCase):
             stack.enter_context(patch.object(dashboard_builder, "fetch_treasury_auctions", side_effect=RuntimeError("curl timeout")))
             stack.enter_context(patch.object(dashboard_builder, "load_historical_auction_fallback", return_value=cached_auctions))
             stack.enter_context(patch.object(dashboard_builder, "fetch_bhadial_public_score", return_value=43.4))
+            stack.enter_context(patch.object(dashboard_builder, "fetch_daily_bars_with_stooq_fallback", side_effect=RuntimeError("skip market fetch")))
             stack.enter_context(patch.object(dashboard_builder, "build_dashboard_from_inputs", side_effect=fake_build_dashboard_from_inputs))
 
             dashboard = dashboard_builder.build_live_dashboard()
@@ -2117,6 +2122,458 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(auction_status["status"], "warning")
         self.assertIn("cached observations", auction_status["latest"])
         self.assertEqual(dashboard["macroLiquidity"]["benchmark"]["score"], 43.4)
+
+    def test_build_live_dashboard_falls_back_to_fred_dgs_curve_when_treasury_xml_fails(self):
+        captured: dict[str, object] = {}
+        dgs_points = {
+            "DGS1MO": 3.60,
+            "DGS3MO": 3.61,
+            "DGS6MO": 3.62,
+            "DGS1": 3.70,
+            "DGS2": 3.82,
+            "DGS3": 3.88,
+            "DGS5": 4.01,
+            "DGS7": 4.14,
+            "DGS10": 4.30,
+            "DGS20": 4.75,
+            "DGS30": 4.82,
+        }
+
+        def fake_fred_bulk(series_ids, **_kwargs):
+            requested = list(series_ids)
+            return {
+                series_id: TimeSeries(series_id, [SeriesPoint(date(2026, 6, 10), value)])
+                for series_id, value in dgs_points.items()
+                if series_id in requested
+            }
+
+        def fake_build_dashboard_from_inputs(**kwargs):
+            captured["curve_records"] = kwargs["curve_records"]
+            return {"sourceStatus": [], "macroLiquidity": {"score": 43.4}}
+
+        patches = {
+            "fetch_treasury_auctions": [],
+            "fetch_announced_auctions": [],
+            "fetch_fomc_calendar_events": [],
+            "fetch_fred_macro_release_events": [],
+            "fetch_bea_release_events": [],
+            "fetch_fomc_projection": None,
+            "fetch_acm_term_premium": None,
+            "fetch_cftc_treasury_positions": [],
+            "fetch_tic_major_holders": None,
+            "fetch_primary_dealer_stats": None,
+            "fetch_quarterly_refunding": None,
+            "fetch_debt_limit_status": None,
+            "fetch_fed_funds_futures_quote": None,
+            "fetch_gold_spot_quote": None,
+            "fetch_cboe_option_open_interest": None,
+            "fetch_federal_reserve_press_releases": [],
+            "fetch_treasury_press_releases": [],
+            "load_content_overrides": {},
+            "fetch_bhadial_public_score": 43.4,
+        }
+        with ExitStack() as stack:
+            for name, return_value in patches.items():
+                stack.enter_context(patch.object(dashboard_builder, name, return_value=return_value))
+            stack.enter_context(patch.object(dashboard_builder, "fetch_treasury_yield_curves", side_effect=RuntimeError("Treasury XML timeout")))
+            stack.enter_context(patch.object(dashboard_builder, "fetch_fred_series_bulk", side_effect=fake_fred_bulk))
+            stack.enter_context(patch.object(dashboard_builder, "fetch_nasdaq_daily_bars", side_effect=RuntimeError("skip market fetch")))
+            stack.enter_context(patch.object(dashboard_builder, "fetch_stooq_daily_bars", side_effect=RuntimeError("skip fallback")))
+            stack.enter_context(patch.object(dashboard_builder, "build_dashboard_from_inputs", side_effect=fake_build_dashboard_from_inputs))
+
+            dashboard = dashboard_builder.build_live_dashboard()
+
+        curve_records = captured["curve_records"]
+        self.assertEqual(len(curve_records), 1)
+        self.assertEqual(curve_records[0].date, date(2026, 6, 10))
+        self.assertEqual(curve_records[0].values["10Y"], 4.30)
+        curve_status = next(item for item in dashboard["sourceStatus"] if item["name"] == "U.S. Treasury yield curve XML")
+        self.assertEqual(curve_status["status"], "warning")
+        self.assertIn("FRED DGS fallback", curve_status["latest"])
+
+    def test_build_live_dashboard_falls_back_to_stooq_when_nasdaq_daily_bars_fail(self):
+        captured: dict[str, object] = {}
+
+        def fake_stooq(symbol: str, *, start: date, end: date, timeout: int = 14):
+            return [
+                MarketDailyBar(symbol=symbol.upper(), date=date(2026, 6, 9), open=100.0, high=101.0, low=99.0, close=100.5, volume=10_000, source=f"stooq:{symbol}"),
+                MarketDailyBar(symbol=symbol.upper(), date=date(2026, 6, 10), open=100.5, high=102.0, low=100.0, close=101.5, volume=12_000, source=f"stooq:{symbol}"),
+            ]
+
+        def fake_build_dashboard_from_inputs(**kwargs):
+            captured["equity_market_bars"] = kwargs["equity_market_bars"]
+            captured["global_lppl_market_bars"] = kwargs["global_lppl_market_bars"]
+            return {"sourceStatus": [], "macroLiquidity": {"score": 43.4}}
+
+        patches = {
+            "fetch_treasury_yield_curves": [],
+            "fetch_fred_series_bulk": {},
+            "fetch_treasury_auctions": [],
+            "fetch_announced_auctions": [],
+            "fetch_fomc_calendar_events": [],
+            "fetch_fred_macro_release_events": [],
+            "fetch_bea_release_events": [],
+            "fetch_fomc_projection": None,
+            "fetch_acm_term_premium": None,
+            "fetch_cftc_treasury_positions": [],
+            "fetch_tic_major_holders": None,
+            "fetch_primary_dealer_stats": None,
+            "fetch_quarterly_refunding": None,
+            "fetch_debt_limit_status": None,
+            "fetch_fed_funds_futures_quote": None,
+            "fetch_gold_spot_quote": None,
+            "fetch_cboe_option_open_interest": None,
+            "fetch_federal_reserve_press_releases": [],
+            "fetch_treasury_press_releases": [],
+            "load_content_overrides": {},
+            "fetch_bhadial_public_score": 43.4,
+        }
+        with ExitStack() as stack:
+            for name, return_value in patches.items():
+                stack.enter_context(patch.object(dashboard_builder, name, return_value=return_value))
+            stack.enter_context(patch.object(dashboard_builder, "fetch_nasdaq_daily_bars", side_effect=RuntimeError("Nasdaq blocked")))
+            stack.enter_context(patch.object(dashboard_builder, "fetch_stooq_daily_bars", side_effect=fake_stooq))
+            stack.enter_context(patch.object(dashboard_builder, "build_dashboard_from_inputs", side_effect=fake_build_dashboard_from_inputs))
+
+            dashboard = dashboard_builder.build_live_dashboard()
+
+        self.assertIn("SPY", captured["equity_market_bars"])
+        self.assertIn("SPY", captured["global_lppl_market_bars"])
+        spy_status = next(item for item in dashboard["sourceStatus"] if item["name"] == "Nasdaq SPY OHLCV")
+        self.assertEqual(spy_status["status"], "ok")
+        self.assertEqual(spy_status["latest"], "2026-06-10")
+        self.assertEqual(spy_status["source"], "stooq-fallback")
+        self.assertIn("Nasdaq blocked", spy_status["note"])
+
+    def test_source_freshness_marks_slow_public_sources_stale(self):
+        rows = [
+            {"name": "NY Fed ACM term premium", "status": "ok", "latest": "2026-03-01"},
+            {"name": "CFTC financial futures COT", "status": "ok", "latest": "2026-06-05"},
+        ]
+
+        annotated = dashboard_builder.annotate_source_status_freshness(rows, as_of=date(2026, 6, 11))
+
+        acm = next(row for row in annotated if row["name"] == "NY Fed ACM term premium")
+        cftc = next(row for row in annotated if row["name"] == "CFTC financial futures COT")
+        self.assertEqual(acm["status"], "stale")
+        self.assertEqual(acm["ageDays"], 102)
+        self.assertEqual(acm["expectedMaxAgeDays"], 45)
+        self.assertEqual(cftc["status"], "ok")
+        self.assertEqual(cftc["ageDays"], 6)
+
+    def test_lppl_candidate_selection_prefers_fit_quality_over_risk_score(self):
+        selected = dashboard_builder.select_lppl_fit_candidate(
+            [
+                {"available": True, "score": 92.0, "confidence": 0.90, "fitR2": 0.71, "daysToCritical": 15, "windowDays": 180},
+                {"available": True, "score": 63.0, "confidence": 0.62, "fitR2": 0.94, "daysToCritical": 60, "windowDays": 252},
+            ]
+        )
+
+        self.assertEqual(selected["daysToCritical"], 60)
+        self.assertEqual(selected["daysToCriticalRange"]["min"], 15)
+        self.assertEqual(selected["daysToCriticalRange"]["max"], 60)
+        self.assertEqual(selected["selectionBasis"], "fit_quality")
+
+    def test_lppl_window_reports_power_law_improvement_and_oscillation_count(self):
+        n = dashboard_builder.GLOBAL_LPPL_DEFAULT_WINDOW
+        tc = n - 1 + 60
+        closes = []
+        for t in range(n):
+            distance = tc - t
+            y = (
+                5.10
+                - 0.012 * (distance ** 0.55)
+                + 0.0018 * (distance ** 0.55) * math.cos(10.0 * math.log(distance))
+                + 0.0011 * (distance ** 0.55) * math.sin(10.0 * math.log(distance))
+            )
+            closes.append(math.exp(y))
+        bars = self.make_equity_bars_from_closes("SPY", closes)
+
+        fit = dashboard_builder.fit_lppl_window(bars)
+
+        self.assertTrue(fit["available"])
+        self.assertGreater(fit["lpplImprovementPct"], 5.0)
+        self.assertGreaterEqual(fit["oscillationCount"], 2.0)
+        self.assertLessEqual(fit["oscillationCount"], 10.0)
+        self.assertTrue(fit["passesLpplDiagnostics"])
+        self.assertEqual(fit["residualDiagnostics"]["meanReverting"], True)
+        self.assertIn("power-law", fit["reason"])
+
+    def test_lppl_signal_downgrades_random_walk_without_diagnostics(self):
+        close = 100.0
+        closes: list[float] = []
+        for index in range(380):
+            close *= 1 + (0.0012 if index % 9 in {0, 1, 2} else -0.00045)
+            close += math.sin(index * 1.7) * 0.015
+            closes.append(close)
+        bars = self.make_equity_bars_from_closes("SPY", closes)
+
+        fit = dashboard_builder.fit_global_lppl_signal(bars)
+
+        self.assertTrue(fit["available"])
+        self.assertFalse(fit["passesLpplDiagnostics"])
+        self.assertLessEqual(fit["score"], 40.0)
+        self.assertIn("lpplImprovementPct", fit)
+        self.assertIn("residualDiagnostics", fit)
+
+    def test_lppl_history_points_replay_each_available_trading_day(self):
+        closes = [100 + index * 0.12 for index in range(dashboard_builder.GLOBAL_LPPL_MIN_OBSERVATIONS + 6)]
+        bars = self.make_equity_bars_from_closes("SPY", closes)
+        calls: list[date] = []
+
+        def fake_global_lppl_index_row(spec, source_bars, *, as_of=None, fast=False):
+            calls.append(as_of)
+            return {"available": True, "score": 50.0 + len(calls)}
+
+        with patch.object(dashboard_builder, "global_lppl_index_row", side_effect=fake_global_lppl_index_row):
+            points = dashboard_builder.build_single_index_lppl_history_points("SPY", bars)
+
+        expected_dates = [bar.date for bar in bars[dashboard_builder.GLOBAL_LPPL_MIN_OBSERVATIONS - 1:]]
+        self.assertEqual(calls, expected_dates)
+        self.assertEqual([point["date"] for point in points], [day.isoformat() for day in expected_dates])
+
+    def test_lppl_history_points_preserve_critical_date_and_diagnostics(self):
+        closes = [100 + index * 0.15 for index in range(dashboard_builder.GLOBAL_LPPL_MIN_OBSERVATIONS + 3)]
+        bars = self.make_equity_bars_from_closes("SPY", closes)
+
+        def fake_global_lppl_index_row(spec, source_bars, *, as_of=None, fast=False):
+            critical_date = as_of + dashboard_builder.timedelta(days=42)
+            return {
+                "available": True,
+                "score": 67.0,
+                "daysToCritical": 42,
+                "criticalDate": critical_date.isoformat(),
+                "passesLpplCoreDiagnostics": True,
+                "passesLpplDiagnostics": False,
+                "lpplImprovementPct": 14.2,
+                "oscillationCount": 2.7,
+            }
+
+        with patch.object(dashboard_builder, "global_lppl_index_row", side_effect=fake_global_lppl_index_row):
+            points = dashboard_builder.build_single_index_lppl_history_points("SPY", bars)
+
+        self.assertGreaterEqual(len(points), 3)
+        latest = points[-1]
+        self.assertEqual(latest["daysToCritical"], 42)
+        self.assertRegex(latest["criticalDate"], r"^2025-")
+        self.assertTrue(latest["passesLpplCoreDiagnostics"])
+        self.assertFalse(latest["passesLpplDiagnostics"])
+        self.assertEqual(latest["lpplImprovementPct"], 14.2)
+        self.assertEqual(latest["oscillationCount"], 2.7)
+
+    def test_lppl_clip_state_locks_when_critical_dates_converge(self):
+        start = date(2026, 5, 1)
+        points = []
+        for index in range(20):
+            observation_date = start + dashboard_builder.timedelta(days=index)
+            critical_date = date(2026, 7, 15) + dashboard_builder.timedelta(days=(index % 5) - 2)
+            points.append(
+                {
+                    "date": observation_date.isoformat(),
+                    "score": 62.0 + index * 0.4,
+                    "criticalDate": critical_date.isoformat(),
+                    "daysToCritical": (critical_date - observation_date).days,
+                    "passesLpplCoreDiagnostics": True,
+                }
+            )
+
+        clip_state = dashboard_builder.build_lppl_clip_state(points)
+
+        self.assertTrue(clip_state["available"])
+        self.assertTrue(clip_state["clipLock"])
+        self.assertEqual(clip_state["status"], "locked")
+        self.assertLessEqual(clip_state["tcWindowDays"], 10)
+        self.assertEqual(clip_state["tcMedian"], "2026-07-15")
+
+        row = {
+            "symbol": "SPY",
+            "available": True,
+            "score": 62.0,
+            "confidence": 0.72,
+            "daysToCritical": 58,
+            "effectiveWeightMultiplier": 1.0,
+            "validation": {"effectiveWeightMultiplier": 1.0},
+            "history": {"available": True, "points": points, "clipState": clip_state},
+            "backtest": {"threshold": 65},
+            "clipState": clip_state,
+        }
+        signal = dashboard_builder.build_global_lppl_forward_signal(row)
+
+        self.assertTrue(signal["clipLock"])
+        self.assertIn("clip_lock", signal["drivers"])
+        self.assertGreaterEqual(signal["score"], 60)
+
+    def test_global_lppl_risk_reuses_daily_history_for_validation(self):
+        closes = [100 + index * 0.1 for index in range(dashboard_builder.GLOBAL_LPPL_MIN_OBSERVATIONS + 35)]
+        market_bars = {
+            "SPY": self.make_equity_bars_from_closes("SPY", closes),
+            "QQQ": self.make_equity_bars_from_closes("QQQ", [value * 1.01 for value in closes]),
+        }
+        history_calls: list[str] = []
+
+        def fake_global_lppl_index_row(spec, source_bars, *, as_of=None, fast=False):
+            symbol = str(spec.get("symbol") or "").upper()
+            if not source_bars:
+                return {"available": False, "symbol": symbol, "score": None, "reason": "missing test bars"}
+            return {
+                "available": True,
+                "symbol": symbol,
+                "name": symbol,
+                "sourceSymbol": symbol,
+                "score": 70.0,
+                "confidence": 0.8,
+                "status": "risk",
+                "statusCn": "风险",
+                "date": source_bars[-1].date.isoformat(),
+            }
+
+        def fake_history_points(symbol, bars):
+            history_calls.append(symbol)
+            return [
+                {"date": bar.date.isoformat(), "score": 70.0}
+                for bar in bars[dashboard_builder.GLOBAL_LPPL_MIN_OBSERVATIONS - 1:]
+            ]
+
+        with patch.object(dashboard_builder, "global_lppl_index_row", side_effect=fake_global_lppl_index_row), patch.object(
+            dashboard_builder,
+            "build_single_index_lppl_history_points",
+            side_effect=fake_history_points,
+        ):
+            risk = dashboard_builder.build_global_lppl_risk_index(market_bars=market_bars)
+
+        self.assertEqual(history_calls.count("SPY"), 1)
+        self.assertEqual(history_calls.count("QQQ"), 1)
+        self.assertTrue(risk["indexValidation"]["available"])
+        self.assertTrue(risk["perIndexHistory"]["SPY"]["available"])
+        self.assertTrue(risk["perIndexHistory"]["QQQ"]["available"])
+
+    def test_fast_lppl_signal_uses_single_replay_window(self):
+        bars = self.make_equity_bars_from_closes(
+            "SPY",
+            [100 + index * 0.08 for index in range(dashboard_builder.GLOBAL_LPPL_MIN_OBSERVATIONS + 20)],
+        )
+        windows: list[int] = []
+
+        def fake_fit_lppl_window(sample, *, fast=False):
+            windows.append(len(sample))
+            return {"available": True, "score": 42.0, "confidence": 0.5, "fitR2": 0.9, "fitSse": 1.0, "daysToCritical": 60, "windowDays": len(sample)}
+
+        with patch.object(dashboard_builder, "fit_lppl_window", side_effect=fake_fit_lppl_window):
+            fit = dashboard_builder.fit_global_lppl_signal(bars, fast=True)
+
+        self.assertTrue(fit["available"])
+        self.assertEqual(windows, [len(bars)])
+
+    def test_global_lppl_forward_signal_flags_rising_pre_threshold_pressure(self):
+        history = {
+            "available": True,
+            "points": [
+                {"date": f"2026-05-{day:02d}", "score": 42.0 + day * 0.7}
+                for day in range(1, 22)
+            ],
+        }
+        row = {
+            "symbol": "SPY",
+            "available": True,
+            "score": 58.0,
+            "confidence": 0.72,
+            "daysToCritical": 60,
+            "effectiveWeightMultiplier": 1.0,
+            "validation": {"effectiveWeightMultiplier": 1.0},
+            "history": history,
+            "backtest": {"threshold": 65},
+        }
+
+        signal = dashboard_builder.build_global_lppl_forward_signal(row)
+
+        self.assertTrue(signal["available"])
+        self.assertGreaterEqual(signal["score"], 55)
+        self.assertEqual(signal["regime"], "Rising Watch")
+        self.assertGreater(signal["scoreMomentum20d"], 10)
+        self.assertEqual(signal["thresholdDistance"], -7.0)
+        self.assertIn("rising", signal["drivers"])
+
+    def test_global_lppl_forward_signal_penalizes_weak_validation_and_falling_score(self):
+        history = {
+            "available": True,
+            "points": [
+                {"date": f"2026-05-{day:02d}", "score": 86.0 - day * 0.8}
+                for day in range(1, 22)
+            ],
+        }
+        row = {
+            "symbol": "SPY",
+            "available": True,
+            "score": 70.0,
+            "confidence": 0.50,
+            "daysToCritical": 170,
+            "effectiveWeightMultiplier": 0.60,
+            "validation": {"effectiveWeightMultiplier": 0.60, "validationRole": "weak"},
+            "history": history,
+            "backtest": {"threshold": 65},
+        }
+
+        signal = dashboard_builder.build_global_lppl_forward_signal(row)
+
+        self.assertTrue(signal["available"])
+        self.assertLess(signal["score"], 55)
+        self.assertEqual(signal["regime"], "Fading")
+        self.assertLess(signal["scoreMomentum20d"], -10)
+        self.assertIn("weak_validation", signal["drivers"])
+
+    def test_equity_backtest_reports_walk_forward_and_lift_against_base_rate(self):
+        bars: list[MarketDailyBar] = []
+        trend_points: list[dict[str, object]] = []
+        close = 100.0
+        cursor = date(2026, 1, 2)
+        while len(bars) < 70:
+            if cursor.weekday() < 5:
+                index = len(bars)
+                close = 100.0 + index * 0.05
+                low = close * (0.965 if index % 9 == 4 else 0.995)
+                bars.append(MarketDailyBar("SPY", cursor, close, close * 1.006, low, close, 1_000_000 + index, "unit-test"))
+                if index < 60:
+                    trend_points.append({"date": cursor.isoformat(), "score": 82.0 if index % 9 in {0, 1} else 35.0, "regime": "test", "regimeCn": "测试"})
+            cursor += dashboard_builder.timedelta(days=1)
+
+        backtest = build_equity_short_term_risk_backtest(trend_points, bars, horizon=10)
+
+        self.assertTrue(backtest["available"])
+        self.assertIn("walkForward", backtest)
+        self.assertIn("outOfSampleThresholdTests", backtest)
+        self.assertGreater(backtest["walkForward"]["outOfSample"]["sampleSize"], 0)
+        preferred = backtest["preferredThresholdTest"]
+        self.assertIn("baseRate", preferred)
+        self.assertIn("liftVsBaseRate", preferred)
+
+    def test_turnover_score_transitions_smoothly_around_thin_breakout_volume_boundary(self):
+        target = date(2026, 6, 5)
+        bar = MarketDailyBar("SPY", target, 100.0, 102.0, 99.8, 101.8, 1_000_000, "unit-test")
+        bars = {"SPY": [bar]}
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(dashboard_builder, "volume_percentile_at", return_value=45.0))
+            stack.enter_context(patch.object(dashboard_builder, "trailing_return", return_value=0.12))
+            score_45 = dashboard_builder.equity_turnover_component(bars, target, weight=0.14)["score"]
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(dashboard_builder, "volume_percentile_at", return_value=46.0))
+            stack.enter_context(patch.object(dashboard_builder, "trailing_return", return_value=0.12))
+            score_46 = dashboard_builder.equity_turnover_component(bars, target, weight=0.14)["score"]
+
+        self.assertLess(abs(score_45 - score_46), 12.0)
+
+    def test_hot_stock_reversal_shrinks_extreme_score_when_hot_sample_is_tiny(self):
+        target = date(2026, 6, 5)
+        closes = [100.0 * (1.003 ** index) for index in range(70)]
+        closes[-1] = closes[-2] * 0.985
+        bars = self.make_equity_bars_from_closes("NVDA", closes, start=date(2026, 3, 2))
+
+        component = dashboard_builder.equity_hot_stock_reversal_component({"NVDA": bars}, target, weight=0.18)
+
+        self.assertEqual(component["metrics"]["hotCount"], 1)
+        self.assertEqual(component["metrics"]["reversalCount"], 1)
+        self.assertLess(component["score"], 75.0)
+        self.assertTrue(component["metrics"]["smallSampleAdjusted"])
 
     def test_parse_bhadial_public_score_prefers_visible_hero_gauge(self):
         html = '<script>window.__DIAL_BOOTSTRAP__ = {"marketingTeaser":{"score":50.8}}</script><text class="hero-gauge-score" text-anchor="middle">43.4</text>'

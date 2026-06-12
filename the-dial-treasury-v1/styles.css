@@ -2617,6 +2617,16 @@ h3 {
   font-size: 9.5px;
 }
 
+.global-lppl-clip-note {
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 9.5px;
+}
+
+.global-lppl-index-card .global-lppl-clip-note {
+  color: var(--muted);
+}
+
 .global-lppl-index-grid {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -3981,6 +3991,10 @@ body.modal-open {
 .status-badge.warning,
 .status-badge.warn {
   color: var(--neutral);
+}
+
+.status-badge.stale {
+  color: var(--bear);
 }
 
 .scorecard-groups {

@@ -88,10 +88,10 @@ make the conclusion unsuitable for a high-confidence narrative.
 The same payload includes three separate equity-risk contracts:
 `spyEarlyWarning`, `equityShortTermRisk`, and `globalLpplRisk`. `globalLpplRisk`
 is independent from `equityShortTermRisk`; it exposes current LPPL fits plus
-separate `history` and `backtest` payloads for each available market. The
-top-level LPPL score/history/backtest are deliberately unavailable so SPY,
-QQQ, Korea/EWY, Hong Kong/EWH, Taiwan/EWT, and Japan/EWJ are not blended into
-one composite.
+separate `history`, `backtest`, and validation-weighted `forwardSignal`
+payloads for each available market. The top-level LPPL score/history/backtest
+are deliberately unavailable so SPY, QQQ, Korea/EWY, Hong Kong/EWH,
+Taiwan/EWT, and Japan/EWJ are not blended into one composite.
 The `/api/cross` slice includes the section-07 `historySeries` registry used by
 the UI to request global-rate, risk/dollar, and inflation/commodity history
 through `/api/history/series`.
@@ -185,7 +185,13 @@ The same SQLite history store powers the section-07 dynamic cross-market chart,
 including global 10Y yields, S&P 500, VIX, dollar, credit OAS, CPI/PCE/core
 PCE, Dallas Fed Trimmed Mean PCE, WTI, OVX, and GVZ where public history is
 available.
-Short-term equity and LPPL refreshes use Nasdaq public historical quote rows.
+Short-term equity and LPPL refreshes try Nasdaq public historical quote rows
+first. Nasdaq is a non-official public endpoint, so both the full refresh and
+`POST /api/update-equity` fall back to Stooq daily CSV symbols such as
+`spy.us`, `qqq.us`, and the ETF proxy equivalents when Nasdaq fails. Fallback
+success keeps the monitored OHLCV row usable for smoke checks but marks
+`source: stooq-fallback` and includes the Nasdaq failure in `note`, so degraded
+source quality is visible in `/api/source_status` and the data-source modal.
 The LPPL global proxy set is `SPY`, `QQQ`, `EWY`, `EWH`, `EWT`, and `EWJ`; the
 Asia entries are clearly labeled as ETF proxies rather than direct index feeds.
 

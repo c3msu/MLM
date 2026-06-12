@@ -8,7 +8,7 @@ import sqlite3
 from statistics import median
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .sources import (
     AcmRecord,
@@ -359,6 +359,7 @@ GLOBAL_LPPL_INDEX_SPECS: list[dict[str, Any]] = [
         "region": "US broad",
         "source": "nasdaq",
         "sourceSymbol": "SPY",
+        "fallbackSymbol": "spy.us",
         "assetClass": "etf",
         "sourceQuality": "high",
         "weight": 0.23,
@@ -369,6 +370,7 @@ GLOBAL_LPPL_INDEX_SPECS: list[dict[str, Any]] = [
         "region": "US tech",
         "source": "nasdaq",
         "sourceSymbol": "QQQ",
+        "fallbackSymbol": "qqq.us",
         "assetClass": "etf",
         "sourceQuality": "high",
         "weight": 0.23,
@@ -379,6 +381,7 @@ GLOBAL_LPPL_INDEX_SPECS: list[dict[str, Any]] = [
         "region": "Korea ETF proxy",
         "source": "nasdaq",
         "sourceSymbol": "EWY",
+        "fallbackSymbol": "ewy.us",
         "assetClass": "etf",
         "sourceQuality": "medium",
         "weight": 0.13,
@@ -389,6 +392,7 @@ GLOBAL_LPPL_INDEX_SPECS: list[dict[str, Any]] = [
         "region": "Hong Kong ETF proxy",
         "source": "nasdaq",
         "sourceSymbol": "EWH",
+        "fallbackSymbol": "ewh.us",
         "assetClass": "etf",
         "sourceQuality": "medium",
         "weight": 0.13,
@@ -399,6 +403,7 @@ GLOBAL_LPPL_INDEX_SPECS: list[dict[str, Any]] = [
         "region": "Taiwan ETF proxy",
         "source": "nasdaq",
         "sourceSymbol": "EWT",
+        "fallbackSymbol": "ewt.us",
         "assetClass": "etf",
         "sourceQuality": "medium",
         "weight": 0.13,
@@ -409,6 +414,7 @@ GLOBAL_LPPL_INDEX_SPECS: list[dict[str, Any]] = [
         "region": "Japan ETF proxy",
         "source": "nasdaq",
         "sourceSymbol": "EWJ",
+        "fallbackSymbol": "ewj.us",
         "assetClass": "etf",
         "sourceQuality": "medium",
         "weight": 0.15,
@@ -416,12 +422,156 @@ GLOBAL_LPPL_INDEX_SPECS: list[dict[str, Any]] = [
 ]
 GLOBAL_LPPL_MIN_OBSERVATIONS = 120
 GLOBAL_LPPL_DEFAULT_WINDOW = 252
-GLOBAL_LPPL_HISTORY_STEP = 4
+GLOBAL_LPPL_HISTORY_STEP = 1
 GLOBAL_LPPL_ALERT_THRESHOLD = 65
+FRED_TREASURY_CURVE_SERIES: dict[str, str] = {
+    "1M": "DGS1MO",
+    "3M": "DGS3MO",
+    "6M": "DGS6MO",
+    "1Y": "DGS1",
+    "2Y": "DGS2",
+    "3Y": "DGS3",
+    "5Y": "DGS5",
+    "7Y": "DGS7",
+    "10Y": "DGS10",
+    "20Y": "DGS20",
+    "30Y": "DGS30",
+}
+EXPECTED_SOURCE_CADENCE_DAYS: dict[str, int] = {
+    "NY Fed ACM term premium": 45,
+    "CFTC financial futures COT": 10,
+    "Treasury TIC major foreign holders": 75,
+    "NY Fed primary dealer statistics": 21,
+    "Federal Reserve SEP projections": 120,
+    "U.S. Treasury quarterly refunding documents": 120,
+    "Treasury Fiscal Data debt subject to limit": 10,
+    "Stooq 30-Day Fed Funds futures ZQ.F": 5,
+    "Stooq gold spot XAUUSD": 5,
+}
+DailyBarFetcher = Callable[..., list[MarketDailyBar]]
+
+
+def stooq_fallback_symbol(symbol: str, fallback_symbol: str | None = None) -> str:
+    if fallback_symbol:
+        return fallback_symbol
+    return f"{symbol.strip().lower()}.us"
+
+
+def remap_market_bars_symbol(bars: list[MarketDailyBar], symbol: str) -> list[MarketDailyBar]:
+    output_symbol = symbol.upper()
+    return [
+        MarketDailyBar(
+            symbol=output_symbol,
+            date=bar.date,
+            open=bar.open,
+            high=bar.high,
+            low=bar.low,
+            close=bar.close,
+            volume=bar.volume,
+            source=bar.source,
+        )
+        for bar in bars
+    ]
+
+
+def fetch_daily_bars_with_stooq_fallback(
+    symbol: str,
+    *,
+    start: date,
+    end: date,
+    asset_class: str = "stocks",
+    timeout: int = 14,
+    limit: int = 900,
+    fallback_symbol: str | None = None,
+    output_symbol: str | None = None,
+    fetcher: DailyBarFetcher | None = None,
+    fallback_fetcher: DailyBarFetcher | None = None,
+) -> tuple[list[MarketDailyBar], dict[str, Any]]:
+    primary_fetcher = fetcher or fetch_nasdaq_daily_bars
+    stooq_fetcher = fallback_fetcher or fetch_stooq_daily_bars
+    try:
+        bars = primary_fetcher(symbol, start=start, end=end, asset_class=asset_class, timeout=timeout, limit=limit)
+        latest = bars[-1].date.isoformat() if bars else "none"
+        return remap_market_bars_symbol(bars, output_symbol or symbol), {"status": "ok", "latest": latest, "source": "nasdaq"}
+    except Exception as nasdaq_exc:  # noqa: BLE001
+        fallback = stooq_fallback_symbol(symbol, fallback_symbol)
+        try:
+            bars = stooq_fetcher(fallback, start=start, end=end, timeout=timeout)
+        except Exception as fallback_exc:  # noqa: BLE001
+            raise RuntimeError(f"Nasdaq failed ({nasdaq_exc}); Stooq fallback {fallback} failed ({fallback_exc})") from fallback_exc
+        latest = bars[-1].date.isoformat() if bars else "none"
+        note = f"Nasdaq failed; using Stooq {fallback}: {nasdaq_exc}"
+        return remap_market_bars_symbol(bars, output_symbol or symbol), {
+            "status": "ok",
+            "latest": latest,
+            "source": "stooq-fallback",
+            "note": note,
+        }
+
+
+def build_fred_dgs_curve_records(fred: dict[str, TimeSeries]) -> list[YieldCurveRecord]:
+    points_by_tenor: dict[str, dict[date, float]] = {}
+    for tenor, series_id in FRED_TREASURY_CURVE_SERIES.items():
+        series = fred.get(series_id)
+        if not series:
+            continue
+        points_by_tenor[tenor] = {point.date: point.value for point in series.points}
+    if set(points_by_tenor) != set(TENORS):
+        return []
+    common_dates = set.intersection(*(set(values) for values in points_by_tenor.values()))
+    records = [
+        YieldCurveRecord(date=record_date, values={tenor: points_by_tenor[tenor][record_date] for tenor in TENORS})
+        for record_date in sorted(common_dates)
+    ]
+    return records
+
+
+def parse_source_latest_date(value: Any) -> date | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        pass
+    match = re.search(r"\b(\d{4})-(\d{2})\b", text)
+    if match:
+        try:
+            return date(int(match.group(1)), int(match.group(2)), 1)
+        except ValueError:
+            return None
+    return None
+
+
+def annotate_source_status_freshness(
+    rows: list[dict[str, Any]],
+    *,
+    as_of: date | None = None,
+) -> list[dict[str, Any]]:
+    target = as_of or datetime.now(timezone.utc).date()
+    annotated: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        cadence = EXPECTED_SOURCE_CADENCE_DAYS.get(str(item.get("name") or ""))
+        latest_date = parse_source_latest_date(item.get("latest"))
+        if cadence is not None:
+            item["expectedMaxAgeDays"] = cadence
+        if latest_date is not None:
+            item["ageDays"] = max(0, (target - latest_date).days)
+        if (
+            cadence is not None
+            and latest_date is not None
+            and item.get("status") == "ok"
+            and item["ageDays"] > cadence
+        ):
+            item["status"] = "stale"
+            item["note"] = f"Latest observation is {item['ageDays']} days old; expected <= {cadence} days."
+        annotated.append(item)
+    return annotated
 
 
 def build_live_dashboard() -> dict[str, Any]:
-    source_status: list[dict[str, str]] = []
+    source_status: list[dict[str, Any]] = []
     curve_records: list[YieldCurveRecord] = []
     auctions: list[dict[str, object]] = []
     announced_auctions: list[dict[str, object]] = []
@@ -446,7 +596,23 @@ def build_live_dashboard() -> dict[str, Any]:
         latest = curve_records[-1].date.isoformat() if curve_records else "none"
         source_status.append({"name": "U.S. Treasury yield curve XML", "status": "ok", "latest": latest})
     except Exception as exc:  # noqa: BLE001
-        source_status.append({"name": "U.S. Treasury yield curve XML", "status": "error", "latest": str(exc)})
+        try:
+            dgs_fred = fetch_fred_series_bulk(FRED_TREASURY_CURVE_SERIES.values(), chunk_size=len(FRED_TREASURY_CURVE_SERIES))
+            curve_records = build_fred_dgs_curve_records(dgs_fred)
+            if not curve_records:
+                raise ValueError("FRED DGS fallback did not return a complete curve")
+            latest = curve_records[-1].date.isoformat()
+            source_status.append(
+                {
+                    "name": "U.S. Treasury yield curve XML",
+                    "status": "warning",
+                    "latest": f"FRED DGS fallback through {latest}; Treasury XML failed: {exc}",
+                    "source": "fred-fallback",
+                    "note": "Curve built from FRED DGS1MO...DGS30 because Treasury XML was unavailable.",
+                }
+            )
+        except Exception as fallback_exc:  # noqa: BLE001
+            source_status.append({"name": "U.S. Treasury yield curve XML", "status": "error", "latest": f"{exc}; FRED DGS fallback failed: {fallback_exc}"})
 
     try:
         fred = fetch_fred_series_bulk(FRED_SERIES)
@@ -565,10 +731,16 @@ def build_live_dashboard() -> dict[str, Any]:
     equity_start = equity_end - timedelta(days=365 * 3 + 10)
     for symbol, asset_class in EQUITY_RISK_SYMBOLS.items():
         try:
-            bars = fetch_nasdaq_daily_bars(symbol, start=equity_start, end=equity_end, asset_class=asset_class, timeout=14, limit=900)
+            bars, status = fetch_daily_bars_with_stooq_fallback(
+                symbol,
+                start=equity_start,
+                end=equity_end,
+                asset_class=asset_class,
+                timeout=14,
+                limit=900,
+            )
             equity_market_bars[symbol] = bars
-            latest = bars[-1].date.isoformat() if bars else "none"
-            source_status.append({"name": f"Nasdaq {symbol} OHLCV", "status": "ok", "latest": latest})
+            source_status.append({"name": f"Nasdaq {symbol} OHLCV", **status})
         except Exception as exc:  # noqa: BLE001
             source_status.append({"name": f"Nasdaq {symbol} OHLCV", "status": "warning", "latest": str(exc)})
 
@@ -582,20 +754,18 @@ def build_live_dashboard() -> dict[str, Any]:
             continue
         if spec.get("source") == "nasdaq":
             try:
-                bars = fetch_nasdaq_daily_bars(
+                bars, status = fetch_daily_bars_with_stooq_fallback(
                     str(spec["sourceSymbol"]),
                     start=equity_start,
                     end=equity_end,
                     asset_class=str(spec.get("assetClass") or "etf"),
                     timeout=14,
                     limit=900,
+                    fallback_symbol=str(spec.get("fallbackSymbol") or ""),
+                    output_symbol=symbol,
                 )
-                global_lppl_market_bars[symbol] = [
-                    MarketDailyBar(symbol=symbol, date=bar.date, open=bar.open, high=bar.high, low=bar.low, close=bar.close, volume=bar.volume, source=bar.source)
-                    for bar in bars
-                ]
-                latest = bars[-1].date.isoformat() if bars else "none"
-                source_status.append({"name": f"Global LPPL {symbol} OHLCV", "status": "ok", "latest": latest})
+                global_lppl_market_bars[symbol] = bars
+                source_status.append({"name": f"Global LPPL {symbol} OHLCV", **status})
             except Exception as exc:  # noqa: BLE001
                 source_status.append({"name": f"Global LPPL {symbol} OHLCV", "status": "warning", "latest": str(exc)})
             continue
@@ -670,7 +840,7 @@ def build_live_dashboard() -> dict[str, Any]:
         if isinstance(macro_liquidity, dict):
             macro_liquidity["benchmark"] = {"sourceUrl": BHADIAL_SCORE_SOURCE_URL, "status": "warning", "latest": str(exc)}
         source_status.append({"name": "Bhadial public score benchmark", "status": "warning", "latest": str(exc)})
-    dashboard["sourceStatus"] = source_status + dashboard.get("sourceStatus", [])
+    dashboard["sourceStatus"] = annotate_source_status_freshness(source_status + dashboard.get("sourceStatus", []))
     dashboard["conclusionAudit"] = build_conclusion_audit(dashboard.get("groups", []), source_status=dashboard["sourceStatus"])
     return dashboard
 
@@ -862,6 +1032,7 @@ def build_dashboard_from_inputs(
             ],
         },
         "sourceStatus": source_status,
+        "conclusionSourceQuality": dict(CONCLUSION_SOURCE_QUALITY),
         "curve": curve,
         "decomposition": build_decomposition(indicators, acm=acm, fomc_projection=fomc_projection),
         "fedPath": build_fed_path(indicators),
@@ -3207,12 +3378,13 @@ def build_global_lppl_risk_index(
 ) -> dict[str, Any]:
     bars_by_symbol = normalize_market_bars(market_bars or {})
     index_rows = build_global_lppl_index_rows(bars_by_symbol, as_of=as_of)
-    index_validation = build_global_lppl_index_validation(index_rows, bars_by_symbol)
-    index_rows = apply_global_lppl_index_validation(index_rows, index_validation)
-    available_rows = [row for row in index_rows if row.get("available") and optional_float(row.get("score")) is not None]
     per_index_history = build_global_lppl_per_index_histories(index_rows, bars_by_symbol)
+    index_validation = build_global_lppl_index_validation(index_rows, bars_by_symbol, histories=per_index_history)
+    index_rows = apply_global_lppl_index_validation(index_rows, index_validation)
     per_index_backtests = build_global_lppl_per_index_backtests(per_index_history, bars_by_symbol)
     index_rows = attach_global_lppl_per_index_payloads(index_rows, per_index_history, per_index_backtests)
+    index_rows = attach_global_lppl_forward_signals(index_rows)
+    available_rows = [row for row in index_rows if row.get("available") and optional_float(row.get("score")) is not None]
     if not available_rows:
         return unavailable_global_lppl_risk(index_rows, "全球LPPL逐市场评估需要至少一个可回放指数样本; 当前公开日线源不足。")
 
@@ -3270,11 +3442,23 @@ def global_lppl_summary(available_rows: list[dict[str, Any]], index_rows: list[d
         reverse=True,
     )[:3]
     leader_text = ", ".join(f"{symbol} {score:.0f}" for score, symbol in leaders if symbol)
+    forward_rows = [
+        (
+            optional_float((row.get("forwardSignal") or {}).get("score")) or 0.0,
+            str(row.get("symbol") or ""),
+        )
+        for row in available_rows
+        if isinstance(row.get("forwardSignal"), dict) and (row.get("forwardSignal") or {}).get("available")
+    ]
+    forward_count = sum(1 for score, _symbol in forward_rows if score >= GLOBAL_LPPL_ALERT_THRESHOLD)
+    forward_leaders = sorted(forward_rows, reverse=True)[:3]
+    forward_text = ", ".join(f"{symbol} {score:.0f}" for score, symbol in forward_leaders if symbol)
     return (
         f"LPPL逐市场独立评估; "
         f"{high_risk_count}/{len(available_rows)}个可用指数处于风险阈值上方"
         + (f", 当前较高: {leader_text}" if leader_text else "")
         + (f", 最近临界窗口约{nearest}天。" if nearest is not None else "。")
+        + (f" 前瞻压力{forward_count}/{len(available_rows)}个市场高于阈值" + (f", 领先: {forward_text}。" if forward_text else "。") if forward_rows else "")
         + f" 不计算混合综合分, 图表和回测按{len(index_rows)}个市场分别展示。"
     )
 
@@ -3412,8 +3596,17 @@ def global_lppl_index_row(
         "statusCn": status_cn,
         "criticalDate": critical_date.isoformat(),
         "daysToCritical": days_to_critical,
+        "daysToCriticalRange": fit.get("daysToCriticalRange"),
         "fitR2": round(float(fit["fitR2"]), 3),
+        "fitSse": round(float(fit.get("fitSse") or 0.0), 6),
+        "lpplImprovementPct": round(float(fit.get("lpplImprovementPct") or 0.0), 1),
+        "oscillationCount": round(float(fit.get("oscillationCount") or 0.0), 2),
+        "passesLpplCoreDiagnostics": bool(fit.get("passesLpplCoreDiagnostics")),
+        "passesLpplDiagnostics": bool(fit.get("passesLpplDiagnostics")),
+        "residualDiagnostics": fit.get("residualDiagnostics"),
         "windowDays": int(fit["windowDays"]),
+        "windowDaysRange": fit.get("windowDaysRange"),
+        "selectionBasis": str(fit.get("selectionBasis") or "fit_quality"),
         "observations": target_index + 1,
         "asOf": latest.date.isoformat(),
         "source": str(spec.get("source") or ""),
@@ -3432,7 +3625,11 @@ def fit_global_lppl_signal(bars: list[MarketDailyBar], *, fast: bool = False) ->
     clean = [bar for bar in bars if bar.close > 0 and math.isfinite(bar.close)]
     if len(clean) < GLOBAL_LPPL_MIN_OBSERVATIONS:
         return {"available": False, "reason": "sample shorter than LPPL minimum window"}
-    windows = [GLOBAL_LPPL_DEFAULT_WINDOW] if fast and len(clean) >= GLOBAL_LPPL_DEFAULT_WINDOW else [window for window in (180, GLOBAL_LPPL_DEFAULT_WINDOW, 378) if len(clean) >= min(window, GLOBAL_LPPL_MIN_OBSERVATIONS)]
+    windows = (
+        [min(GLOBAL_LPPL_DEFAULT_WINDOW, len(clean))]
+        if fast
+        else [window for window in (180, GLOBAL_LPPL_DEFAULT_WINDOW, 378) if len(clean) >= min(window, GLOBAL_LPPL_MIN_OBSERVATIONS)]
+    )
     fits = []
     for window in windows:
         sample = clean[-min(window, len(clean)):]
@@ -3441,7 +3638,41 @@ def fit_global_lppl_signal(bars: list[MarketDailyBar], *, fast: bool = False) ->
             fits.append(fit)
     if not fits:
         return {"available": False, "reason": "bounded LPPL fit did not converge"}
-    best = max(fits, key=lambda item: (float(item.get("score") or 0.0), float(item.get("confidence") or 0.0), float(item.get("fitR2") or 0.0)))
+    return select_lppl_fit_candidate(fits)
+
+
+def select_lppl_fit_candidate(fits: list[dict[str, Any]]) -> dict[str, Any]:
+    available = [fit for fit in fits if fit.get("available")]
+    if not available:
+        return {"available": False, "reason": "bounded LPPL fit did not converge"}
+    best = dict(
+        max(
+            available,
+            key=lambda item: (
+                float(item.get("fitR2") or 0.0),
+                -(float(item.get("fitSse") or 0.0)),
+                float(item.get("confidence") or 0.0),
+                float(item.get("score") or 0.0),
+            ),
+        )
+    )
+    days_values = sorted({
+        int(days)
+        for fit in available
+        for days in [optional_float(fit.get("daysToCritical"))]
+        if days is not None
+    })
+    if days_values:
+        best["daysToCriticalRange"] = {"min": min(days_values), "max": max(days_values), "values": days_values}
+    window_values = sorted({
+        int(window)
+        for fit in available
+        for window in [optional_float(fit.get("windowDays"))]
+        if window is not None
+    })
+    if window_values:
+        best["windowDaysRange"] = {"min": min(window_values), "max": max(window_values), "values": window_values}
+    best["selectionBasis"] = "fit_quality"
     return best
 
 
@@ -3451,10 +3682,10 @@ def fit_lppl_window(sample: list[MarketDailyBar], *, fast: bool = False) -> dict
         return {"available": False, "reason": "invalid close values"}
     ys = [math.log(value) for value in closes]
     n = len(sample)
-    best: dict[str, Any] | None = None
     tc_offsets = (25, 60, 130) if fast else (15, 25, 40, 60, 90, 130, 170)
     m_values = (0.35, 0.55, 0.75) if fast else (0.2, 0.35, 0.5, 0.65, 0.8)
     omega_values = (7.0, 10.0, 12.0) if fast else (6.0, 8.0, 10.0, 12.0)
+    candidates: list[dict[str, Any]] = []
     for tc_offset in tc_offsets:
         tc = (n - 1) + tc_offset
         for m in m_values:
@@ -3478,6 +3709,22 @@ def fit_lppl_window(sample: list[MarketDailyBar], *, fast: bool = False) -> dict
                 fit_r2 = regression_r_squared(ys, fitted)
                 if fit_r2 is None:
                     continue
+                fit_sse = sum((actual - predicted) ** 2 for actual, predicted in zip(ys, fitted))
+                power_rows = [[1.0, row[1]] for row in rows]
+                power_coefficients = linear_least_squares(power_rows, ys)
+                if power_coefficients is None:
+                    continue
+                power_fitted = [sum(coef * value for coef, value in zip(power_coefficients, row)) for row in power_rows]
+                power_sse = sum((actual - predicted) ** 2 for actual, predicted in zip(ys, power_fitted))
+                lppl_improvement_pct = 0.0 if power_sse <= 1e-12 else max(0.0, 100.0 * (power_sse - fit_sse) / power_sse)
+                oscillation_count = lppl_oscillation_count(
+                    tc=tc,
+                    omega=omega,
+                    start_index=0,
+                    end_index=n - 1,
+                )
+                residuals = [actual - predicted for actual, predicted in zip(ys, fitted)]
+                residual_diagnostics = lppl_residual_diagnostics(residuals)
                 bubble_coefficient = coefficients[1]
                 oscillation = math.sqrt(coefficients[2] ** 2 + coefficients[3] ** 2)
                 trailing_63 = closes[-1] / closes[max(0, n - 64)] - 1 if n >= 65 else 0.0
@@ -3489,22 +3736,38 @@ def fit_lppl_window(sample: list[MarketDailyBar], *, fast: bool = False) -> dict
                 trend_score = risk_linear(trailing_63, 0.04, 0.35)
                 acceleration_score = risk_linear(acceleration, 0.0, 0.12)
                 coherent_bubble = bubble_coefficient < 0 and acceleration > 0 and trailing_63 > 0.03
+                valid_oscillation_count = 2.0 <= oscillation_count <= 10.0
+                passes_lppl_core_diagnostics = (
+                    coherent_bubble
+                    and lppl_improvement_pct >= 5.0
+                    and valid_oscillation_count
+                )
+                passes_lppl_diagnostics = passes_lppl_core_diagnostics and bool(residual_diagnostics.get("meanReverting"))
                 raw_score = 0.38 * fit_score + 0.24 * critical_score + 0.18 * trend_score + 0.20 * acceleration_score
-                if not coherent_bubble:
+                if not passes_lppl_core_diagnostics:
                     raw_score = min(raw_score, 35.0)
+                oscillation_denominator = abs(oscillation) + abs(bubble_coefficient)
+                oscillation_balance = abs(oscillation) / oscillation_denominator if oscillation_denominator > 1e-6 else 0.0
                 confidence = (
                     0.45 * max(0.0, min(1.0, fit_r2))
                     + 0.25 * (critical_score / 100)
                     + 0.20 * (acceleration_score / 100)
-                    + 0.10 * min(1.0, abs(oscillation) / max(abs(bubble_coefficient), 1e-6))
+                    + 0.10 * min(1.0, oscillation_balance)
                 )
-                if not coherent_bubble:
+                if not passes_lppl_diagnostics:
                     confidence = min(confidence, 0.45)
                 candidate = {
                     "available": True,
                     "score": bounded_score(raw_score),
                     "confidence": max(0.0, min(1.0, confidence)),
                     "fitR2": fit_r2,
+                    "fitSse": fit_sse,
+                    "powerLawSse": power_sse,
+                    "lpplImprovementPct": lppl_improvement_pct,
+                    "oscillationCount": oscillation_count,
+                    "passesLpplCoreDiagnostics": passes_lppl_core_diagnostics,
+                    "residualDiagnostics": residual_diagnostics,
+                    "passesLpplDiagnostics": passes_lppl_diagnostics,
                     "daysToCritical": tc_offset,
                     "windowDays": n,
                     "bubbleCoefficient": bubble_coefficient,
@@ -3512,14 +3775,58 @@ def fit_lppl_window(sample: list[MarketDailyBar], *, fast: bool = False) -> dict
                     "trailingReturn63d": trailing_63,
                     "acceleration": acceleration,
                     "reason": (
-                        "coherent LPPL acceleration with positive trailing return"
-                        if coherent_bubble
-                        else "LPPL fit lacks acceleration or bubble-sign confirmation"
+                        f"coherent LPPL acceleration; power-law improvement {lppl_improvement_pct:.1f}%, "
+                        f"{oscillation_count:.1f} log-periodic oscillations, residual mean reversion supported"
+                        if passes_lppl_diagnostics
+                        else f"LPPL core shape strong but residual mean reversion is weak: power-law improvement {lppl_improvement_pct:.1f}%, "
+                        f"{oscillation_count:.1f} oscillations"
+                        if passes_lppl_core_diagnostics
+                        else f"LPPL diagnostics weak: power-law improvement {lppl_improvement_pct:.1f}%, "
+                        f"{oscillation_count:.1f} oscillations, residual mean-reverting={bool(residual_diagnostics.get('meanReverting'))}"
                     ),
                 }
-                if best is None or (candidate["score"], candidate["confidence"], candidate["fitR2"]) > (best["score"], best["confidence"], best["fitR2"]):
-                    best = candidate
-    return best or {"available": False, "reason": "bounded LPPL grid produced no stable fit"}
+                candidates.append(candidate)
+    return select_lppl_fit_candidate(candidates) if candidates else {"available": False, "reason": "bounded LPPL grid produced no stable fit"}
+
+
+def lppl_oscillation_count(*, tc: float, omega: float, start_index: int, end_index: int) -> float:
+    start_distance = tc - start_index
+    end_distance = tc - end_index
+    if start_distance <= 0 or end_distance <= 0 or omega <= 0:
+        return 0.0
+    return max(0.0, omega / (2 * math.pi) * math.log(start_distance / end_distance))
+
+
+def lppl_residual_diagnostics(residuals: list[float]) -> dict[str, Any]:
+    clean = [value for value in residuals if math.isfinite(value)]
+    if len(clean) < 20:
+        return {"available": False, "meanReverting": False, "lag1Autocorrelation": None, "residualStd": None}
+    mean_value = sum(clean) / len(clean)
+    centered = [value - mean_value for value in clean]
+    variance = sum(value * value for value in centered)
+    residual_std = math.sqrt(variance / max(1, len(centered) - 1))
+    if residual_std <= 7.5e-4:
+        return {
+            "available": True,
+            "meanReverting": True,
+            "lag1Autocorrelation": 0.0,
+            "residualStd": round(residual_std, 6),
+            "lowResidualVariance": True,
+        }
+    lag_num = sum(centered[index - 1] * centered[index] for index in range(1, len(centered)))
+    lag_den = sum(value * value for value in centered[:-1])
+    lag1 = lag_num / lag_den if lag_den > 1e-12 else 0.0
+    sign_changes = sum(1 for index in range(1, len(centered)) if centered[index - 1] * centered[index] < 0)
+    sign_change_ratio = sign_changes / max(1, len(centered) - 1)
+    mean_reverting = abs(lag1) < 0.98 and sign_change_ratio >= 0.03
+    return {
+        "available": True,
+        "meanReverting": mean_reverting,
+        "lag1Autocorrelation": round(lag1, 4),
+        "residualStd": round(residual_std, 6),
+        "signChangeRatio": round(sign_change_ratio, 4),
+        "lowResidualVariance": False,
+    }
 
 
 def linear_least_squares(rows: list[list[float]], ys: list[float]) -> list[float] | None:
@@ -3611,9 +3918,20 @@ def build_global_lppl_single_index_history(
             "close": round(close, 2),
             "indexedClose": round(100 * close / base_close, 2) if base_close > 0 else None,
         }
+        for key in (
+            "criticalDate",
+            "daysToCritical",
+            "passesLpplCoreDiagnostics",
+            "passesLpplDiagnostics",
+            "lpplImprovementPct",
+            "oscillationCount",
+        ):
+            if key in point:
+                enriched[key] = point[key]
         points.append(enriched)
     if len(points) < 2:
         return {"available": False, "symbol": symbol, "points": points, "summary": "LPPL history replay has fewer than two chartable points"}
+    clip_state = build_lppl_clip_state(points)
     return {
         "available": True,
         "symbol": symbol,
@@ -3622,6 +3940,7 @@ def build_global_lppl_single_index_history(
         "summary": f"{symbol} LPPL replay; risk score and indexed own-market price are shown on separate axes.",
         "points": points,
         "dateRange": {"start": points[0]["date"], "end": points[-1]["date"]},
+        "clipState": clip_state,
     }
 
 
@@ -3632,6 +3951,86 @@ def parse_lppl_point_date(value: Any) -> date | None:
         return date.fromisoformat(value)
     except ValueError:
         return None
+
+
+def build_lppl_clip_state(points: list[dict[str, Any]], *, lookback: int = 20) -> dict[str, Any]:
+    observations: list[dict[str, Any]] = []
+    for point in points:
+        if not isinstance(point, dict):
+            continue
+        point_date = parse_lppl_point_date(point.get("date"))
+        critical_date = parse_lppl_point_date(point.get("criticalDate"))
+        if point_date is None or critical_date is None:
+            continue
+        observations.append(
+            {
+                "date": point_date,
+                "criticalDate": critical_date,
+                "score": optional_float(point.get("score")),
+                "passesCore": bool(point.get("passesLpplCoreDiagnostics")),
+            }
+        )
+    if len(observations) < 5:
+        return {
+            "available": False,
+            "clipLock": False,
+            "status": "insufficient",
+            "statusCn": "样本不足",
+            "sampleSize": len(observations),
+            "summary": "CLIP requires at least five replay points with critical dates.",
+        }
+    recent = observations[-max(5, lookback):]
+    critical_ordinals = sorted(item["criticalDate"].toordinal() for item in recent)
+    q20 = lppl_percentile(critical_ordinals, 0.20)
+    q50 = lppl_percentile(critical_ordinals, 0.50)
+    q80 = lppl_percentile(critical_ordinals, 0.80)
+    tc_window_days = max(0, int(round(q80 - q20)))
+    latest_observation = max(item["date"] for item in recent)
+    median_lead_days = int(round(q50 - latest_observation.toordinal()))
+    core_pass_ratio = sum(1 for item in recent if item["passesCore"]) / len(recent)
+    clip_lock = tc_window_days <= 30 and 5 <= median_lead_days <= 180 and core_pass_ratio >= 0.50
+    converging = tc_window_days <= 60 and 5 <= median_lead_days <= 252 and core_pass_ratio >= 0.35
+    if clip_lock:
+        status, status_cn = "locked", "CLIP锁定"
+    elif converging:
+        status, status_cn = "converging", "CLIP收敛"
+    elif median_lead_days < 0:
+        status, status_cn = "expired", "临界已过"
+    else:
+        status, status_cn = "scattered", "临界分散"
+    return {
+        "available": True,
+        "clipLock": clip_lock,
+        "status": status,
+        "statusCn": status_cn,
+        "sampleSize": len(recent),
+        "lookback": max(5, lookback),
+        "tcMedian": date.fromordinal(int(round(q50))).isoformat(),
+        "tcQ20": date.fromordinal(int(round(q20))).isoformat(),
+        "tcQ80": date.fromordinal(int(round(q80))).isoformat(),
+        "tcWindowDays": tc_window_days,
+        "medianLeadDays": median_lead_days,
+        "corePassRatio": round(core_pass_ratio, 3),
+        "summary": (
+            f"CLIP {status_cn}: recent tc 20-80% window {tc_window_days} days, "
+            f"median lead {median_lead_days} days, core pass {core_pass_ratio:.0%}."
+        ),
+    }
+
+
+def lppl_percentile(sorted_values: list[int], percentile: float) -> float:
+    if not sorted_values:
+        return 0.0
+    if len(sorted_values) == 1:
+        return float(sorted_values[0])
+    pct = max(0.0, min(1.0, percentile))
+    position = (len(sorted_values) - 1) * pct
+    lower_index = int(math.floor(position))
+    upper_index = int(math.ceil(position))
+    if lower_index == upper_index:
+        return float(sorted_values[lower_index])
+    weight = position - lower_index
+    return sorted_values[lower_index] * (1 - weight) + sorted_values[upper_index] * weight
 
 
 def build_global_lppl_per_index_backtests(
@@ -3656,8 +4055,133 @@ def attach_global_lppl_per_index_payloads(
         symbol = str(enriched.get("symbol") or "").upper()
         enriched["history"] = histories.get(symbol, {"available": False, "symbol": symbol, "points": []})
         enriched["backtest"] = backtests.get(symbol, {"available": False, "sampleSize": 0, "horizonTests": []})
+        history_clip = enriched["history"].get("clipState") if isinstance(enriched.get("history"), dict) else None
+        if isinstance(history_clip, dict):
+            enriched["clipState"] = history_clip
         enriched_rows.append(enriched)
     return enriched_rows
+
+
+def attach_global_lppl_forward_signals(index_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    enriched_rows: list[dict[str, Any]] = []
+    for row in index_rows:
+        enriched = dict(row)
+        enriched["forwardSignal"] = build_global_lppl_forward_signal(enriched)
+        enriched_rows.append(enriched)
+    return enriched_rows
+
+
+def build_global_lppl_forward_signal(row: dict[str, Any]) -> dict[str, Any]:
+    symbol = str(row.get("symbol") or "").upper()
+    model_score = optional_float(row.get("score"))
+    if not row.get("available") or model_score is None:
+        return {"available": False, "symbol": symbol, "score": None, "regime": "Unavailable", "regimeCn": "不可用", "summary": "LPPL forward signal unavailable."}
+    history = row.get("history") if isinstance(row.get("history"), dict) else {}
+    history_points = history.get("points", []) if isinstance(history, dict) else []
+    score_momentum_5d = lppl_history_score_delta(history_points, 5)
+    score_momentum_20d = lppl_history_score_delta(history_points, 20)
+    clip_state = row.get("clipState") if isinstance(row.get("clipState"), dict) else history.get("clipState") if isinstance(history, dict) else {}
+    clip_lock = bool(clip_state.get("clipLock")) if isinstance(clip_state, dict) else False
+    backtest = row.get("backtest") if isinstance(row.get("backtest"), dict) else {}
+    validation = row.get("validation") if isinstance(row.get("validation"), dict) else {}
+    threshold = optional_float(backtest.get("threshold") if isinstance(backtest, dict) else None)
+    if threshold is None:
+        threshold = optional_float(validation.get("threshold") if isinstance(validation, dict) else None)
+    if threshold is None:
+        threshold = GLOBAL_LPPL_ALERT_THRESHOLD
+    threshold_distance = model_score - threshold
+    days_to_critical = optional_float(row.get("daysToCritical"))
+    confidence = max(0.0, min(1.0, optional_float(row.get("confidence")) or 0.0))
+    validation_multiplier = optional_float(validation.get("effectiveWeightMultiplier")) if isinstance(validation, dict) else None
+    if validation_multiplier is None:
+        validation_multiplier = optional_float(row.get("effectiveWeightMultiplier"))
+    validation_multiplier = max(0.0, min(1.0, validation_multiplier if validation_multiplier is not None else 0.75))
+    threshold_pressure = risk_linear(threshold_distance, -15.0, 10.0)
+    momentum_pressure = risk_linear(score_momentum_20d if score_momentum_20d is not None else 0.0, -8.0, 12.0)
+    critical_pressure = risk_linear(180.0 - days_to_critical, 0.0, 140.0) if days_to_critical is not None else 50.0
+    raw_score = (
+        0.42 * bounded_score(model_score)
+        + 0.22 * threshold_pressure
+        + 0.18 * momentum_pressure
+        + 0.18 * critical_pressure
+    )
+    if clip_lock:
+        raw_score = min(100.0, raw_score + 8.0)
+    elif isinstance(clip_state, dict) and clip_state.get("status") == "converging":
+        raw_score = min(100.0, raw_score + 3.0)
+    forward_score = bounded_score(raw_score * (0.65 + 0.35 * validation_multiplier) * (0.75 + 0.25 * confidence))
+    drivers: list[str] = []
+    if threshold_distance >= 0:
+        drivers.append("above_threshold")
+    elif threshold_distance >= -10:
+        drivers.append("near_threshold")
+    if score_momentum_20d is not None and score_momentum_20d >= 8:
+        drivers.append("rising")
+    elif score_momentum_20d is not None and score_momentum_20d <= -8:
+        drivers.append("falling")
+    if days_to_critical is not None and days_to_critical <= 90:
+        drivers.append("critical_window")
+    if clip_lock:
+        drivers.append("clip_lock")
+    if validation_multiplier < 0.75:
+        drivers.append("weak_validation")
+    regime, regime_cn = global_lppl_forward_regime(forward_score, score_momentum_20d)
+    return {
+        "available": True,
+        "symbol": symbol,
+        "score": round(forward_score, 1),
+        "regime": regime,
+        "regimeCn": regime_cn,
+        "scoreMomentum5d": round(score_momentum_5d, 1) if score_momentum_5d is not None else None,
+        "scoreMomentum20d": round(score_momentum_20d, 1) if score_momentum_20d is not None else None,
+        "threshold": int(threshold),
+        "thresholdDistance": round(threshold_distance, 1),
+        "daysToCritical": int(days_to_critical) if days_to_critical is not None else None,
+        "clipLock": clip_lock,
+        "clipStatus": str(clip_state.get("status") or "") if isinstance(clip_state, dict) else "",
+        "validationMultiplier": round(validation_multiplier, 2),
+        "drivers": drivers,
+        "summary": global_lppl_forward_summary(symbol, forward_score, regime_cn, score_momentum_20d, threshold_distance, validation_multiplier),
+    }
+
+
+def lppl_history_score_delta(points: list[dict[str, Any]], lookback: int) -> float | None:
+    clean_scores = [
+        optional_float(point.get("score"))
+        for point in points
+        if isinstance(point, dict) and optional_float(point.get("score")) is not None
+    ]
+    if len(clean_scores) < 2:
+        return None
+    latest = clean_scores[-1]
+    anchor = clean_scores[max(0, len(clean_scores) - 1 - max(1, lookback))]
+    return latest - anchor
+
+
+def global_lppl_forward_regime(score: float, score_momentum_20d: float | None) -> tuple[str, str]:
+    if score_momentum_20d is not None and score_momentum_20d <= -8 and score < 60:
+        return "Fading", "前瞻降温"
+    if score >= 70:
+        return "Forward Risk", "前瞻风险"
+    if score >= 55 and (score_momentum_20d or 0.0) > 0:
+        return "Rising Watch", "前瞻升温"
+    if score >= 55:
+        return "Watch", "观察"
+    return "Quiet", "低前瞻压力"
+
+
+def global_lppl_forward_summary(
+    symbol: str,
+    score: float,
+    regime_cn: str,
+    score_momentum_20d: float | None,
+    threshold_distance: float,
+    validation_multiplier: float,
+) -> str:
+    momentum_text = "20D动量不足" if score_momentum_20d is None else f"20D动量{score_momentum_20d:+.1f}"
+    threshold_text = f"距阈值{threshold_distance:+.1f}"
+    validation_text = f"验证权重x{validation_multiplier:.2f}"
+    return f"{symbol} LPPL前瞻压力{score:.1f} ({regime_cn}); {momentum_text}, {threshold_text}, {validation_text}."
 
 
 def apply_global_lppl_index_validation(
@@ -3686,6 +4210,8 @@ def apply_global_lppl_index_validation(
 def build_global_lppl_index_validation(
     index_rows: list[dict[str, Any]],
     bars_by_symbol: dict[str, list[MarketDailyBar]],
+    *,
+    histories: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     for index_row in index_rows:
@@ -3693,7 +4219,9 @@ def build_global_lppl_index_validation(
             continue
         symbol = str(index_row.get("symbol") or "").upper()
         bars = bars_by_symbol.get(symbol, [])
-        row = build_global_lppl_single_index_validation(index_row, bars)
+        history = histories.get(symbol) if isinstance(histories, dict) else None
+        history_points = history.get("points") if isinstance(history, dict) and isinstance(history.get("points"), list) else None
+        row = build_global_lppl_single_index_validation(index_row, bars, history_points=history_points)
         if row:
             rows.append(row)
     if not rows:
@@ -3709,12 +4237,13 @@ def build_global_lppl_single_index_validation(
     bars: list[MarketDailyBar],
     *,
     drawdown_threshold_pct: float = -2.0,
+    history_points: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     symbol = str(index_row.get("symbol") or "").upper()
     clean = normalize_market_bars({symbol: bars}).get(symbol, [])
     if len(clean) < GLOBAL_LPPL_MIN_OBSERVATIONS + 20:
         return None
-    points = build_single_index_lppl_history_points(symbol, clean)
+    points = history_points if history_points is not None else build_single_index_lppl_history_points(symbol, clean)
     observations = build_global_lppl_validation_observations(points, clean, drawdown_threshold_pct)
     if not observations:
         return None
@@ -3754,7 +4283,7 @@ def build_single_index_lppl_history_points(symbol: str, bars: list[MarketDailyBa
         return []
     points: list[dict[str, Any]] = []
     start_index = GLOBAL_LPPL_MIN_OBSERVATIONS - 1
-    step = max(GLOBAL_LPPL_HISTORY_STEP, len(bars) // 36)
+    step = max(1, GLOBAL_LPPL_HISTORY_STEP)
     replay_indices = list(range(start_index, len(bars), step))
     if replay_indices[-1] != len(bars) - 1:
         replay_indices.append(len(bars) - 1)
@@ -3764,7 +4293,18 @@ def build_single_index_lppl_history_points(symbol: str, bars: list[MarketDailyBa
         row = global_lppl_index_row(spec, bars, as_of=target, fast=True)
         score = optional_float(row.get("score"))
         if row.get("available") and score is not None:
-            points.append({"date": target.isoformat(), "score": round(bounded_score(score), 1)})
+            point = {"date": target.isoformat(), "score": round(bounded_score(score), 1)}
+            for key in (
+                "criticalDate",
+                "daysToCritical",
+                "passesLpplCoreDiagnostics",
+                "passesLpplDiagnostics",
+                "lpplImprovementPct",
+                "oscillationCount",
+            ):
+                if key in row:
+                    point[key] = row[key]
+            points.append(point)
     return points
 
 
@@ -4083,6 +4623,7 @@ def equity_short_term_signal_at(
     spy_early_warning: dict[str, Any],
     calendar_events: list[CalendarEvent],
     option_open_interest: OptionOpenInterestSnapshot | None,
+    include_macro_overlay: bool = True,
 ) -> dict[str, Any]:
     components = [
         equity_vol_target_pressure_component(bars_by_symbol, target, weight=EQUITY_RISK_COMPONENT_WEIGHTS["volTargetPressure"]),
@@ -4091,10 +4632,14 @@ def equity_short_term_signal_at(
         equity_sector_rotation_component(bars_by_symbol, target, weight=EQUITY_RISK_COMPONENT_WEIGHTS["sectorRotation"]),
         equity_hot_stock_reversal_component(bars_by_symbol, target, weight=EQUITY_RISK_COMPONENT_WEIGHTS["hotStockReversal"]),
         equity_turnover_component(bars_by_symbol, target, weight=EQUITY_RISK_COMPONENT_WEIGHTS["turnover"]),
-        equity_macro_overlay_component(macro_liquidity_equity, spy_early_warning, target, weight=EQUITY_RISK_COMPONENT_WEIGHTS["macroOverlay"]),
         equity_event_risk_component(bars_by_symbol, target, calendar_events, weight=EQUITY_RISK_COMPONENT_WEIGHTS["eventRisk"]),
         equity_option_oi_component(option_open_interest, target, weight=EQUITY_RISK_COMPONENT_WEIGHTS["optionOI"]),
     ]
+    if include_macro_overlay:
+        components.insert(
+            6,
+            equity_macro_overlay_component(macro_liquidity_equity, spy_early_warning, target, weight=EQUITY_RISK_COMPONENT_WEIGHTS["macroOverlay"]),
+        )
     components = attach_equity_factor_evidence(
         components,
         bars_by_symbol=bars_by_symbol,
@@ -4511,8 +5056,18 @@ def equity_hot_stock_reversal_component(bars_by_symbol: dict[str, list[MarketDai
     if not observed:
         return unavailable_equity_component("hotStockReversal", "热点股集体回落", weight, "热点股票日线不足")
     hot_share = hot_count / max(1, len(observed))
-    reversal_share = reversal_count / max(1, hot_count)
+    raw_reversal_share = reversal_count / max(1, hot_count)
+    small_sample_adjusted = hot_count < 3
+    if small_sample_adjusted:
+        shrink_weight = hot_count / 3
+        reversal_share = 0.50 * (1 - shrink_weight) + raw_reversal_share * shrink_weight
+        heavy_reversal_score = heavy_reversal_count * 10 * shrink_weight
+    else:
+        reversal_share = raw_reversal_share
+        heavy_reversal_score = heavy_reversal_count * 10
     score = bounded_score(20 + risk_linear(hot_share, 0.25, 0.65) * 0.25 + risk_linear(reversal_share, 0.20, 0.55) * 0.45 + heavy_reversal_count * 10)
+    if small_sample_adjusted:
+        score = min(score, bounded_score(20 + risk_linear(hot_share, 0.25, 0.65) * 0.18 + risk_linear(reversal_share, 0.20, 0.55) * 0.32 + heavy_reversal_score))
     drivers = []
     if reversal_count >= 2:
         drivers.append(equity_driver("hotStockReversal", "热点股日内集体回落", f"{reversal_count}/{hot_count} hot names reversed", score))
@@ -4523,7 +5078,15 @@ def equity_hot_stock_reversal_component(bars_by_symbol: dict[str, list[MarketDai
         score,
         f"{reversal_count}/{hot_count}只热点股出现收盘回落或当日下跌; 重挫 {heavy_reversal_count}只",
         drivers=drivers,
-        metrics={"hotCount": hot_count, "reversalCount": reversal_count, "heavyReversalCount": heavy_reversal_count, "sampleSize": len(observed)},
+        metrics={
+            "hotCount": hot_count,
+            "reversalCount": reversal_count,
+            "heavyReversalCount": heavy_reversal_count,
+            "sampleSize": len(observed),
+            "reversalShare": round(raw_reversal_share, 3),
+            "adjustedReversalShare": round(reversal_share, 3),
+            "smallSampleAdjusted": small_sample_adjusted,
+        },
     )
 
 
@@ -4538,11 +5101,14 @@ def equity_turnover_component(bars_by_symbol: dict[str, list[MarketDailyBar]], t
     spy_63 = trailing_return(spy_bars, target, 63)
     if volume_pct is None:
         return unavailable_equity_component("turnover", "成交承接", weight, "SPY成交量不可用")
-    thin_breakout = volume_pct <= 45 and close_loc >= 0.70 and (spy_63 or 0) >= 0.08
+    thin_breakout_strength = 0.0
+    if close_loc >= 0.70 and (spy_63 or 0) >= 0.08:
+        thin_breakout_strength = max(0.0, min(1.0, (48.0 - volume_pct) / 6.0))
+    thin_breakout = thin_breakout_strength > 0
     distribution = volume_pct >= 75 and (close_loc <= 0.40 or (day_ret is not None and day_ret < 0))
     score = 50.0
     if thin_breakout:
-        score = 78.0
+        score = 25.0 + 53.0 * thin_breakout_strength
     if distribution:
         score = max(score, 84.0)
     if not thin_breakout and not distribution:
@@ -4559,7 +5125,7 @@ def equity_turnover_component(bars_by_symbol: dict[str, list[MarketDailyBar]], t
         score,
         f"SPY成交量历史分位 p{volume_pct:.0f}; 收盘位置 {close_loc:.2f}",
         drivers=drivers,
-        metrics={"volumePercentile": round(volume_pct, 1), "closeLocation": round(close_loc, 3), "spyDayReturn": pct_metric(day_ret)},
+        metrics={"volumePercentile": round(volume_pct, 1), "closeLocation": round(close_loc, 3), "spyDayReturn": pct_metric(day_ret), "thinBreakoutStrength": round(thin_breakout_strength, 3)},
     )
 
 
@@ -5430,6 +5996,7 @@ def build_equity_short_term_risk_trend(
             spy_early_warning=spy_early_warning,
             calendar_events=calendar_events,
             option_open_interest=option_open_interest,
+            include_macro_overlay=False,
         )
         if not snapshot.get("available"):
             continue
@@ -5582,6 +6149,12 @@ def build_equity_short_term_risk_backtest(
     tiered_threshold_tests = equity_backtest_tiered_threshold_tests(horizon_tests, horizon=preferred_horizon)
     recommended_caution_threshold = equity_recommended_caution_threshold(calibration_grid)
     high_precision_threshold_test = equity_high_precision_threshold(precision_threshold_tests)
+    walk_forward = equity_walk_forward_backtest(
+        observations,
+        drawdown_threshold_pct,
+        horizon=preferred_horizon,
+    )
+    out_of_sample_threshold_tests = walk_forward.get("thresholdTests", []) if isinstance(walk_forward, dict) else []
     preferred_threshold_test = next(
         (item for item in horizon_tests if item["threshold"] == 75 and item["horizon"] == preferred_horizon),
         {},
@@ -5636,6 +6209,8 @@ def build_equity_short_term_risk_backtest(
         "recommendedCautionThreshold": recommended_caution_threshold,
         "precisionThresholdTests": precision_threshold_tests,
         "highPrecisionThresholdTest": high_precision_threshold_test,
+        "walkForward": walk_forward,
+        "outOfSampleThresholdTests": out_of_sample_threshold_tests,
         "componentDiagnostics": component_diagnostics,
         "preferredThresholdTest": preferred_threshold_test,
         "alertClusterTest": alert_cluster_test,
@@ -5645,6 +6220,8 @@ def build_equity_short_term_risk_backtest(
         "alertWindows": alert_windows,
         "caveats": [
             "Nasdaq daily OHLCV supports historical replay for price, volume, sector rotation, and hot-stock reversal factors.",
+            "Historical replay excludes the current macroOverlay snapshot to avoid contaminating past scores with today's macro state.",
+            "Threshold guidance includes a 70/30 chronological walk-forward view plus precision lift versus the unconditional drawdown base rate.",
             "Free Cboe option OI and broad news feeds are current snapshots or curated feeds, so full historical option/news backfills are excluded unless an archived feed is added.",
             "This is a risk-control backtest, not a standalone return forecast or personal investment recommendation.",
         ],
@@ -5761,6 +6338,14 @@ def equity_backtest_threshold_test(
         "minDrawdownLeadDaysWhenHit": min(hit_leads) if hit_leads else None,
         "maxDrawdownLeadDaysWhenHit": max(hit_leads) if hit_leads else None,
     }
+    precision_value = optional_float(result.get("precision"))
+    base_rate_value = optional_float(result.get("baseRate"))
+    if precision_value is not None and base_rate_value is not None:
+        result["precisionMinusBaseRate"] = round(precision_value - base_rate_value, 1)
+        result["liftVsBaseRate"] = round(precision_value / base_rate_value, 2) if base_rate_value > 0 else None
+    else:
+        result["precisionMinusBaseRate"] = None
+        result["liftVsBaseRate"] = None
     result[f"avgForward{horizon}dWhenAlert"] = result["avgForwardWhenAlert"]
     result[f"avgMaxDrawdown{horizon}dWhenAlert"] = result["avgMaxDrawdownWhenAlert"]
     if horizon == 10:
@@ -5868,6 +6453,68 @@ def equity_high_precision_threshold(precision_grid: list[dict[str, Any]]) -> dic
         }
     )
     return selected
+
+
+def equity_walk_forward_backtest(
+    observations: list[dict[str, Any]],
+    drawdown_threshold_pct: float,
+    *,
+    horizon: int,
+) -> dict[str, Any]:
+    if len(observations) < 20:
+        return {
+            "available": False,
+            "summary": "walk-forward sample requires at least 20 observations",
+            "inSample": {"sampleSize": len(observations)},
+            "outOfSample": {"sampleSize": 0},
+            "thresholdTests": [],
+        }
+    split_index = max(1, min(len(observations) - 1, int(len(observations) * 0.70)))
+    in_sample = observations[:split_index]
+    out_sample = observations[split_index:]
+    thresholds = (50, 55, 60, 65, 70, 75)
+    in_grid = [
+        equity_backtest_threshold_test(threshold, in_sample, drawdown_threshold_pct, horizon=horizon)
+        for threshold in thresholds
+    ]
+    selected = equity_recommended_caution_threshold(in_grid) or max(
+        in_grid,
+        key=lambda row: (
+            optional_float(row.get("precision")) or 0.0,
+            optional_float(row.get("recall")) or 0.0,
+            -(optional_float(row.get("threshold")) or 0.0),
+        ),
+    )
+    selected_threshold = int(selected.get("threshold") or 75)
+    tested_thresholds = sorted(set(thresholds + (selected_threshold, 75)))
+    out_grid = [
+        equity_backtest_threshold_test(threshold, out_sample, drawdown_threshold_pct, horizon=horizon)
+        for threshold in tested_thresholds
+    ]
+    selected_out = next((row for row in out_grid if int(row.get("threshold") or -1) == selected_threshold), {})
+    return {
+        "available": True,
+        "method": "70/30 chronological walk-forward: choose threshold on the first 70% and report precision/recall on the final 30%.",
+        "splitDate": out_sample[0]["date"] if out_sample else None,
+        "selectedThreshold": selected_threshold,
+        "inSample": {
+            "sampleSize": len(in_sample),
+            "dateRange": {"start": in_sample[0]["date"], "end": in_sample[-1]["date"]},
+            "selectedThresholdTest": selected,
+            "thresholdTests": in_grid,
+        },
+        "outOfSample": {
+            "sampleSize": len(out_sample),
+            "dateRange": {"start": out_sample[0]["date"], "end": out_sample[-1]["date"]} if out_sample else {},
+            "selectedThresholdTest": selected_out,
+        },
+        "thresholdTests": out_grid,
+        "summary": (
+            f"IS选择阈值{selected_threshold}; OOS告警{selected_out.get('alertDays', 0)}次, "
+            f"precision {format_optional_percent_value(selected_out.get('precision'))}, "
+            f"base {format_optional_percent_value(selected_out.get('baseRate'))}."
+        ),
+    }
 
 
 def equity_backtest_component_diagnostics(

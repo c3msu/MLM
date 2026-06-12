@@ -18,6 +18,7 @@ from treasury_data.build_dashboard import (  # noqa: E402
     GLOBAL_LPPL_INDEX_SPECS,
     build_equity_short_term_risk_index,
     build_global_lppl_risk_index,
+    fetch_daily_bars_with_stooq_fallback,
 )
 from treasury_data.history_store import history_db_for_output, save_dashboard_history  # noqa: E402
 from treasury_data.sources import CalendarEvent, MarketDailyBar, fetch_nasdaq_daily_bars, fetch_stooq_daily_bars  # noqa: E402
@@ -53,8 +54,8 @@ def dashboard_events_to_calendar_events(dashboard: dict[str, Any]) -> list[Calen
     return parsed
 
 
-def build_source_status_rows(market_bars: dict[str, list[MarketDailyBar]]) -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
+def build_source_status_rows(market_bars: dict[str, list[MarketDailyBar]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     for symbol in EQUITY_RISK_SYMBOLS:
         bars = market_bars.get(symbol, [])
         if bars:
@@ -71,7 +72,7 @@ def build_source_status_rows(market_bars: dict[str, list[MarketDailyBar]]) -> li
     return rows
 
 
-def merge_source_status(existing: Any, equity_rows: list[dict[str, str]]) -> list[dict[str, str]]:
+def merge_source_status(existing: Any, equity_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     existing_rows = [row for row in existing if isinstance(row, dict)] if isinstance(existing, list) else []
     equity_names = {row["name"] for row in equity_rows}
     retained = [row for row in existing_rows if row.get("name") not in equity_names]
@@ -83,7 +84,7 @@ def build_updated_dashboard(
     market_bars: dict[str, list[MarketDailyBar]],
     *,
     generated_at: datetime | None = None,
-    source_status_rows: list[dict[str, str]] | None = None,
+    source_status_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     updated = copy.deepcopy(dashboard)
     risk = build_equity_short_term_risk_index(
@@ -109,17 +110,26 @@ def fetch_equity_market_bars(
     timeout: int = 14,
     limit: int = 900,
     fetcher: DailyBarFetcher = fetch_nasdaq_daily_bars,
-) -> tuple[dict[str, list[MarketDailyBar]], list[dict[str, str]]]:
+    fallback_fetcher: DailyBarFetcher = fetch_stooq_daily_bars,
+) -> tuple[dict[str, list[MarketDailyBar]], list[dict[str, Any]]]:
     equity_end = end or datetime.now(timezone.utc).date()
     equity_start = equity_end - timedelta(days=365 * years + 10)
     market_bars: dict[str, list[MarketDailyBar]] = {}
-    source_rows: list[dict[str, str]] = []
+    source_rows: list[dict[str, Any]] = []
     for symbol, asset_class in EQUITY_RISK_SYMBOLS.items():
         try:
-            bars = fetcher(symbol, start=equity_start, end=equity_end, asset_class=asset_class, timeout=timeout, limit=limit)
+            bars, status = fetch_daily_bars_with_stooq_fallback(
+                symbol,
+                start=equity_start,
+                end=equity_end,
+                asset_class=asset_class,
+                timeout=timeout,
+                limit=limit,
+                fetcher=fetcher,
+                fallback_fetcher=fallback_fetcher,
+            )
             market_bars[symbol] = bars
-            latest = bars[-1].date.isoformat() if bars else "none"
-            source_rows.append({"name": f"Nasdaq {symbol} OHLCV", "status": "ok", "latest": latest})
+            source_rows.append({"name": f"Nasdaq {symbol} OHLCV", **status})
         except Exception as exc:  # noqa: BLE001
             source_rows.append({"name": f"Nasdaq {symbol} OHLCV", "status": "warning", "latest": str(exc)})
     for spec in GLOBAL_LPPL_INDEX_SPECS:
@@ -131,20 +141,20 @@ def fetch_equity_market_bars(
             continue
         if spec.get("source") == "nasdaq":
             try:
-                bars = fetcher(
+                bars, status = fetch_daily_bars_with_stooq_fallback(
                     str(spec["sourceSymbol"]),
                     start=equity_start,
                     end=equity_end,
                     asset_class=str(spec.get("assetClass") or "etf"),
                     timeout=timeout,
                     limit=limit,
+                    fallback_symbol=str(spec.get("fallbackSymbol") or ""),
+                    output_symbol=symbol,
+                    fetcher=fetcher,
+                    fallback_fetcher=fallback_fetcher,
                 )
-                market_bars[symbol] = [
-                    MarketDailyBar(symbol=symbol, date=bar.date, open=bar.open, high=bar.high, low=bar.low, close=bar.close, volume=bar.volume, source=bar.source)
-                    for bar in bars
-                ]
-                latest = bars[-1].date.isoformat() if bars else "none"
-                source_rows.append({"name": f"Global LPPL {symbol} OHLCV", "status": "ok", "latest": latest})
+                market_bars[symbol] = bars
+                source_rows.append({"name": f"Global LPPL {symbol} OHLCV", **status})
             except Exception as exc:  # noqa: BLE001
                 source_rows.append({"name": f"Global LPPL {symbol} OHLCV", "status": "warning", "latest": str(exc)})
             continue

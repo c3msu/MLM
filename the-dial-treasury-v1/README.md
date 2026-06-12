@@ -81,7 +81,10 @@ history, and optional daily background updates.
   Its payload includes per-index `validation` rows, an `indexValidation`
   summary, and separate per-index `history`/`backtest` blocks. The top-level
   LPPL `score` stays `null`; markets are reviewed separately rather than
-  combined into one score.
+  combined into one score. Each index also carries a `forwardSignal` that
+  converts the raw LPPL fit into a validation-weighted forward-pressure read
+  using same-day-or-earlier LPPL history momentum, threshold distance, and
+  critical-window timing.
 - Local REST API routes when using `scripts/serve.py`.
 - Daily background update entrypoints through the local Python server or macOS
   LaunchAgent.
@@ -139,6 +142,13 @@ candidate still has the core curve, scorecard, and Conditions Score trend
 content, it becomes the served snapshot and is persisted to history; if the
 candidate lacks that core content, the service keeps serving the last healthy
 dashboard and does not write it to history.
+
+The equity OHLCV fetch path tries Nasdaq public historical quote rows first and
+falls back to Stooq daily CSV symbols when Nasdaq is blocked or unavailable.
+Fallback rows remain visible in `sourceStatus` with `source:
+"stooq-fallback"` and a note carrying the original Nasdaq failure, so the
+dashboard can keep a usable daily market structure snapshot without hiding the
+degraded source path.
 
 The hero `刷新` button triggers `POST /api/update`, which starts the same
 public-data refresh in a background thread and returns the current snapshot
@@ -280,9 +290,13 @@ Current real public sources:
   metadata; each available index carries its own `history.points` curve and
   `backtest` against that same market's future drawdown windows; and
   `indexValidation` validates each available index against its own
-  15-trading-day forward drawdown history. The top-level `history`/`backtest`
-  remain unavailable placeholders to prevent an implied blended LPPL score.
-  This block is intentionally not included in `equityShortTermRisk`.
+  15-trading-day forward drawdown history. The raw `score` remains the current
+  LPPL fit score; `forwardSignal.score` is a separate no-look-ahead pressure
+  read that blends LPPL score momentum, distance to the recommended threshold,
+  critical-window timing, confidence, and the validation weight. The top-level
+  `history`/`backtest` remain unavailable placeholders to prevent an implied
+  blended LPPL score. This block is intentionally not included in
+  `equityShortTermRisk`.
 - The duration/curve conclusion audit uses the editable scorecard, not the
   0-100 Conditions Score. Individual factor contribution is `factor score *
   normalized module weight / factor count`; source modes then discount evidence

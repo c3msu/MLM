@@ -1,5 +1,15 @@
+const GLOBAL_LPPL_INLINE_HISTORY_MAX_POINTS = 120;
+
 const DEFAULT_DATA = {
   asOf: "2026-05-18",
+  conclusionSourceQuality: {
+    "real-public": 1,
+    "derived-public": 0.9,
+    "official-news": 0.8,
+    "proxy-public": 0.65,
+    "modeled": 0.55,
+    "manual-placeholder": 0.25
+  },
   curve: {
     tenors: ["1M", "3M", "6M", "1Y", "2Y", "3Y", "5Y", "7Y", "10Y", "20Y", "30Y"],
     today: [3.69, 3.68, 3.77, 3.81, 4.07, 4.14, 4.27, 4.43, 4.61, 5.14, 5.14],
@@ -474,6 +484,7 @@ const STORAGE_KEY = "the-dial-treasury-v1-state";
 const LANGUAGE_STORAGE_KEY = "the-dial-treasury-v1-language";
 const RUNTIME_AUTO_REFRESH_MS = 5 * 60 * 1000;
 const EQUITY_FRESHNESS_FAST_REFRESH_MS = 60 * 1000;
+const EQUITY_FRESHNESS_BACKOFF_MAX_MS = 10 * 60 * 1000;
 const EQUITY_FRESHNESS_NEAR_READY_MINUTES = 30;
 const I18N = window.TreasuryI18n;
 const IDEA_SPY_PROXY_LABEL = "S&P 500 price-index proxy for SPY";
@@ -491,6 +502,7 @@ let equityFreshnessStatus = null;
 let runtimeAutoRefreshTimer = null;
 let equityFreshnessRefreshTimer = null;
 let equityFreshnessRefreshInFlight = false;
+let equityFreshnessFailureCount = 0;
 let sourceStatusFilter = "all";
 let sourceStatusQuery = "";
 let percentileTrendCache = [];
@@ -513,14 +525,6 @@ const SOURCE_STATUS_FILTERS = [
   { id: "modeled", label: "模型" },
   { id: "problem", label: "问题" },
 ];
-const CONCLUSION_SOURCE_QUALITY = {
-  "real-public": 1,
-  "derived-public": 0.9,
-  "official-news": 0.8,
-  "proxy-public": 0.65,
-  "modeled": 0.55,
-  "manual-placeholder": 0.25
-};
 const LOWER_CONFIDENCE_SOURCE_MODES = new Set(["proxy-public", "modeled", "manual-placeholder"]);
 const PERCENTILE_MODAL_MODES = [
   { id: "all", label: "全部", title: "全部因子" },
@@ -615,19 +619,27 @@ async function loadEquityFreshnessStatus() {
     clearTimeout(timeout);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
+    equityFreshnessFailureCount = 0;
     equityFreshnessStatus = payload.equityRiskFreshness || null;
     renderEquityFreshnessStatus(equityFreshnessStatus);
     scheduleEquityFreshnessRefresh(equityFreshnessStatus);
   } catch (error) {
     console.warn("Failed to load equity risk freshness", error);
+    equityFreshnessFailureCount += 1;
     equityFreshnessStatus = { stale: true, error: error.message };
     renderEquityFreshnessStatus(equityFreshnessStatus);
     scheduleEquityFreshnessRefresh(equityFreshnessStatus);
   }
 }
 
+function equityFreshnessBackoffDelay() {
+  const exponent = Math.max(0, equityFreshnessFailureCount - 1);
+  return Math.min(EQUITY_FRESHNESS_BACKOFF_MAX_MS, EQUITY_FRESHNESS_FAST_REFRESH_MS * (2 ** exponent));
+}
+
 function equityFreshnessRefreshDelay(freshness) {
   if (!freshness) return RUNTIME_AUTO_REFRESH_MS;
+  if (freshness.error) return equityFreshnessBackoffDelay();
   const phase = freshness.phase || "";
   const minutesUntilExpected = Number(freshness.minutesUntilExpected);
   if (freshness.stale || freshness.timeliness === "catchup" || phase === "catchup") {
@@ -845,7 +857,8 @@ function curveLabel(score) {
 }
 
 function conclusionSourceQuality(mode) {
-  return CONCLUSION_SOURCE_QUALITY[String(mode || "real-public")] ?? 1;
+  const qualityMap = state.conclusionSourceQuality || DEFAULT_DATA.conclusionSourceQuality || {};
+  return qualityMap[String(mode || "real-public")] ?? 1;
 }
 
 function conclusionConfidenceLevel(evidenceQuality, concentration, warningCount, errorCount) {
@@ -996,7 +1009,7 @@ function sourceStatusCounts(rows = sourceStatusRows()) {
     if (status === "ok") counts.ok += 1;
     else if (status === "modeled") counts.modeled += 1;
     else if (status === "error") counts.error += 1;
-    else if (status === "warning" || status === "warn") counts.warning += 1;
+    else if (status === "warning" || status === "warn" || status === "stale") counts.warning += 1;
     else counts.other += 1;
     return counts;
   }, { total: 0, ok: 0, modeled: 0, error: 0, warning: 0, other: 0 });
@@ -1015,6 +1028,7 @@ function sourceStatusLabel(status) {
   if (normalized === "modeled") return "模型/代理";
   if (normalized === "error") return "错误";
   if (normalized === "warning" || normalized === "warn") return "警告";
+  if (normalized === "stale") return "过期";
   if (normalized === "static") return "静态备用";
   return "未知";
 }
@@ -1027,14 +1041,27 @@ function sourceStatusMatchesFilter(source, filter = sourceStatusFilter) {
   const status = normalizedSourceStatus(source);
   if (filter === "ok") return status === "ok";
   if (filter === "modeled") return status === "modeled";
-  if (filter === "problem") return status === "error" || status === "warning" || status === "warn";
+  if (filter === "problem") return status === "error" || status === "warning" || status === "warn" || status === "stale";
   return true;
 }
 
 function sourceStatusSearchText(source) {
-  return [source.name, source.status, source.latest, source.note]
+  return [source.name, source.status, source.latest, source.note, source.ageDays, source.expectedMaxAgeDays]
     .map((value) => String(value || "").toLowerCase())
     .join(" ");
+}
+
+function sourceStatusAgeText(source) {
+  const ageDays = Number(source.ageDays);
+  if (!Number.isFinite(ageDays)) return "--";
+  if (ageDays <= 0) return "今天";
+  return `${Math.round(ageDays)}天`;
+}
+
+function sourceStatusCadenceText(source) {
+  const expectedMaxAgeDays = Number(source.expectedMaxAgeDays);
+  if (!Number.isFinite(expectedMaxAgeDays)) return "--";
+  return `<=${Math.round(expectedMaxAgeDays)}天`;
 }
 
 function filterSourceStatusRows(rows = sourceStatusRows()) {
@@ -1081,7 +1108,7 @@ function renderSourceStatusModal() {
   `).join("");
   const visibleRows = filterSourceStatusRows(rows);
   renderSourceStatusControls(rows, visibleRows.length);
-  const statusOrder = { error: 0, warning: 1, warn: 1, modeled: 2, static: 3, unknown: 4, ok: 5 };
+  const statusOrder = { error: 0, stale: 1, warning: 2, warn: 2, modeled: 3, static: 4, unknown: 5, ok: 6 };
   const sorted = [...visibleRows].sort((a, b) => {
     const aStatus = normalizedSourceStatus(a);
     const bStatus = normalizedSourceStatus(b);
@@ -1089,7 +1116,7 @@ function renderSourceStatusModal() {
   });
   table.innerHTML = `
     <thead>
-      <tr><th>状态</th><th>数据源</th><th>最新日期 / 说明</th></tr>
+      <tr><th>状态</th><th>数据源</th><th>最新日期 / 说明</th><th>数据年龄</th><th>预期节奏</th></tr>
     </thead>
     <tbody>
       ${sorted.length ? sorted.map((source) => `
@@ -1097,8 +1124,10 @@ function renderSourceStatusModal() {
           <td><span class="status-badge ${sourceStatusClass(source.status)}">${sourceStatusLabel(source.status)}</span></td>
           <td>${escapeHtml(source.name || "--")}</td>
           <td>${escapeHtml(source.latest || source.note || "--")}</td>
+          <td>${escapeHtml(sourceStatusAgeText(source))}</td>
+          <td>${escapeHtml(sourceStatusCadenceText(source))}</td>
         </tr>
-      `).join("") : `<tr><td colspan="3" class="empty-table-cell">没有匹配数据源</td></tr>`}
+      `).join("") : `<tr><td colspan="5" class="empty-table-cell">没有匹配数据源</td></tr>`}
     </tbody>
   `;
 }
@@ -1110,12 +1139,14 @@ function csvCell(value) {
 function exportSourceStatusCsv() {
   const rows = filterSourceStatusRows();
   const csv = [
-    ["status", "label", "name", "latest_or_note"].map(csvCell).join(","),
+    ["status", "label", "name", "latest_or_note", "age_days", "expected_max_age_days"].map(csvCell).join(","),
     ...rows.map((source) => [
       source.status || "unknown",
       sourceStatusLabel(source.status),
       source.name || "",
       source.latest || source.note || "",
+      source.ageDays ?? "",
+      source.expectedMaxAgeDays ?? "",
     ].map(csvCell).join(",")),
   ].join("\n");
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
@@ -2259,6 +2290,7 @@ function renderGlobalLpplRisk(payload) {
   const indices = globalLpplIndexRows(item);
   const available = indices.filter((row) => row.available && Number.isFinite(Number(row.score)));
   const leader = available.slice().sort((a, b) => Number(b.score) - Number(a.score))[0] || null;
+  const forwardLeader = available.slice().sort((a, b) => Number(globalLpplForwardSignal(b)?.score) - Number(globalLpplForwardSignal(a)?.score))[0] || null;
   if (!selectedGlobalLpplSymbol || !available.some((row) => row.symbol === selectedGlobalLpplSymbol)) {
     selectedGlobalLpplSymbol = leader?.symbol || available[0]?.symbol || "";
   }
@@ -2275,17 +2307,19 @@ function renderGlobalLpplRisk(payload) {
     `;
   }
   const indexValidation = item.indexValidation && typeof item.indexValidation === "object" ? item.indexValidation : {};
-  const riskClass = leader ? spyWarningClass(Number(leader.score)) : "neutral";
+  const forwardLeaderSignal = globalLpplForwardSignal(forwardLeader);
+  const riskClass = forwardLeaderSignal ? spyWarningClass(Number(forwardLeaderSignal.score)) : leader ? spyWarningClass(Number(leader.score)) : "neutral";
   const highRiskCount = available.filter((row) => Number(row.score) >= 65).length;
+  const forwardRiskCount = available.filter((row) => Number(globalLpplForwardSignal(row)?.score) >= 65).length;
   return `
     <div class="global-lppl-head ${riskClass}">
       <div>
         <span>Global LPPL Risk · 全球指数泡沫临界风险</span>
-        <strong>${leader ? escapeHtml(leader.symbol) : "--"}</strong>
+        <strong>${forwardLeader ? escapeHtml(forwardLeader.symbol) : leader ? escapeHtml(leader.symbol) : "--"}</strong>
       </div>
       <div>
-        <b>${leader ? `${escapeHtml(leader.name || leader.symbol)} ${Number(leader.score).toFixed(1)}` : escapeHtml(item.regimeCn || item.regime || "--")} · ${escapeHtml(item.asOf || "--")}</b>
-        <small>per-index only · ${available.length}/${indices.length} available · risk ${highRiskCount}</small>
+        <b>${forwardLeaderSignal ? `前瞻压力 ${escapeHtml(forwardLeader.name || forwardLeader.symbol)} ${Number(forwardLeaderSignal.score).toFixed(1)}` : leader ? `${escapeHtml(leader.name || leader.symbol)} ${Number(leader.score).toFixed(1)}` : escapeHtml(item.regimeCn || item.regime || "--")} · ${escapeHtml(item.asOf || "--")}</b>
+        <small>per-index only · ${available.length}/${indices.length} available · raw risk ${highRiskCount} · forward risk ${forwardRiskCount}</small>
       </div>
     </div>
     <p class="global-lppl-summary">${escapeHtml(item.summary || "")}</p>
@@ -2326,6 +2360,35 @@ function globalLpplIndexBacktest(item, symbol) {
   return map[normalized] && typeof map[normalized] === "object" ? map[normalized] : { available: false, horizonTests: [] };
 }
 
+function globalLpplForwardSignal(row) {
+  return row?.forwardSignal && typeof row.forwardSignal === "object" && row.forwardSignal.available ? row.forwardSignal : null;
+}
+
+function globalLpplClipState(row, history = null) {
+  if (row?.clipState && typeof row.clipState === "object" && row.clipState.available) return row.clipState;
+  if (history?.clipState && typeof history.clipState === "object" && history.clipState.available) return history.clipState;
+  return null;
+}
+
+function globalLpplClipSummary(clipState) {
+  if (!clipState) return "";
+  const locked = Boolean(clipState.clipLock);
+  const status = locked ? (clipState.statusCn || "CLIP锁定") : clipState.statusCn || clipState.status || "CLIP";
+  const statusText = String(status).toUpperCase().startsWith("CLIP") ? String(status) : `CLIP ${status}`;
+  const tc = clipState.tcMedian ? `tc ${clipState.tcMedian}` : "";
+  const windowDays = Number(clipState.tcWindowDays);
+  const windowText = Number.isFinite(windowDays) ? `20-80 ${windowDays.toFixed(0)}D` : "";
+  const leadDays = Number(clipState.medianLeadDays);
+  const leadText = Number.isFinite(leadDays) ? `lead ${leadDays.toFixed(0)}D` : "";
+  return [statusText, tc, windowText, leadText].filter(Boolean).join(" · ");
+}
+
+function globalLpplPointCriticalSummary(point) {
+  if (!point?.criticalDate) return "";
+  const days = Number(point.daysToCritical);
+  return `critical ${point.criticalDate}${Number.isFinite(days) ? ` · ${days.toFixed(0)}D` : ""}`;
+}
+
 function renderGlobalLpplPerIndexBacktestStrip(item) {
   const rows = globalLpplIndexRows(item).filter((row) => row.available && Number.isFinite(Number(row.score)));
   if (!rows.length) return `<div class="global-lppl-backtest"><span><b>逐市场验证</b><strong>--</strong><small>等待可回放指数样本</small></span></div>`;
@@ -2355,9 +2418,14 @@ function renderGlobalLpplIndexGrid(indices) {
         const score = Number(row.score);
         const confidence = Number(row.confidence);
         const validation = row.validation && typeof row.validation === "object" ? row.validation : {};
+        const forwardSignal = globalLpplForwardSignal(row);
+        const clipText = globalLpplClipSummary(globalLpplClipState(row));
         const riskClass = row.available ? spyWarningClass(score) : "neutral";
         const validationText = row.available && validation.symbol
           ? `15D验证 ${formatPercentMetric(validation.precision15d)} · ${escapeHtml(validation.validationRoleCn || validation.validationRole || "")}`
+          : "";
+        const forwardText = forwardSignal
+          ? `前瞻压力 ${Number(forwardSignal.score).toFixed(0)} · ${escapeHtml(forwardSignal.regimeCn || forwardSignal.regime || "")} · 20D ${formatSignedMetric(forwardSignal.scoreMomentum20d, 1)}`
           : "";
         return `
           <div class="global-lppl-index-card ${riskClass} ${row.available ? "" : "missing"}">
@@ -2365,6 +2433,8 @@ function renderGlobalLpplIndexGrid(indices) {
             <strong>${row.available && Number.isFinite(score) ? score.toFixed(0) : "--"}</strong>
             <b>${escapeHtml(row.statusCn || row.status || "--")}</b>
             <small>${row.available ? `criticalDate ${escapeHtml(row.criticalDate || "--")} · ${Number(row.daysToCritical) || "--"}D · fitR2 ${formatNumberMetric(row.fitR2, 2)} · conf ${formatPercentMetric(confidence * 100)}` : escapeHtml(row.reason || "source unavailable")}</small>
+            ${forwardText ? `<small>${forwardText}</small>` : ""}
+            ${clipText ? `<small class="global-lppl-clip-note">${escapeHtml(clipText)}</small>` : ""}
             ${validationText ? `<small>${validationText}</small>` : ""}
             ${row.available ? `<button class="icon-btn chart-expand-btn expandGlobalLpplRiskHistory" type="button" data-global-lppl-symbol="${escapeHtml(symbol)}" title="放大查看${escapeHtml(symbol)} LPPL历史曲线" aria-label="放大查看${escapeHtml(symbol)} LPPL历史曲线">⛶</button>` : ""}
           </div>
@@ -2395,6 +2465,9 @@ function prepareGlobalLpplHistorySeries(item, symbol) {
     score: Number(point.score),
     indexedClose: Number(point.indexedClose),
     close: Number(point.close),
+    criticalDate: point.criticalDate,
+    daysToCritical: Number(point.daysToCritical),
+    passesLpplCoreDiagnostics: Boolean(point.passesLpplCoreDiagnostics),
   })).filter((point) => Number.isFinite(point.time) && Number.isFinite(point.score));
   return {
     symbol: activeSymbol,
@@ -2403,6 +2476,13 @@ function prepareGlobalLpplHistorySeries(item, symbol) {
     series,
     priceSeries: series.filter((point) => Number.isFinite(point.indexedClose)),
   };
+}
+
+function sampleGlobalLpplHistorySeries(series, maxPoints = GLOBAL_LPPL_INLINE_HISTORY_MAX_POINTS) {
+  if (!Array.isArray(series) || series.length <= maxPoints) return series;
+  if (maxPoints < 2) return series.slice(-Math.max(0, maxPoints));
+  const last = series.length - 1;
+  return Array.from({ length: maxPoints }, (_, index) => series[Math.round(index * last / (maxPoints - 1))]);
 }
 
 function globalLpplHistoryScale(series, priceSeries, options = {}) {
@@ -2424,14 +2504,17 @@ function globalLpplHistoryScale(series, priceSeries, options = {}) {
 }
 
 function renderGlobalLpplRiskHistoryChart(item, options = {}) {
-  const { symbol, row, series, priceSeries } = prepareGlobalLpplHistorySeries(item, options.symbol);
-  if (series.length < 2) return `<div class="empty-state compact">LPPL历史曲线样本不足</div>`;
-  const scale = globalLpplHistoryScale(series, priceSeries, options);
+  const { symbol, row, history, series } = prepareGlobalLpplHistorySeries(item, options.symbol);
+  const chartSeries = options.large ? series : sampleGlobalLpplHistorySeries(series);
+  const chartPriceSeries = chartSeries.filter((point) => Number.isFinite(point.indexedClose));
+  if (chartSeries.length < 2) return `<div class="empty-state compact">LPPL历史曲线样本不足</div>`;
+  const scale = globalLpplHistoryScale(chartSeries, chartPriceSeries, options);
   const { W, H, pad, priceLow, priceHigh, x, yRisk, yPrice } = scale;
-  const riskPath = macroLiquidityPath(series, x, yRisk, "score");
-  const pricePath = priceSeries.length >= 2 ? macroLiquidityPath(priceSeries, x, yPrice, "indexedClose") : "";
-  const latest = series[series.length - 1];
-  const ticks = buildDateTicks(series, options.large ? 8 : 5);
+  const riskPath = macroLiquidityPath(chartSeries, x, yRisk, "score");
+  const pricePath = chartPriceSeries.length >= 2 ? macroLiquidityPath(chartPriceSeries, x, yPrice, "indexedClose") : "";
+  const latest = chartSeries[chartSeries.length - 1];
+  const clipText = globalLpplClipSummary(globalLpplClipState(row, history));
+  const ticks = buildDateTicks(chartSeries, options.large ? 8 : 5);
   const interactiveLayer = options.interactive ? `
         <line class="global-lppl-hover-guide" x1="${pad.l}" x2="${pad.l}" y1="${pad.t}" y2="${H - pad.b}" stroke-opacity="0"></line>
         <circle class="global-lppl-hover-dot risk" cx="${x(latest.time).toFixed(1)}" cy="${yRisk(latest.score).toFixed(1)}" r="5" opacity="0"></circle>
@@ -2446,6 +2529,7 @@ function renderGlobalLpplRiskHistoryChart(item, options = {}) {
           ${options.large ? "" : `<button class="icon-btn chart-expand-btn expandGlobalLpplRiskHistory" type="button" data-global-lppl-symbol="${escapeHtml(symbol)}" title="放大查看${escapeHtml(symbol)} LPPL历史曲线" aria-label="放大查看${escapeHtml(symbol)} LPPL历史曲线">⛶</button>`}
         </div>
       </div>
+      ${clipText ? `<small class="global-lppl-clip-note">${escapeHtml(clipText)}</small>` : ""}
       <svg data-global-lppl-history-chart data-global-lppl-symbol="${escapeHtml(symbol)}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${escapeHtml(symbol)} LPPL risk historical curve versus indexed price">
         <rect x="0" y="0" width="${W}" height="${H}" fill="transparent"></rect>
         ${[45, 65, 75].map((tick) => `
@@ -2467,11 +2551,12 @@ function renderGlobalLpplRiskHistoryChart(item, options = {}) {
 }
 
 function renderGlobalLpplRiskHistoryModalStats(item) {
-  const { symbol, row, series } = prepareGlobalLpplHistorySeries(item, selectedGlobalLpplSymbol);
+  const { symbol, row, history, series } = prepareGlobalLpplHistorySeries(item, selectedGlobalLpplSymbol);
   const backtest = globalLpplIndexBacktest(item, symbol);
   const horizonTests = Array.isArray(backtest.horizonTests) ? backtest.horizonTests : [];
   const preferred = horizonTests.find((row) => Number(row.horizon) === 15) || horizonTests[0] || {};
   const cluster = backtest.alertClusterTest && typeof backtest.alertClusterTest === "object" ? backtest.alertClusterTest : {};
+  const clipState = globalLpplClipState(row, history);
   if (series.length < 2) return `<div class="empty-state compact">LPPL历史样本不足</div>`;
   const latest = series[series.length - 1];
   return [
@@ -2480,6 +2565,9 @@ function renderGlobalLpplRiskHistoryModalStats(item) {
     ["区间", `${series[0].date} / ${latest.date}`],
     ["最新LPPL", latest.score.toFixed(1)],
     ["价格指数", Number.isFinite(latest.indexedClose) ? latest.indexedClose.toFixed(1) : "--"],
+    ["CLIP", clipState ? (clipState.statusCn || clipState.status || "--") : "--"],
+    ["tc中位", clipState?.tcMedian || "--"],
+    ["tc窗口", Number.isFinite(Number(clipState?.tcWindowDays)) ? `${Number(clipState.tcWindowDays).toFixed(0)}D` : "--"],
     ["阈值", `score≥${Number(backtest.threshold) || 65}`],
     ["15D精确率", formatPercentMetric(preferred.precision)],
     ["误报", `${Number(preferred.falsePositives) || 0}`],
@@ -2548,7 +2636,7 @@ function bindGlobalLpplRiskHistoryInteractions(chartNode, item, options = {}) {
     tooltip.innerHTML = `
       <b>${escapeHtml(point.date)} · ${escapeHtml(symbol)} LPPL ${point.score.toFixed(1)}</b>
       <span>${escapeHtml(symbol)} indexed ${Number.isFinite(point.indexedClose) ? point.indexedClose.toFixed(1) : "--"} · close ${Number.isFinite(point.close) ? point.close.toFixed(2) : "--"}</span>
-      <small>per-index LPPL replay · no blended global score</small>
+      <small>${escapeHtml(globalLpplPointCriticalSummary(point) || "per-index LPPL replay")} · no blended global score</small>
     `;
     const parentRect = (tooltip.offsetParent || chartNode).getBoundingClientRect();
     tooltip.hidden = false;

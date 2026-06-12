@@ -334,6 +334,8 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn("renderGlobalLpplRisk", app_js)
         self.assertIn("renderGlobalLpplRiskHistoryChart", app_js)
         self.assertIn("renderGlobalLpplIndexHistoryCharts", app_js)
+        self.assertIn("sampleGlobalLpplHistorySeries", app_js)
+        self.assertIn("GLOBAL_LPPL_INLINE_HISTORY_MAX_POINTS", app_js)
         self.assertIn("fullWidth: true", app_js)
         self.assertIn("perIndexHistory", app_js)
         self.assertIn("data-global-lppl-symbol", app_js)
@@ -344,11 +346,22 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn("scoreUse", app_js)
         self.assertIn("criticalDate", app_js)
         self.assertIn("daysToCritical", app_js)
+        self.assertIn("forwardSignal", app_js)
+        self.assertIn("前瞻压力", app_js)
+        self.assertIn("scoreMomentum20d", app_js)
+        self.assertIn("globalLpplClipState", app_js)
+        self.assertIn("globalLpplClipSummary", app_js)
+        self.assertIn("clipState", app_js)
+        self.assertIn("clipLock", app_js)
+        self.assertIn("CLIP", app_js)
+        self.assertIn("tcMedian", app_js)
+        self.assertIn("criticalDate", app_js)
         self.assertIn("fitR2", app_js)
         self.assertIn(".global-lppl-risk-panel", css)
         self.assertIn("grid-column: 1 / -1", css)
         self.assertIn(".global-lppl-index-grid", css)
         self.assertIn(".global-lppl-history-chart", css)
+        self.assertIn(".global-lppl-clip-note", css)
         self.assertIn(".global-lppl-chart-grid", css)
         self.assertIn("grid-template-columns: minmax(0, 1fr)", css)
         self.assertIn(".global-lppl-history-chart.full-width svg", css)
@@ -467,6 +480,23 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn("exportSourceStatusCsv", app_js)
         self.assertIn(".source-status-controls", css)
 
+    def test_source_status_modal_shows_data_age_and_expected_cadence(self):
+        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("sourceStatusAgeText", app_js)
+        self.assertIn("sourceStatusCadenceText", app_js)
+        self.assertIn("<th>数据年龄</th>", app_js)
+        self.assertIn("<th>预期节奏</th>", app_js)
+        self.assertIn("ageDays", app_js)
+        self.assertIn("expectedMaxAgeDays", app_js)
+
+    def test_conclusion_source_quality_is_consumed_from_dashboard_payload(self):
+        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("conclusionSourceQuality", app_js)
+        self.assertIn("state.conclusionSourceQuality", app_js)
+        self.assertNotIn("const CONCLUSION_SOURCE_QUALITY =", app_js)
+
     def test_frontend_can_trigger_manual_background_refresh(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
         app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
@@ -516,6 +546,14 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn("equity-freshness-status", css)
         self.assertIn("equity-freshness-waiting", css)
         self.assertIn("equity-freshness-stale", css)
+
+    def test_equity_freshness_polling_uses_failure_backoff(self):
+        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("EQUITY_FRESHNESS_BACKOFF_MAX_MS", app_js)
+        self.assertIn("equityFreshnessFailureCount", app_js)
+        self.assertIn("equityFreshnessBackoffDelay", app_js)
+        self.assertIn("Math.min(EQUITY_FRESHNESS_BACKOFF_MAX_MS", app_js)
 
     def test_history_panel_mounts_interactive_chart_controls(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")

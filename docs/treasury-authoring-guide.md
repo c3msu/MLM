@@ -142,14 +142,34 @@ When changing `globalLpplRisk`:
 3. Do not fabricate missing direct index histories. Missing sources should
    produce unavailable rows, not synthetic scores.
 4. Keep `indexValidation.rows` aligned with visible index cards. Each available
-   index should carry `validation`, `history`, and `backtest` so the UI can
-   show own-market 15D historical precision and its own LPPL curve beside the
-   current fit.
+   index should carry `validation`, `history`, `backtest`, and `forwardSignal`
+   so the UI can show own-market 15D historical precision, its own LPPL curve,
+   and a validation-weighted forward-pressure read beside the current fit.
+   Available rows must also expose LPPL diagnostics: relative improvement over
+   the power-law-only baseline, log-periodic oscillation count,
+   `passesLpplCoreDiagnostics`, `passesLpplDiagnostics`, and residual
+   mean-reversion metadata. Core diagnostics gate the risk score; residual
+   diagnostics cap confidence and explain weaker evidence.
+   Per-index `history.points` must preserve `criticalDate` and
+   `daysToCritical`; `history.clipState` and row-level `clipState` summarize
+   whether recent replayed critical dates are scattered, converging, or locked.
+   `forwardSignal.drivers` should include `clip_lock` only when the CLIP state
+   is genuinely locked, not merely because the raw LPPL score is high.
 5. Update `scripts/smoke_check.py` and `tests/test_smoke_check.py` whenever the
    LPPL contract changes.
 
 Use `scripts/update_equity_risk.py` for a lightweight refresh when only
 `equityShortTermRisk` and `globalLpplRisk` need new daily OHLCV inputs.
+
+Daily equity bars are fetched from Nasdaq public historical quote rows first,
+but that endpoint is not an official guaranteed API and can fail because of
+network or anti-bot changes. The active pipeline therefore falls back to Stooq
+daily CSV symbols (`SPY -> spy.us`, etc.) for both the full refresh and
+`scripts/update_equity_risk.py`. When fallback succeeds, keep the monitored
+`Nasdaq <symbol> OHLCV` source row `status: ok`, set `source:
+"stooq-fallback"`, preserve the ISO `latest` date, and include a note with the
+Nasdaq failure. This keeps smoke checks focused on whether usable daily bars
+exist while making degraded source quality visible in the data-source modal.
 
 ## Maintaining Investment View Rules
 
@@ -218,6 +238,8 @@ Before marking a source as real:
 - The dashboard shows the source name or proxy explanation.
 - Historical percentile ranks state their window and sample source.
 - `sourceStatus` reports failures instead of silently falling back.
+- Fallbacks must be labeled with `source`, `note`, data age, and expected
+  cadence when the primary public source is unavailable.
 - Required equity OHLCV rows used by `equityShortTermRisk` must be `ok`; smoke
   verification reports the affected symbol if a transient Nasdaq quote timeout
   leaves a warning row.

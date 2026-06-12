@@ -126,6 +126,31 @@ class EquityRiskUpdateTests(unittest.TestCase):
         self.assertNotIn("globalLpplRisk", updated["equityShortTermRisk"])
         self.assertTrue(any(row["name"] == "Global LPPL SPY OHLCV" and row["latest"] != "old" for row in updated["sourceStatus"]))
 
+    def test_fetch_equity_market_bars_uses_stooq_fallback_when_nasdaq_fails(self):
+        from scripts import update_equity_risk
+
+        def failing_nasdaq(symbol: str, **_kwargs):
+            raise RuntimeError(f"{symbol} blocked")
+
+        def stooq_fallback(symbol: str, *, start: date, end: date, timeout: int = 14):
+            return [
+                MarketDailyBar(symbol.upper(), date(2026, 6, 9), 100.0, 101.0, 99.0, 100.5, 10_000, f"stooq:{symbol}"),
+                MarketDailyBar(symbol.upper(), date(2026, 6, 10), 100.5, 102.0, 100.0, 101.5, 12_000, f"stooq:{symbol}"),
+            ]
+
+        market_bars, source_rows = update_equity_risk.fetch_equity_market_bars(
+            end=date(2026, 6, 10),
+            fetcher=failing_nasdaq,
+            fallback_fetcher=stooq_fallback,
+        )
+
+        self.assertIn("SPY", market_bars)
+        spy_status = next(row for row in source_rows if row["name"] == "Nasdaq SPY OHLCV")
+        self.assertEqual(spy_status["status"], "ok")
+        self.assertEqual(spy_status["source"], "stooq-fallback")
+        self.assertEqual(spy_status["latest"], "2026-06-10")
+        self.assertIn("SPY blocked", spy_status["note"])
+
 
 if __name__ == "__main__":
     unittest.main()

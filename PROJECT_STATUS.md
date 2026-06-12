@@ -19,8 +19,9 @@ The equity-risk surface has three separate contracts:
 - `globalLpplRisk`: independent global LPPL research indicator for SPY, QQQ,
   KOSPI/EWY, Hang Seng/EWH, Taiwan/EWT, and Nikkei/EWJ. It is not included in
   `equityShortTermRisk`; each index carries its own current LPPL fit,
-  `history`, `backtest`, and `indexValidation`. The top-level score stays
-  `null` so markets are not blended into a composite.
+  `history`, `backtest`, `indexValidation`, and validation-weighted
+  `forwardSignal`. The top-level score stays `null` so markets are not blended
+  into a composite.
 
 Run locally:
 

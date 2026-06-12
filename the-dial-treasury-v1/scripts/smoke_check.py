@@ -18,7 +18,11 @@ DEFAULT_DASHBOARD = PROJECT_ROOT / "data" / "dashboard.json"
 EQUITY_SHORT_TERM_RISK_MIN_HISTORY_POINTS = 200
 REQUIRED_EQUITY_SOURCE_STATUS_NAMES = tuple(f"Nasdaq {symbol} OHLCV" for symbol in EQUITY_RISK_SYMBOLS)
 REQUIRED_EQUITY_PANEL_COMPONENT_KEYS = tuple(EQUITY_RISK_COMPONENT_WEIGHTS.keys())
-REQUIRED_EQUITY_COMPONENT_KEYS = tuple(key for key in EQUITY_RISK_COMPONENT_WEIGHTS if key != "optionOI")
+REQUIRED_EQUITY_COMPONENT_KEYS = tuple(
+    key
+    for key in EQUITY_RISK_COMPONENT_WEIGHTS
+    if key not in {"optionOI", "macroOverlay"}
+)
 EQUITY_COMPONENT_DIAGNOSTIC_DECISIONS = {"core", "support", "context", "trim"}
 
 
@@ -540,10 +544,35 @@ def has_global_lppl_risk_contract(payload: Any) -> bool:
                 return False
             if not isinstance(row.get("fitR2"), (int, float)) or not 0 <= float(row.get("fitR2")) <= 1:
                 return False
+            if not isinstance(row.get("lpplImprovementPct"), (int, float)):
+                return False
+            if not isinstance(row.get("oscillationCount"), (int, float)):
+                return False
+            for key in ("passesLpplCoreDiagnostics", "passesLpplDiagnostics"):
+                if not isinstance(row.get(key), bool):
+                    return False
+            residual_diagnostics = row.get("residualDiagnostics")
+            if not isinstance(residual_diagnostics, dict) or not isinstance(residual_diagnostics.get("meanReverting"), bool):
+                return False
+            clip_state = row.get("clipState")
+            if not isinstance(clip_state, dict) or not isinstance(clip_state.get("available"), bool):
+                return False
+            if not isinstance(clip_state.get("clipLock"), bool):
+                return False
             if not isinstance(row.get("windowDays"), int):
                 return False
             if not isinstance(row.get("effectiveWeightMultiplier"), (int, float)):
                 return False
+            forward_signal = row.get("forwardSignal")
+            if not isinstance(forward_signal, dict) or forward_signal.get("available") is not True:
+                return False
+            if not isinstance(forward_signal.get("score"), (int, float)) or not 0 <= float(forward_signal.get("score")) <= 100:
+                return False
+            if not isinstance(forward_signal.get("clipLock"), bool):
+                return False
+            for key in ("regime", "regimeCn", "summary"):
+                if not isinstance(forward_signal.get(key), str) or not forward_signal.get(key):
+                    return False
             validation = row.get("validation")
             if not isinstance(validation, dict) or validation.get("symbol") != row.get("symbol"):
                 return False
@@ -613,10 +642,21 @@ def has_lppl_history_contract(payload: Any, *, require_available: bool = False) 
         return not require_available
     if len(points) < 2:
         return False
+    clip_state = payload.get("clipState")
+    if not isinstance(clip_state, dict) or not isinstance(clip_state.get("available"), bool):
+        return False
+    if not isinstance(clip_state.get("clipLock"), bool):
+        return False
     for point in points[:5]:
         if not isinstance(point, dict) or not parse_iso_date(point.get("date")):
             return False
         if not isinstance(point.get("score"), (int, float)) or not 0 <= float(point.get("score")) <= 100:
+            return False
+        if not parse_iso_date(point.get("criticalDate")):
+            return False
+        if not isinstance(point.get("daysToCritical"), int):
+            return False
+        if not isinstance(point.get("passesLpplCoreDiagnostics"), bool):
             return False
         close = point.get("close")
         indexed = point.get("indexedClose")

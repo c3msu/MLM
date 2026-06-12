@@ -1,8 +1,10 @@
 import unittest
 from datetime import date
 from io import BytesIO
+from unittest.mock import patch
 import zipfile
 
+import treasury_data.sources as sources
 from treasury_data.sources import (
     DebtLimitStatus,
     FomcProjection,
@@ -98,6 +100,21 @@ class SourceParsingTests(unittest.TestCase):
         self.assertEqual(series["DFII10"].latest.date, date(2026, 5, 20))
         self.assertEqual(series["DFII10"].latest.value, 2.18)
         self.assertEqual(series["WRESBAL"].latest.value, 3_100_000.0)
+
+    def test_fetch_fred_series_bulk_preserves_successful_chunks_when_later_chunk_fails(self):
+        first_chunk = "\n".join(
+            [
+                "observation_date,DFII10,T10YIE",
+                "2026-05-20,2.18,2.40",
+            ]
+        ).encode("utf-8")
+
+        with patch.object(sources, "fetch_bytes_curl_first", side_effect=[first_chunk, RuntimeError("FRED timeout")]):
+            series = sources.fetch_fred_series_bulk(["DFII10", "T10YIE", "DFF"], chunk_size=2)
+
+        self.assertEqual(set(series), {"DFII10", "T10YIE"})
+        self.assertEqual(series["DFII10"].latest.date, date(2026, 5, 20))
+        self.assertEqual(series["T10YIE"].latest.value, 2.40)
 
     def test_parse_stooq_quote_csv_extracts_public_futures_quote(self):
         content = "\n".join(

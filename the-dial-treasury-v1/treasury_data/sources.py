@@ -733,13 +733,27 @@ def fred_csv_texts(content: bytes) -> list[str]:
         return [content.decode("utf-8-sig", errors="replace")]
 
 
-def fetch_fred_series_bulk(series_ids: Iterable[str], timeout: int = 45, chunk_size: int = 12) -> dict[str, TimeSeries]:
+def fetch_fred_series_bulk(
+    series_ids: Iterable[str],
+    timeout: int = 45,
+    chunk_size: int = 12,
+    chunk_retries: int = 1,
+) -> dict[str, TimeSeries]:
     series_list = list(series_ids)
     parsed: dict[str, TimeSeries] = {}
     for index in range(0, len(series_list), chunk_size):
         chunk = series_list[index : index + chunk_size]
-        content = fetch_bytes_curl_first(FRED_CSV_URL.format(series_id=",".join(chunk)), timeout=timeout)
-        parsed.update(parse_fred_bulk_zip(content, chunk))
+        last_error: Exception | None = None
+        for _attempt in range(max(1, chunk_retries + 1)):
+            try:
+                content = fetch_bytes_curl_first(FRED_CSV_URL.format(series_id=",".join(chunk)), timeout=timeout)
+                parsed.update(parse_fred_bulk_zip(content, chunk))
+                last_error = None
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+        if last_error is not None:
+            continue
     return parsed
 
 
