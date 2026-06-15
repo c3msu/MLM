@@ -577,6 +577,148 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn(".history-chart", css)
         self.assertIn(".history-tooltip", css)
 
+    def test_signal_validation_panel_mounts_walk_forward_diagnostics(self):
+        html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
+        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
+
+        for element_id in (
+            "signalValidationPanel",
+            "signalValidationMethod",
+            "signalValidationCoverage",
+            "signalValidationComposites",
+            "signalValidationFactors",
+            "signalValidationClusters",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        self.assertIn("renderSignalValidation", app_js)
+        self.assertIn("signalValidation:", app_js)
+        self.assertIn("signalValidationBadge", app_js)
+        self.assertIn("oosIc3m", app_js)
+        self.assertIn(".signal-validation-panel", css)
+        self.assertIn(".sv-table", css)
+        self.assertIn(".sv-badge.leading", css)
+        self.assertIn(".sv-lens", css)
+        self.assertIn("predictiveLens", app_js)
+        # Assets are cache-busted with a versioned query string (exact suffix may change
+        # as the bundle evolves; just require app.js carries a non-empty ?v= token).
+        self.assertRegex(html, r'src="app\.js\?v=[\w.-]+"')
+
+    def test_portfolio_overview_panel_mounts_three_horizon_card(self):
+        html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
+        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
+
+        for element_id in (
+            "portfolioOverviewPanel",
+            "portfolioOverviewBand",
+            "portfolioOverviewSummary",
+            "portfolioOverviewLayers",
+            "portfolioOverviewConflicts",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        self.assertIn("renderPortfolioOverview", app_js)
+        self.assertIn("portfolioOverview:", app_js)
+        self.assertIn("portfolioOverviewEvidenceText", app_js)
+        self.assertIn(".portfolio-overview-panel", css)
+        self.assertIn(".portfolio-overview-conflict", css)
+        self.assertIn(".pol-evidence", css)
+        # Global regional-tilt dimension surfaced in the headline overview.
+        self.assertIn('id="portfolioOverviewRegionalTilt"', html)
+        self.assertIn("regionalTilt", app_js)
+        self.assertIn("全球地区倾斜", app_js)
+        self.assertIn(".portfolio-overview-tilt-card", css)
+
+    def test_regional_monitor_section_mounts_first_level_region_tabs(self):
+        html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
+        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
+        i18n = (PROJECT_ROOT / "i18n.js").read_text(encoding="utf-8")
+
+        # First-level nav entry + dedicated section.
+        self.assertIn('href="#regions"', html)
+        self.assertIn('data-i18n="nav.regions"', html)
+        self.assertIn('id="regions"', html)
+        for element_id in (
+            "regionalMonitorPanel",
+            "regionalMonitorTabs",
+            "regionalMonitorAggregate",
+            "regionalMonitorGrid",
+            "regionalMonitorSummary",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        self.assertIn("renderRegionalMonitor", app_js)
+        self.assertIn("regionalMonitor:", app_js)
+        self.assertIn("selectedRegionKey", app_js)
+        self.assertIn("data-region-key", app_js)
+        self.assertIn(".region-tab", css)
+        self.assertIn(".region-agg", css)
+        # Per-region price-factor strip (momentum / vol / drawdown / relative strength).
+        self.assertIn("globalLpplPriceFactorSummary", app_js)
+        self.assertIn("region-factor-strip", app_js)
+        self.assertIn("相对美国", app_js)
+        self.assertIn(".region-factor-strip", css)
+        # Per-region factor forward-validation table.
+        self.assertIn('id="regionalMonitorValidation"', html)
+        self.assertIn("renderRegionalFactorValidation", app_js)
+        self.assertIn("factorValidation", app_js)
+        self.assertIn("本地区因子前瞻验证", app_js)
+        # Evidence-weighted multi-factor regional composite.
+        self.assertIn("证据加权综合信号", app_js)
+        self.assertIn("composite", app_js)
+        self.assertIn(".region-composite", css)
+        # Cross-region diversification (correlation) block.
+        self.assertIn('id="regionalMonitorDiversification"', html)
+        self.assertIn("renderRegionalDiversification", app_js)
+        self.assertIn("跨地区相关性", app_js)
+        self.assertIn(".region-corr-pair", css)
+        # Round-2 directions: breach track record + composite/rotation bilingual labels.
+        self.assertIn("trackRecord", app_js)
+        self.assertIn("证据加权综合信号 · Composite", app_js)
+        self.assertIn("地区轮动建议 · Regional Rotation", app_js)
+        # Round-4 directions: cluster shared-band chips + US internal rotation.
+        self.assertIn("region-reduce-cluster", app_js)
+        self.assertIn("减持风险预算", app_js)
+        self.assertIn("美股内部轮动", app_js)
+        self.assertIn("internalRotation", app_js)
+        self.assertIn(".region-internal-rotation", css)
+        self.assertIn(".region-reduce-cluster", css)
+        # Round-5 directions: US-internal tilt in overview + per-region breach timeline.
+        self.assertIn("usInternalTilt", app_js)
+        self.assertIn("pot-us-internal", app_js)
+        self.assertIn("region-breach-timeline", app_js)
+        self.assertIn("历史突破回放", app_js)
+        self.assertIn("breachEvents", app_js)
+        self.assertIn(".region-breach-dot", css)
+        # Breach timeline is clickable → opens that region's LPPL history modal.
+        self.assertIn("点击看历史图", app_js)
+        self.assertIn(".region-breach-timeline.clickable", css)
+        # Dedup: scorecard LPPL panel points to the regional monitor instead of re-rendering cards.
+        self.assertIn("global-lppl-regional-pointer", app_js)
+        self.assertIn("逐市场卡片", app_js)
+        # ①: the pointer is a clickable anchor that jumps to the regions section.
+        self.assertRegex(app_js, r'class="global-lppl-regional-pointer" href="#regions"')
+        # ③: breach-date markers overlaid on the LPPL history modal chart.
+        self.assertIn("globalLpplBreachMarkersSvg", app_js)
+        self.assertIn("globalLpplBreachEventsForSymbol", app_js)
+        self.assertIn(".global-lppl-breach-marker", css)
+        self.assertIn("global-lppl-breach-legend", app_js)
+        # Per-region allocation stance + cross-region rotation.
+        self.assertIn('id="regionalMonitorRotation"', html)
+        self.assertIn("regionStanceClass", app_js)
+        self.assertIn("region-alloc-rationale", app_js)
+        self.assertIn("地区轮动建议", app_js)
+        self.assertIn(".region-alloc", css)
+        self.assertIn(".region-rotation-card", css)
+        # Live per-region validated-factor breach alert.
+        self.assertIn("factorAlert", app_js)
+        self.assertIn("region-factor-alert", app_js)
+        self.assertIn("验证阈值", app_js)
+        self.assertIn(".region-factor-alert.breached", css)
+        # Both languages carry the region nav + section keys.
+        self.assertIn('"nav.regions": "地区监控"', i18n)
+        self.assertIn('"nav.regions": "Regions"', i18n)
+
 
 if __name__ == "__main__":
     unittest.main()

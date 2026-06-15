@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650;9..144,750&family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20260611-lppl-clip-ui-v1">
+  <link rel="stylesheet" href="styles.css?v=20260615-breach-markers-v1">
 </head>
 <body>
   <header class="site-header">
@@ -29,6 +29,7 @@
       <a href="#supply" data-i18n="nav.supply">供给与拍卖</a>
       <a href="#positioning" data-i18n="nav.positioning">持仓与资金流</a>
       <a href="#crossmarket" data-i18n="nav.crossmarket">跨市场</a>
+      <a href="#regions" data-i18n="nav.regions">地区监控</a>
       <a href="#events" data-i18n="nav.events">事件与新闻</a>
       <a href="#views" data-i18n="nav.views">投资观点</a>
     </nav>
@@ -93,6 +94,19 @@
       </div>
       <div id="conclusionAudit" class="conclusion-audit" aria-label="Conclusion credibility audit"></div>
       <div id="heroTiles" class="hero-tiles" aria-label="Key yield tiles"></div>
+      <article id="portfolioOverviewPanel" class="panel portfolio-overview-panel">
+        <div class="panel-title">
+          <div>
+            <h3>组合总览 · Portfolio Overview</h3>
+            <span id="portfolioOverviewMethod" class="panel-kicker">three-horizon reconciliation · OOS evidence</span>
+          </div>
+          <span id="portfolioOverviewBand" class="portfolio-overview-band">--</span>
+        </div>
+        <p id="portfolioOverviewSummary" class="liquidity-equity-read">--</p>
+        <div id="portfolioOverviewLayers" class="portfolio-overview-layers"></div>
+        <div id="portfolioOverviewRegionalTilt" class="portfolio-overview-regional-tilt"></div>
+        <div id="portfolioOverviewConflicts" class="portfolio-overview-conflicts"></div>
+      </article>
     </section>
 
     <section id="curve" class="section-band">
@@ -215,6 +229,19 @@
             <div id="liquidityEquityRolling"></div>
           </section>
         </div>
+      </article>
+      <article id="signalValidationPanel" class="panel signal-validation-panel">
+        <div class="panel-title">
+          <div>
+            <h3>信号验证 · Signal Validation (Walk-Forward)</h3>
+            <span id="signalValidationMethod" class="panel-kicker">weekly point-in-time replay · out-of-sample split</span>
+          </div>
+          <span id="signalValidationCoverage" class="panel-kicker">loading</span>
+        </div>
+        <p id="signalValidationRead" class="liquidity-equity-read">--</p>
+        <div id="signalValidationComposites" class="signal-validation-composites"></div>
+        <div id="signalValidationFactors" class="signal-validation-factors"></div>
+        <div id="signalValidationClusters" class="signal-validation-clusters"></div>
       </article>
       <div class="score-summary">
         <div>
@@ -420,9 +447,33 @@
       </article>
     </section>
 
+    <section id="regions" class="section-band">
+      <div class="section-heading">
+        <p class="eyebrow" data-i18n="section.regions.eyebrow">08 地区监控</p>
+        <h2 data-i18n-html="section.regions.titleHtml">地区监控 <span>REGIONAL MONITOR</span></h2>
+        <p data-i18n="section.regions.desc">按地区拆分的 LPPL 泡沫临界因子。美国合并 SPY+QQQ;韩国/香港/台湾/日本经美上市 ETF 代理跟踪。切换地区查看各自的泡沫拟合、临界窗口、验证与前瞻信号。</p>
+      </div>
+      <article id="regionalMonitorPanel" class="panel regional-monitor-panel">
+        <div class="panel-title">
+          <div>
+            <h3 data-i18n="panel.regionalMonitor">地区泡沫因子 · Regional LPPL Factors</h3>
+            <span id="regionalMonitorMethod" class="panel-kicker">per-region bubble factors</span>
+          </div>
+          <span id="regionalMonitorSummary" class="panel-kicker">loading</span>
+        </div>
+        <div id="regionalMonitorRotation" class="regional-monitor-rotation"></div>
+        <div id="regionalMonitorTabs" class="regional-monitor-tabs" role="tablist" aria-label="地区切换"></div>
+        <div id="regionalMonitorAggregate" class="regional-monitor-aggregate"></div>
+        <div id="regionalMonitorGrid" class="regional-monitor-grid"></div>
+        <div id="regionalMonitorValidation" class="regional-monitor-validation"></div>
+        <div id="regionalMonitorDiversification" class="regional-monitor-diversification"></div>
+        <div id="regionalMonitorCharts" class="regional-monitor-charts"></div>
+      </article>
+    </section>
+
     <section id="events" class="section-band">
       <div class="section-heading">
-        <p class="eyebrow" data-i18n="section.events.eyebrow">08 事件与新闻</p>
+        <p class="eyebrow" data-i18n="section.events.eyebrow">09 事件与新闻</p>
         <h2 data-i18n-html="section.events.titleHtml">事件与新闻 <span>EVENTS & NEWS</span></h2>
         <p data-i18n="section.events.desc">市场交易的是超预期而非数据本身。左侧为前瞻事件日历,右侧为近期新闻流。</p>
       </div>
@@ -444,7 +495,7 @@
 
     <section id="views" class="section-band">
       <div class="section-heading">
-        <p class="eyebrow" data-i18n="section.views.eyebrow">09 投资观点综合</p>
+        <p class="eyebrow" data-i18n="section.views.eyebrow">10 投资观点综合</p>
         <h2 data-i18n-html="section.views.titleHtml">投资观点 <span>INVESTMENT VIEW</span></h2>
         <p data-i18n="section.views.desc">计分卡结论落到可执行交易。每个想法标注背后的因子来源,并可直接编辑论点文本。</p>
       </div>
@@ -554,7 +605,7 @@
       <div id="globalLpplRiskHistoryModalTooltip" class="percentile-tooltip global-lppl-history-tooltip modal-tooltip" hidden></div>
     </section>
   </div>
-  <script src="i18n.js?v=20260526-html-export"></script>
-  <script src="app.js?v=20260611-lppl-clip-ui-v1"></script>
+  <script src="i18n.js?v=20260615-breach-markers-v1"></script>
+  <script src="app.js?v=20260615-breach-markers-v1"></script>
 </body>
 </html>

@@ -205,6 +205,9 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(ideas[0]["tag"], "LONG 久期")
         self.assertIn("反通胀", ideas[0]["text"])
         self.assertNotIn("仍对久期不友好", ideas[0]["text"])
+        for idea in ideas:
+            self.assertEqual(idea["horizon"], "3-6M")
+            self.assertEqual(idea["horizonCn"], "3-6个月")
 
     def test_build_ideas_does_not_chase_steepeners_after_curve_is_already_steep_and_qra_light(self):
         qra = QuarterlyRefunding(
@@ -456,6 +459,23 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertIn("amplifiers", warning)
         self.assertTrue(any(item["key"] == "severeDeterioration" for item in warning["amplifiers"]))
 
+    def test_spy_warning_history_buckets_ignore_future_rows(self):
+        rows = [
+            {"date": "2025-01-31", "liquidityScore": 40.0, "score3mChange": -1.0},
+            {"date": "2025-02-28", "liquidityScore": 45.0, "score3mChange": -2.0},
+            {"date": "2025-03-31", "liquidityScore": 50.0, "score3mChange": 1.0},
+            {"date": "2025-04-30", "liquidityScore": 90.0, "score3mChange": 9.0},
+            {"date": "2025-05-31", "liquidityScore": 95.0, "score3mChange": 10.0},
+            {"date": "2025-06-30", "liquidityScore": 99.0, "score3mChange": 12.0},
+        ]
+
+        signal = dashboard_builder.spy_warning_signal_for_history_row(rows[2], rows)
+
+        # As of 2025-03-31 the score 50 is the highest observed so far; if future
+        # rows leaked into the rank it would fall back to the middle bucket.
+        self.assertEqual(signal["levelBucket"], "高评分")
+        self.assertEqual(signal["changeBucket"], "评分上行")
+
     def test_build_spy_early_warning_dampens_post_selloff_non_severe_low_score(self):
         macro_liquidity = {
             "score": 40.6,
@@ -490,7 +510,9 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(warning["regime"], "Neutral")
         self.assertIn("dampeners", warning)
         self.assertTrue(any(item["key"] == "postSelloffExhaustion" for item in warning["dampeners"]))
-        self.assertTrue(any(item["key"] == "fragileLowScore" for item in warning["amplifiers"]))
+        # fragileLowScore was zeroed by the 2026-06-12 OOS audit (lift 0.59,
+        # fired ahead of +5.39% avg forward 3M); it must no longer appear.
+        self.assertFalse(any(item["key"] == "fragileLowScore" for item in warning["amplifiers"]))
 
     def test_build_spy_early_warning_keeps_severe_deterioration_after_selloff(self):
         macro_liquidity = {
@@ -557,10 +579,13 @@ class DashboardBuilderTests(unittest.TestCase):
         warning = dashboard_builder.build_spy_early_warning(macro_liquidity, macro_liquidity_equity)
 
         self.assertTrue(warning["available"])
-        self.assertGreaterEqual(warning["score"], 60)
-        self.assertEqual(warning["regime"], "Caution")
-        self.assertTrue(any(item["key"] == "rallyFragility" for item in warning["amplifiers"]))
-        self.assertTrue(any(item["key"] == "lateCycleRallyRollover" for item in warning["amplifiers"]))
+        # 2026-06-12 OOS audit: rallyFragility halved to +3 (kept for its negative
+        # forward-return signal), lateCycleRallyRollover zeroed (3 fires, 0% hit).
+        self.assertLess(warning["score"], 60)
+        self.assertEqual(warning["regime"], "Neutral")
+        rally_fragility = next(item for item in warning["amplifiers"] if item["key"] == "rallyFragility")
+        self.assertEqual(rally_fragility["scoreBoost"], 3.0)
+        self.assertFalse(any(item["key"] == "lateCycleRallyRollover" for item in warning["amplifiers"]))
 
     def test_build_spy_early_warning_amplifies_stalled_low_score_recovery(self):
         macro_liquidity = {
@@ -592,10 +617,12 @@ class DashboardBuilderTests(unittest.TestCase):
         warning = dashboard_builder.build_spy_early_warning(macro_liquidity, macro_liquidity_equity)
 
         self.assertTrue(warning["available"])
-        self.assertGreaterEqual(warning["score"], 60)
-        self.assertEqual(warning["regime"], "Caution")
-        self.assertTrue(any(item["key"] == "fragileLowScore" for item in warning["amplifiers"]))
-        self.assertTrue(any(item["key"] == "lowScoreStall" for item in warning["amplifiers"]))
+        # Both low-score amplifiers were zeroed by the 2026-06-12 OOS audit
+        # (fragileLowScore lift 0.59; lowScoreStall fired once in five years).
+        self.assertLess(warning["score"], 60)
+        self.assertEqual(warning["regime"], "Neutral")
+        self.assertFalse(any(item["key"] == "fragileLowScore" for item in warning["amplifiers"]))
+        self.assertFalse(any(item["key"] == "lowScoreStall" for item in warning["amplifiers"]))
 
     def test_build_conclusion_audit_scales_factor_contribution_by_group_size_and_source_quality(self):
         groups = [
@@ -2194,6 +2221,13 @@ class DashboardBuilderTests(unittest.TestCase):
     def test_build_live_dashboard_falls_back_to_stooq_when_nasdaq_daily_bars_fail(self):
         captured: dict[str, object] = {}
 
+        # Pin the wall clock so the equity-OHLCV freshness check (2-day cadence) is
+        # deterministic regardless of when the suite runs; the stooq bars end 2026-06-10.
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 6, 11, tzinfo=tz)
+
         def fake_stooq(symbol: str, *, start: date, end: date, timeout: int = 14):
             return [
                 MarketDailyBar(symbol=symbol.upper(), date=date(2026, 6, 9), open=100.0, high=101.0, low=99.0, close=100.5, volume=10_000, source=f"stooq:{symbol}"),
@@ -2234,6 +2268,7 @@ class DashboardBuilderTests(unittest.TestCase):
             stack.enter_context(patch.object(dashboard_builder, "fetch_nasdaq_daily_bars", side_effect=RuntimeError("Nasdaq blocked")))
             stack.enter_context(patch.object(dashboard_builder, "fetch_stooq_daily_bars", side_effect=fake_stooq))
             stack.enter_context(patch.object(dashboard_builder, "build_dashboard_from_inputs", side_effect=fake_build_dashboard_from_inputs))
+            stack.enter_context(patch.object(dashboard_builder, "datetime", FixedDatetime))
 
             dashboard = dashboard_builder.build_live_dashboard()
 
@@ -2336,6 +2371,61 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertIn("kpssProxyPass", fit["residualDiagnostics"])
         self.assertIn("ljungBoxProxyPass", fit["residualDiagnostics"])
         self.assertIn("power-law", fit["reason"])
+
+    def test_lppl_tc_refinement_recovers_off_grid_critical_day(self):
+        n = dashboard_builder.GLOBAL_LPPL_DEFAULT_WINDOW
+        true_offset = 46
+        tc = n - 1 + true_offset
+        closes = []
+        for t in range(n):
+            distance = tc - t
+            y = (
+                5.10
+                - 0.012 * (distance ** 0.55)
+                + 0.0018 * (distance ** 0.55) * math.cos(10.0 * math.log(distance))
+                + 0.0011 * (distance ** 0.55) * math.sin(10.0 * math.log(distance))
+            )
+            closes.append(math.exp(y))
+        bars = self.make_equity_bars_from_closes("SPY", closes)
+
+        fit = dashboard_builder.fit_lppl_window(bars)
+
+        self.assertTrue(fit["available"])
+        # The coarse grid only contains {15,25,40,60,...}; the local refinement
+        # should land within one step of the true off-grid critical day.
+        self.assertLessEqual(abs(fit["daysToCritical"] - true_offset), 6)
+        self.assertIn("powerExponent", fit)
+        self.assertIn("omega", fit)
+        self.assertGreaterEqual(fit["fitR2"], 0.95)
+
+    def test_global_lppl_validation_reports_oos_metrics(self):
+        closes = []
+        level = 100.0
+        for index in range(220):
+            if 150 <= index <= 156 or 195 <= index <= 200:
+                level *= 0.99
+            else:
+                level *= 1.0015
+            closes.append(level)
+        bars = self.make_equity_bars_from_closes("SPY", closes)
+        history_points = []
+        for index, bar in enumerate(bars):
+            in_pre_crash = 140 <= index < 150 or 185 <= index < 195
+            history_points.append({"date": bar.date.isoformat(), "score": 85.0 if in_pre_crash else 30.0})
+
+        validation = dashboard_builder.build_global_lppl_single_index_validation(
+            {"symbol": "SPY", "sourceSymbol": "SPY"},
+            bars,
+            history_points=history_points,
+        )
+
+        self.assertIsNotNone(validation)
+        self.assertTrue(validation["oosAvailable"])
+        self.assertIn("precision15dOos", validation)
+        self.assertIn("recall15dOos", validation)
+        self.assertIn("baseRate15dOos", validation)
+        self.assertIn("oosThreshold", validation)
+        self.assertGreaterEqual(validation["oosSampleSize"], 10)
 
     def test_global_lppl_risk_exposes_tc_aggregation_and_breadth_confirmation(self):
         def fake_global_lppl_index_row(spec, source_bars, *, as_of=None, fast=False):
@@ -2727,6 +2817,23 @@ class DashboardBuilderTests(unittest.TestCase):
             score_46 = dashboard_builder.equity_turnover_component(bars, target, weight=0.14)["score"]
 
         self.assertLess(abs(score_45 - score_46), 12.0)
+
+    def test_turnover_distribution_score_ramps_instead_of_stepping_at_volume_boundary(self):
+        target = date(2026, 6, 5)
+        bar = MarketDailyBar("SPY", target, 101.0, 102.0, 99.8, 100.5, 1_000_000, "unit-test")
+        bars = {"SPY": [bar]}
+
+        scores = {}
+        for volume_pct in (69.0, 71.0, 75.0, 80.0):
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(dashboard_builder, "volume_percentile_at", return_value=volume_pct))
+                stack.enter_context(patch.object(dashboard_builder, "trailing_return", return_value=0.02))
+                scores[volume_pct] = dashboard_builder.equity_turnover_component(bars, target, weight=0.14)["score"]
+
+        self.assertLess(abs(scores[69.0] - scores[71.0]), 8.0)
+        self.assertLess(scores[71.0], scores[75.0])
+        self.assertLess(scores[75.0], scores[80.0])
+        self.assertGreaterEqual(scores[80.0], 80.0)
 
     def test_hot_stock_reversal_shrinks_extreme_score_when_hot_sample_is_tiny(self):
         target = date(2026, 6, 5)
@@ -3215,6 +3322,573 @@ class DashboardBuilderTests(unittest.TestCase):
 
         self.assertEqual(len(events), 10)
         self.assertIn(["2026-08-05", "Treasury quarterly refunding statement", "高"], events)
+
+
+class RegionalMonitorTests(unittest.TestCase):
+    def synthetic_global_lppl(self):
+        def row(symbol, region_key, region_name_cn, proxy_cn, status, score, days):
+            return {
+                "symbol": symbol,
+                "name": symbol,
+                "regionKey": region_key,
+                "regionName": region_name_cn,
+                "regionNameCn": region_name_cn,
+                "proxyNoteCn": proxy_cn,
+                "available": True,
+                "status": status,
+                "statusCn": {"risk": "泡沫风险", "watch": "观察", "quiet": "低风险"}[status],
+                "score": score,
+                "daysToCritical": days,
+            }
+        return {
+            "asOf": "2026-06-12",
+            "indices": [
+                row("SPY", "us", "美国", "标普500 · SPY", "watch", 55.0, 90),
+                row("QQQ", "us", "美国", "纳斯达克100 · QQQ", "risk", 78.0, 30),
+                row("KOSPI", "korea", "韩国", "美上市ETF代理 · EWY", "quiet", 30.0, None),
+                row("HSI", "hongkong", "香港", "美上市ETF代理 · EWH", "risk", 80.0, 20),
+                row("TWII", "taiwan", "台湾", "美上市ETF代理 · EWT", "watch", 50.0, 120),
+                row("NIKKEI", "japan", "日本", "美上市ETF代理 · EWJ", "quiet", 25.0, None),
+            ],
+        }
+
+    def test_groups_six_indices_into_five_regions_with_us_merged(self):
+        rm = dashboard_builder.build_regional_monitor(self.synthetic_global_lppl())
+        self.assertTrue(rm["available"])
+        self.assertEqual(rm["regionOrder"], ["us", "korea", "hongkong", "taiwan", "japan"])
+        by_key = {region["key"]: region for region in rm["regions"]}
+        # US groups SPY + QQQ into one region.
+        self.assertEqual(len(by_key["us"]["indices"]), 2)
+        self.assertEqual(by_key["us"]["nameCn"], "美国")
+        self.assertEqual({r["symbol"] for r in by_key["us"]["indices"]}, {"SPY", "QQQ"})
+        self.assertEqual(len(by_key["korea"]["indices"]), 1)
+
+    def test_region_aggregate_takes_worst_status_and_nearest_window(self):
+        rm = dashboard_builder.build_regional_monitor(self.synthetic_global_lppl())
+        by_key = {region["key"]: region for region in rm["regions"]}
+        # US: SPY watch + QQQ risk → worst is risk; nearest flagged window = 30 (QQQ)
+        us_agg = by_key["us"]["aggregate"]
+        self.assertEqual(us_agg["status"], "risk")
+        self.assertEqual(us_agg["maxScore"], 78.0)
+        self.assertEqual(us_agg["minDaysToCritical"], 30)
+        self.assertEqual(us_agg["availableCount"], 2)
+        # Korea: quiet only → no flagged window
+        self.assertEqual(by_key["korea"]["aggregate"]["status"], "quiet")
+        self.assertIsNone(by_key["korea"]["aggregate"]["minDaysToCritical"])
+
+    def test_alerting_regions_listed_and_proxy_note_preserved(self):
+        rm = dashboard_builder.build_regional_monitor(self.synthetic_global_lppl())
+        self.assertEqual(set(rm["alertingRegions"]), {"us", "hongkong"})
+        by_key = {region["key"]: region for region in rm["regions"]}
+        hk_row = by_key["hongkong"]["indices"][0]
+        self.assertEqual(hk_row["proxyNoteCn"], "美上市ETF代理 · EWH")
+        self.assertNotIn("proxy", by_key["hongkong"]["nameCn"].lower())
+
+    @staticmethod
+    def _bars(symbol, closes, start=date(2024, 1, 2)):
+        bars = []
+        cursor = start
+        for close in closes:
+            while cursor.weekday() >= 5:
+                cursor += dashboard_builder.timedelta(days=1)
+            bars.append(MarketDailyBar(symbol=symbol, date=cursor, open=close, high=close * 1.005, low=close * 0.995, close=close, volume=1_000_000, source="unit-test"))
+            cursor += dashboard_builder.timedelta(days=1)
+        return bars
+
+    def test_price_factors_uptrend_is_constructive_with_positive_momentum(self):
+        closes = [100.0 * (1.0008 ** i) for i in range(260)]
+        bars = self._bars("EWX", closes)
+        spy = self._bars("SPY", [100.0 * (1.0004 ** i) for i in range(260)])
+        pf = dashboard_builder.global_lppl_price_factors(bars, benchmark_bars=spy, as_of=bars[-1].date)
+        self.assertTrue(pf["available"])
+        self.assertGreater(pf["return3m"], 0)
+        self.assertGreater(pf["ma200Gap"], 0)
+        self.assertEqual(pf["marketState"], "constructive")
+        # Index compounds faster than SPY → positive 3M relative strength.
+        self.assertGreater(pf["relativeStrength3m"], 0)
+
+    def test_price_factors_downtrend_with_deep_drawdown_is_stressed(self):
+        closes = [100.0] * 130 + [100.0 * (0.995 ** i) for i in range(130)]
+        bars = self._bars("EWX", closes)
+        spy = self._bars("SPY", [100.0] * 260)
+        pf = dashboard_builder.global_lppl_price_factors(bars, benchmark_bars=spy, as_of=bars[-1].date)
+        self.assertTrue(pf["available"])
+        self.assertLess(pf["ma200Gap"], 0)
+        self.assertLessEqual(pf["drawdownFromHigh"], -10.0)
+        self.assertEqual(pf["marketState"], "stressed")
+
+    def test_benchmark_relative_strength_is_none(self):
+        spy = self._bars("SPY", [100.0 * (1.0005 ** i) for i in range(260)])
+        pf = dashboard_builder.global_lppl_price_factors(spy, benchmark_bars=spy, as_of=spy[-1].date, is_benchmark=True)
+        self.assertTrue(pf["isBenchmark"])
+        self.assertIsNone(pf["relativeStrength3m"])
+
+    def test_price_factors_unavailable_for_short_sample(self):
+        bars = self._bars("EWX", [100.0, 101.0, 102.0])
+        pf = dashboard_builder.global_lppl_price_factors(bars, benchmark_bars=[], as_of=bars[-1].date)
+        self.assertFalse(pf["available"])
+
+    def test_attach_price_factors_and_region_rollup(self):
+        spy = self._bars("SPY", [100.0 * (1.0004 ** i) for i in range(260)])
+        ewj = self._bars("EWJ", [100.0 * (1.0009 ** i) for i in range(260)])
+        rows = [
+            {"symbol": "SPY", "regionKey": "us", "regionName": "United States", "regionNameCn": "美国", "available": True, "status": "watch", "statusCn": "观察", "score": 55.0, "daysToCritical": 90, "asOf": spy[-1].date.isoformat()},
+            {"symbol": "EWJ", "regionKey": "japan", "regionName": "Japan", "regionNameCn": "日本", "available": True, "status": "quiet", "statusCn": "低风险", "score": 30.0, "daysToCritical": None, "asOf": ewj[-1].date.isoformat()},
+        ]
+        enriched = dashboard_builder.attach_global_lppl_price_factors(rows, {"SPY": spy, "EWJ": ewj})
+        spy_row = next(r for r in enriched if r["symbol"] == "SPY")
+        ewj_row = next(r for r in enriched if r["symbol"] == "EWJ")
+        self.assertTrue(spy_row["priceFactors"]["available"])
+        self.assertTrue(spy_row["priceFactors"]["isBenchmark"])
+        self.assertGreater(ewj_row["priceFactors"]["relativeStrength3m"], 0)
+        rm = dashboard_builder.build_regional_monitor({"asOf": "2026-06-12", "indices": enriched})
+        japan = next(region for region in rm["regions"] if region["key"] == "japan")
+        rollup = japan["aggregate"]["priceFactors"]
+        self.assertTrue(rollup["available"])
+        self.assertIn(rollup["marketState"], {"constructive", "neutral", "stressed"})
+
+    @staticmethod
+    def _lppl_history(bars, score_fn):
+        return {"points": [{"date": bar.date.isoformat(), "score": score_fn(i, bar)} for i, bar in enumerate(bars)]}
+
+    def test_factor_validation_schema_and_benchmark_handling(self):
+        closes = [100.0 * (1.0006 ** i) for i in range(520)]
+        spy = self._bars("SPY", [100.0 * (1.0004 ** i) for i in range(520)])
+        ewy = self._bars("EWY", closes)
+        hist_spy = self._lppl_history(spy, lambda i, b: 30.0 + (i % 20))
+        hist_ewy = self._lppl_history(ewy, lambda i, b: 30.0 + (i % 25))
+
+        spy_val = dashboard_builder.build_index_factor_validation("SPY", spy, spy, hist_spy, is_benchmark=True)
+        ewy_val = dashboard_builder.build_index_factor_validation("EWY", ewy, spy, hist_ewy, is_benchmark=False)
+
+        self.assertTrue(spy_val["available"])
+        self.assertTrue(ewy_val["available"])
+        spy_ids = {f["id"] for f in spy_val["factors"]}
+        ewy_ids = {f["id"] for f in ewy_val["factors"]}
+        # Benchmark (US) has no relative-strength-vs-US factor; other regions do.
+        self.assertNotIn("relativeStrength3m", spy_ids)
+        self.assertIn("relativeStrength3m", ewy_ids)
+        self.assertIn("lpplScore", ewy_ids)
+        self.assertIn("momentum3m", ewy_ids)
+        self.assertIn("realizedVol", ewy_ids)
+        sample = ewy_val["factors"][0]
+        for field in ("id", "oosIc3m", "hitRateOos", "baseRate", "lift", "classification", "leadTimeDays"):
+            self.assertIn(field, sample)
+        self.assertIn(ewy_val["bestFactor"], ewy_ids)
+
+    def test_factor_validation_detects_predictive_lppl_signal(self):
+        # Price path with repeated drawdowns; LPPL score spikes in the run-up to each.
+        closes = []
+        level = 100.0
+        crash = []
+        for i in range(520):
+            in_crash = (i % 104) >= 98
+            level *= (0.975 if in_crash else 1.0018)
+            closes.append(level)
+            crash.append(in_crash)
+        ewt = self._bars("EWT", closes)
+        spy = self._bars("SPY", [100.0 * (1.0004 ** i) for i in range(520)])
+
+        def predictive_score(i, bar):
+            # high score in the ~12 bars before a crash window starts
+            window = crash[i + 1: i + 13]
+            return 88.0 if any(window) else 28.0
+        hist = self._lppl_history(ewt, predictive_score)
+
+        val = dashboard_builder.build_index_factor_validation("EWT", ewt, spy, hist, is_benchmark=False)
+        self.assertTrue(val["available"])
+        lppl = next(f for f in val["factors"] if f["id"] == "lpplScore")
+        # The synthetic LPPL signal leads drawdowns → positive oriented full-sample IC.
+        self.assertIsNotNone(lppl["ic3m"])
+        self.assertGreater(lppl["ic3m"], 0)
+        # A composite is produced and carries evidence-weighted factor weights summing to ~1.
+        composite = val.get("composite", {})
+        if composite.get("available"):
+            self.assertIn("oosIc3m", composite)
+            self.assertIn("weights", composite)
+            self.assertIn("beatsBestSingleFactor", composite)
+            weight_sum = sum(w["weight"] for w in composite["weights"])
+            self.assertTrue(abs(weight_sum - 1.0) < 0.05 or weight_sum == 0.0)
+
+    def test_region_composite_weights_calibration_predictive_factors(self):
+        # Build a region whose LPPL is strongly predictive and momentum is noise.
+        closes = []
+        level = 100.0
+        crash = []
+        for i in range(520):
+            in_crash = (i % 104) >= 98
+            level *= (0.975 if in_crash else 1.0018)
+            closes.append(level)
+            crash.append(in_crash)
+        ewt = self._bars("EWT", closes)
+        spy = self._bars("SPY", [100.0 * (1.0004 ** i) for i in range(520)])
+        hist = self._lppl_history(ewt, lambda i, b: 88.0 if any(crash[i + 1: i + 13]) else 28.0)
+
+        val = dashboard_builder.build_index_factor_validation("EWT", ewt, spy, hist, is_benchmark=False)
+        composite = val["composite"]
+        self.assertTrue(composite["available"])
+        # The composite should be validated and carry a lppl weight (it was predictive in calibration).
+        weights = {w["id"]: w["weight"] for w in composite["weights"]}
+        self.assertIn("lpplScore", weights)
+        self.assertGreater(weights["lpplScore"], 0.0)
+        self.assertIn(composite["classification"], {"leading", "coincident", "lagging", "none"})
+
+    def test_factor_validation_unavailable_for_short_sample(self):
+        bars = self._bars("EWT", [100.0 + i for i in range(40)])
+        val = dashboard_builder.build_index_factor_validation("EWT", bars, bars, {"points": []})
+        self.assertFalse(val["available"])
+        self.assertEqual(val["factors"], [])
+
+    def test_attach_factor_validation_flows_into_regions(self):
+        spy = self._bars("SPY", [100.0 * (1.0004 ** i) for i in range(520)])
+        ewh = self._bars("EWH", [100.0 * (1.0005 ** i) for i in range(520)])
+        rows = [
+            {"symbol": "SPY", "regionKey": "us", "regionNameCn": "美国", "available": True, "status": "watch", "statusCn": "观察", "score": 55.0, "daysToCritical": 90, "asOf": spy[-1].date.isoformat()},
+            {"symbol": "EWH", "regionKey": "hongkong", "regionNameCn": "香港", "available": True, "status": "quiet", "statusCn": "低风险", "score": 30.0, "daysToCritical": None, "asOf": ewh[-1].date.isoformat()},
+        ]
+        history = {
+            "SPY": self._lppl_history(spy, lambda i, b: 30.0 + (i % 20)),
+            "EWH": self._lppl_history(ewh, lambda i, b: 30.0 + (i % 18)),
+        }
+        enriched = dashboard_builder.attach_global_lppl_factor_validation(rows, {"SPY": spy, "EWH": ewh}, history)
+        ewh_row = next(r for r in enriched if r["symbol"] == "EWH")
+        self.assertTrue(ewh_row["factorValidation"]["available"])
+        self.assertTrue(ewh_row["factorValidation"]["factors"])
+
+    @staticmethod
+    def _region(key, name_cn, bubble, market_state, rs, validated_factor=None,
+                vol_current=18.0, vol_threshold=24.0):
+        agg = {
+            "status": bubble,
+            "statusCn": {"risk": "泡沫风险", "watch": "观察", "quiet": "低风险"}[bubble],
+            "availableCount": 1,
+            "indexCount": 1,
+            "maxScore": {"risk": 90.0, "watch": 55.0, "quiet": 30.0}[bubble],
+            "priceFactors": {
+                "available": True,
+                "marketState": market_state,
+                "marketStateCn": {"stressed": "承压", "neutral": "中性", "constructive": "偏强"}[market_state],
+                "relativeStrength3m": rs,
+            },
+        }
+        factors = []
+        if validated_factor:
+            factors = [{"id": validated_factor, "labelCn": "已实现波动" if validated_factor == "realizedVol" else "LPPL泡沫评分",
+                        "classification": "leading", "lift": 1.7, "oosIc3m": -0.5, "leadTimeDays": 23.0,
+                        "hitRateOos": 0.4, "baseRate": 0.23, "alertThreshold": vol_threshold}]
+        index = {
+            "symbol": "EWX",
+            "score": agg["maxScore"],
+            "priceFactors": {"available": True, "realizedVol": vol_current},
+            "factorValidation": {"available": bool(factors), "factors": factors},
+        }
+        return {"key": key, "name": name_cn, "nameCn": name_cn, "indices": [index], "aggregate": agg}
+
+    def test_factor_alert_breached_when_current_exceeds_threshold(self):
+        region = self._region("korea", "韩国", "risk", "neutral", 10.0, validated_factor="realizedVol",
+                              vol_current=30.0, vol_threshold=24.0)
+        alert = dashboard_builder.build_region_factor_alert(region)
+        self.assertTrue(alert["available"])
+        self.assertEqual(alert["state"], "breached")
+        self.assertEqual(alert["factorId"], "realizedVol")
+        self.assertEqual(alert["current"], 30.0)
+        self.assertEqual(alert["threshold"], 24.0)
+        self.assertIn("历史命中", alert["evidence"])
+
+    def test_factor_alert_approaching_and_normal_states(self):
+        approaching = dashboard_builder.build_region_factor_alert(
+            self._region("taiwan", "台湾", "risk", "neutral", 5.0, validated_factor="realizedVol", vol_current=22.5, vol_threshold=24.0))
+        self.assertEqual(approaching["state"], "approaching")
+        normal = dashboard_builder.build_region_factor_alert(
+            self._region("japan", "日本", "watch", "neutral", 0.0, validated_factor="realizedVol", vol_current=15.0, vol_threshold=24.0))
+        self.assertEqual(normal["state"], "normal")
+
+    def test_factor_alert_unavailable_without_validated_risk_factor(self):
+        region = self._region("hongkong", "香港", "quiet", "stressed", -12.0, validated_factor=None)
+        self.assertFalse(dashboard_builder.build_region_factor_alert(region)["available"])
+
+    def test_factor_alert_prefers_composite_when_it_beats_best_single(self):
+        # Region whose composite is validated AND beats the best single factor → composite drives the alert.
+        region = self._region("hongkong", "香港", "watch", "neutral", 0.0, validated_factor="realizedVol", vol_current=15.0, vol_threshold=24.0)
+        rep = region["indices"][0]
+        rep["factorValidation"]["composite"] = {
+            "available": True, "beatsBestSingleFactor": True, "classification": "leading",
+            "lift": 1.3, "hitRateOos": 0.5, "baseRate": 0.3, "leadTimeDays": 40.0,
+            "currentValue": 1.8, "alertThreshold": 1.2,
+        }
+        alert = dashboard_builder.build_region_factor_alert(region)
+        self.assertEqual(alert["source"], "composite")
+        self.assertEqual(alert["factorId"], "regionComposite")
+        self.assertEqual(alert["state"], "breached")  # 1.8 >= 1.2
+        self.assertIn("综合信号", alert["factorLabelCn"])
+
+    def test_factor_alert_falls_back_to_single_factor_when_composite_weak(self):
+        region = self._region("korea", "韩国", "watch", "neutral", 0.0, validated_factor="realizedVol", vol_current=30.0, vol_threshold=24.0)
+        rep = region["indices"][0]
+        rep["factorValidation"]["composite"] = {"available": True, "beatsBestSingleFactor": False, "classification": "lagging", "lift": 0.8, "currentValue": 0.5, "alertThreshold": 1.2}
+        alert = dashboard_builder.build_region_factor_alert(region)
+        self.assertEqual(alert["source"], "factor")
+        self.assertEqual(alert["factorId"], "realizedVol")
+
+    def test_factor_alert_carries_full_history_breach_track_record(self):
+        region = {
+            "key": "korea", "nameCn": "韩国", "name": "韩国",
+            "aggregate": {"availableCount": 1, "indexCount": 1, "status": "risk", "statusCn": "泡沫风险"},
+            "indices": [{
+                "symbol": "EWY", "score": 90.0,
+                "priceFactors": {"available": True, "realizedVol": 40.0},
+                "factorValidation": {"available": True, "factors": [
+                    {"id": "realizedVol", "labelCn": "已实现波动", "classification": "leading", "lift": 1.7,
+                     "oosIc3m": -0.5, "leadTimeDays": 23.0, "hitRateOos": 0.4, "baseRate": 0.23,
+                     "alertThreshold": 24.0, "alertCountTotal": 11, "hitRateTotal": 0.55},
+                ]},
+            }],
+        }
+        alert = dashboard_builder.build_region_factor_alert(region)
+        self.assertEqual(alert["source"], "factor")
+        self.assertEqual(alert["state"], "breached")
+        self.assertEqual(alert["breachCountTotal"], 11)
+        self.assertAlmostEqual(alert["breachHitRateTotal"], 0.55)
+        self.assertIn("历史共突破11次", alert["trackRecord"])
+        self.assertIn("历史共突破11次", alert["message"])
+
+    def test_breached_alert_raises_allocation_caution(self):
+        breached = self._region("korea", "韩国", "watch", "neutral", 0.0, validated_factor="realizedVol", vol_current=30.0, vol_threshold=24.0)
+        breached["factorAlert"] = dashboard_builder.build_region_factor_alert(breached)
+        calm = self._region("korea", "韩国", "watch", "neutral", 0.0, validated_factor="realizedVol", vol_current=15.0, vol_threshold=24.0)
+        calm["factorAlert"] = dashboard_builder.build_region_factor_alert(calm)
+        breached_alloc = dashboard_builder.build_region_allocation(breached)
+        calm_alloc = dashboard_builder.build_region_allocation(calm)
+        self.assertGreater(breached_alloc["cautionScore"], calm_alloc["cautionScore"])
+        self.assertTrue(any("突破验证阈值" in d for d in breached_alloc["drivers"]))
+
+    def test_allocation_underweights_bubble_and_stressed_region(self):
+        region = self._region("korea", "韩国", "risk", "stressed", -8.0, validated_factor="realizedVol")
+        alloc = dashboard_builder.build_region_allocation(region)
+        self.assertEqual(alloc["stance"], "underweight")
+        self.assertEqual(alloc["stanceCn"], "减持")
+        self.assertGreaterEqual(alloc["cautionScore"], 55.0)
+        self.assertEqual(alloc["confidence"], "high")  # backed by a validated leading factor
+        self.assertTrue(alloc["validatedLeadingFactors"])
+        self.assertIn("已验证领先因子", alloc["rationale"])
+
+    def test_allocation_overweights_constructive_outperformer(self):
+        region = self._region("taiwan", "台湾", "quiet", "constructive", 18.0)
+        alloc = dashboard_builder.build_region_allocation(region)
+        self.assertEqual(alloc["stance"], "overweight")
+        self.assertEqual(alloc["exposureBandPct"][1], 115)
+        self.assertLess(alloc["cautionScore"], 30.0)
+
+    def test_allocation_neutral_without_validated_factor_is_lower_confidence(self):
+        region = self._region("japan", "日本", "watch", "neutral", 0.0)
+        alloc = dashboard_builder.build_region_allocation(region)
+        self.assertEqual(alloc["stance"], "neutral")
+        self.assertIn(alloc["confidence"], {"medium", "low"})
+        self.assertFalse(alloc["validatedLeadingFactors"])
+        self.assertIn("尚无 OOS 验证领先因子", alloc["rationale"])
+
+    def test_rotation_lists_favor_and_reduce_regions(self):
+        regions = [
+            {**self._region("korea", "韩国", "risk", "stressed", -8.0, "realizedVol"),
+             "allocation": dashboard_builder.build_region_allocation(self._region("korea", "韩国", "risk", "stressed", -8.0, "realizedVol"))},
+            {**self._region("taiwan", "台湾", "quiet", "constructive", 18.0),
+             "allocation": dashboard_builder.build_region_allocation(self._region("taiwan", "台湾", "quiet", "constructive", 18.0))},
+        ]
+        rotation = dashboard_builder.build_regional_rotation(regions)
+        self.assertTrue(rotation["available"])
+        self.assertIn("taiwan", rotation["favorRegions"])
+        self.assertIn("korea", rotation["reduceRegions"])
+        self.assertEqual(rotation["ranking"][0], "taiwan")  # lowest caution ranked first
+
+    def test_rotation_merges_correlated_reduce_regions_into_one_risk_budget(self):
+        def reducing(key, name):
+            r = self._region(key, name, "risk", "stressed", -8.0, "realizedVol")
+            r["allocation"] = dashboard_builder.build_region_allocation(r)
+            return r
+        regions = [reducing("korea", "韩国"), reducing("taiwan", "台湾"), reducing("japan", "日本")]
+        # Korea/Taiwan highly correlated; Japan independent.
+        diversification = {
+            "available": True,
+            "matrix": [
+                {"a": "korea", "b": "taiwan", "corr": 0.82},
+                {"a": "korea", "b": "japan", "corr": 0.30},
+                {"a": "taiwan", "b": "japan", "corr": 0.28},
+            ],
+        }
+        rotation = dashboard_builder.build_regional_rotation(regions, diversification)
+        self.assertEqual(set(rotation["reduceRegions"]), {"korea", "taiwan", "japan"})
+        # 3 reduces collapse to 2 independent risk budgets (korea+taiwan merged).
+        self.assertEqual(rotation["independentReduceCount"], 2)
+        merged = [c for c in rotation["reduceClusters"] if c["merged"]]
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(set(merged[0]["regions"]), {"korea", "taiwan"})
+        self.assertIn("同一风险敞口", rotation["summary"])
+        # The correlated cluster shares ONE exposure band (tightest member band), and the
+        # summary tells the user not to stack reductions.
+        self.assertEqual(merged[0]["exposureBandPct"], [50, 75])
+        self.assertIn("共享一个减仓额度", rotation["summary"])
+        self.assertIn("共享仓位带", rotation["summary"])
+
+    def test_merged_cluster_band_takes_elementwise_min(self):
+        self.assertEqual(dashboard_builder.merged_cluster_band([[50, 75], [60, 90]]), [50, 75])
+        self.assertEqual(dashboard_builder.merged_cluster_band([[50, 80]]), [50, 80])
+        self.assertIsNone(dashboard_builder.merged_cluster_band([None, "x"]))
+
+    @staticmethod
+    def _us_index(symbol, status, score, vol):
+        return {
+            "symbol": symbol, "status": status,
+            "statusCn": {"risk": "泡沫风险", "watch": "观察", "quiet": "低风险"}[status],
+            "score": score,
+            "priceFactors": {"available": True, "realizedVol": vol, "marketStateCn": "偏强"},
+        }
+
+    def test_us_internal_rotation_tilts_to_broad_when_tech_riskier(self):
+        us = {"key": "us", "indices": [
+            self._us_index("SPY", "watch", 55.0, 14.0),
+            self._us_index("QQQ", "risk", 78.0, 22.0),  # tech higher on all three
+        ]}
+        rot = dashboard_builder.build_us_internal_rotation(us)
+        self.assertTrue(rot["available"])
+        self.assertEqual(rot["tilt"], "broad")
+        self.assertGreater(rot["techPoints"], rot["broadPoints"])
+        self.assertIn("偏宽基", rot["tiltCn"])
+        self.assertTrue(rot["drivers"])
+
+    def test_us_internal_rotation_tilts_to_tech_when_broad_riskier(self):
+        us = {"key": "us", "indices": [
+            self._us_index("SPY", "risk", 80.0, 25.0),
+            self._us_index("QQQ", "quiet", 30.0, 16.0),
+        ]}
+        rot = dashboard_builder.build_us_internal_rotation(us)
+        self.assertEqual(rot["tilt"], "tech")
+        self.assertIn("偏科技", rot["tiltCn"])
+
+    def test_ohlcv_staleness_is_trading_day_aware_over_weekend(self):
+        from datetime import date as _date
+        # Friday close viewed on Monday = 1 trading day old → NOT stale despite 3 calendar days.
+        rows = [{"name": "Nasdaq SPY OHLCV", "status": "ok", "latest": "2026-06-12"}]
+        annotated = dashboard_builder.annotate_source_status_freshness(rows, as_of=_date(2026, 6, 15))
+        self.assertEqual(annotated[0]["ageDays"], 1)
+        self.assertEqual(annotated[0]["status"], "ok")
+        # A genuinely stale feed (>2 trading days) is still flagged.
+        rows2 = [{"name": "Nasdaq SPY OHLCV", "status": "ok", "latest": "2026-06-08"}]
+        annotated2 = dashboard_builder.annotate_source_status_freshness(rows2, as_of=_date(2026, 6, 15))
+        self.assertEqual(annotated2[0]["status"], "stale")
+        # Non-market sources keep calendar-day age.
+        rows3 = [{"name": "NY Fed ACM term premium", "status": "ok", "latest": "2026-06-12"}]
+        annotated3 = dashboard_builder.annotate_source_status_freshness(rows3, as_of=_date(2026, 6, 15))
+        self.assertEqual(annotated3[0]["ageDays"], 3)
+
+    def test_us_internal_rotation_balanced_and_unavailable(self):
+        us_bal = {"key": "us", "indices": [
+            self._us_index("SPY", "watch", 55.0, 18.0),
+            self._us_index("QQQ", "watch", 55.0, 18.0),
+        ]}
+        self.assertEqual(dashboard_builder.build_us_internal_rotation(us_bal)["tilt"], "balanced")
+        us_one = {"key": "us", "indices": [self._us_index("SPY", "watch", 55.0, 18.0)]}
+        self.assertFalse(dashboard_builder.build_us_internal_rotation(us_one)["available"])
+
+    def test_cluster_correlated_regions_without_diversification_is_singletons(self):
+        clusters = dashboard_builder.cluster_correlated_regions(["korea", "taiwan"], None)
+        self.assertEqual(clusters, [["korea"], ["taiwan"]])
+
+    def test_build_regional_monitor_attaches_allocation_and_rotation(self):
+        spy = self._bars("SPY", [100.0 * (1.0004 ** i) for i in range(520)])
+        ewh = self._bars("EWH", [100.0 * (1.0005 ** i) for i in range(520)])
+        rows = [
+            {"symbol": "SPY", "regionKey": "us", "regionNameCn": "美国", "available": True, "status": "watch", "statusCn": "观察", "score": 55.0, "daysToCritical": 90, "asOf": spy[-1].date.isoformat()},
+            {"symbol": "EWH", "regionKey": "hongkong", "regionNameCn": "香港", "available": True, "status": "quiet", "statusCn": "低风险", "score": 30.0, "daysToCritical": None, "asOf": ewh[-1].date.isoformat()},
+        ]
+        enriched = dashboard_builder.attach_global_lppl_price_factors(rows, {"SPY": spy, "EWH": ewh})
+        rm = dashboard_builder.build_regional_monitor({"asOf": "2026-06-12", "indices": enriched})
+        self.assertTrue(rm["rotation"]["available"])
+        for region in rm["regions"]:
+            self.assertIn("allocation", region)
+            self.assertIn(region["allocation"]["stance"], {"overweight", "neutral", "underweight"})
+
+    @staticmethod
+    def _region_with_history(key, name_cn, closes, start=date(2024, 1, 2)):
+        bars = RegionalMonitorTests._bars(key.upper(), closes, start=start)
+        points = [{"date": b.date.isoformat(), "close": b.close} for b in bars]
+        index = {"symbol": key.upper(), "history": {"available": True, "points": points},
+                 "factorValidation": {"available": True, "factors": [{"id": "x"}]}}
+        return {
+            "key": key, "nameCn": name_cn, "name": name_cn,
+            "indices": [index],
+            "aggregate": {"availableCount": 1, "indexCount": 1, "status": "quiet", "statusCn": "低风险"},
+        }
+
+    def test_diversification_detects_correlated_and_diversifying_regions(self):
+        import random
+        rng = random.Random(7)
+        base = [100.0]
+        for _ in range(400):
+            base.append(base[-1] * (1 + rng.uniform(-0.015, 0.016)))
+        # korea = base; taiwan = base + small noise (highly correlated); japan = independent.
+        taiwan = [c * (1 + rng.uniform(-0.001, 0.001)) for c in base]
+        indep = [100.0]
+        for _ in range(400):
+            indep.append(indep[-1] * (1 + rng.uniform(-0.015, 0.016)))
+        regions = [
+            self._region_with_history("korea", "韩国", base),
+            self._region_with_history("taiwan", "台湾", taiwan),
+            self._region_with_history("japan", "日本", indep),
+        ]
+        div = dashboard_builder.build_regional_diversification(regions)
+        self.assertTrue(div["available"])
+        self.assertTrue(div["matrix"])
+        # Korea/Taiwan should be the most correlated pair.
+        pair = {div["mostCorrelatedPair"]["a"], div["mostCorrelatedPair"]["b"]}
+        self.assertEqual(pair, {"korea", "taiwan"})
+        self.assertGreater(div["mostCorrelatedPair"]["corr"], 0.9)
+        # Japan should be the best diversifier (lowest avg correlation).
+        self.assertEqual(div["bestDiversifier"]["key"], "japan")
+
+    def test_diversification_unavailable_with_one_region(self):
+        regions = [self._region_with_history("korea", "韩国", [100.0 + i for i in range(400)])]
+        self.assertFalse(dashboard_builder.build_regional_diversification(regions)["available"])
+
+    def test_health_payload_surfaces_regional_breach_alerts(self):
+        from treasury_data.api import build_health_payload
+        dashboard = {
+            "asOf": "2026-06-12",
+            "generatedAt": "2026-06-13T00:00:00+00:00",
+            "sourceStatus": [{"name": "FRED", "status": "ok"}],
+            "regionalMonitor": {
+                "available": True,
+                "asOf": "2026-06-12",
+                "rotation": {"available": True, "reduceRegions": ["korea"], "favorRegions": [], "summary": "减持韩国"},
+                "regions": [
+                    {"key": "korea", "nameCn": "韩国",
+                     "factorAlert": {"available": True, "state": "breached", "factorLabelCn": "已实现波动", "current": 43.0, "threshold": 12.0}},
+                    {"key": "japan", "nameCn": "日本", "factorAlert": {"available": True, "state": "normal"}},
+                ],
+            },
+        }
+        payload = build_health_payload(dashboard)
+        ra = payload["regionalAlerts"]
+        self.assertTrue(ra["available"])
+        self.assertEqual(ra["breachCount"], 1)
+        self.assertEqual(ra["breached"][0]["key"], "korea")
+        self.assertEqual(ra["reduceRegions"], ["korea"])
+
+    def test_health_payload_regional_alerts_unavailable_without_monitor(self):
+        from treasury_data.api import build_health_payload
+        payload = build_health_payload({"asOf": "x", "generatedAt": "y", "sourceStatus": []})
+        self.assertFalse(payload["regionalAlerts"]["available"])
+
+    def test_unavailable_without_indices(self):
+        self.assertFalse(dashboard_builder.build_regional_monitor({"indices": []})["available"])
+        self.assertFalse(dashboard_builder.build_regional_monitor(None)["available"])
+
+    def test_specs_carry_region_metadata_and_clean_names(self):
+        by_symbol = {spec["symbol"]: spec for spec in dashboard_builder.GLOBAL_LPPL_INDEX_SPECS}
+        self.assertEqual(by_symbol["SPY"]["regionKey"], "us")
+        self.assertEqual(by_symbol["QQQ"]["regionKey"], "us")
+        self.assertEqual(by_symbol["HSI"]["regionNameCn"], "香港")
+        for spec in dashboard_builder.GLOBAL_LPPL_INDEX_SPECS:
+            self.assertNotIn("proxy", str(spec["name"]).lower())
 
 
 if __name__ == "__main__":

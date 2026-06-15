@@ -65,6 +65,39 @@ def build_health_payload(dashboard: dict[str, Any]) -> dict[str, Any]:
         "generatedAt": dashboard.get("generatedAt"),
         "sourceCounts": counts,
         "errors": errors,
+        "regionalAlerts": regional_alerts_health(dashboard.get("regionalMonitor")),
+    }
+
+
+def regional_alerts_health(regional_monitor: Any) -> dict[str, Any]:
+    """Compact regional breach + rotation digest for /api/health polling/push."""
+    if not isinstance(regional_monitor, dict) or not regional_monitor.get("available"):
+        return {"available": False, "breached": [], "reduceRegions": [], "favorRegions": []}
+    regions = regional_monitor.get("regions", []) if isinstance(regional_monitor.get("regions"), list) else []
+    breached: list[dict[str, Any]] = []
+    for region in regions:
+        if not isinstance(region, dict):
+            continue
+        alert = region.get("factorAlert") if isinstance(region.get("factorAlert"), dict) else {}
+        if alert.get("available") and alert.get("state") == "breached":
+            breached.append(
+                {
+                    "key": str(region.get("key")),
+                    "nameCn": str(region.get("nameCn") or region.get("name") or region.get("key")),
+                    "factorLabelCn": str(alert.get("factorLabelCn") or ""),
+                    "current": alert.get("current"),
+                    "threshold": alert.get("threshold"),
+                }
+            )
+    rotation = regional_monitor.get("rotation", {}) if isinstance(regional_monitor.get("rotation"), dict) else {}
+    return {
+        "available": True,
+        "asOf": regional_monitor.get("asOf"),
+        "breachCount": len(breached),
+        "breached": breached,
+        "reduceRegions": rotation.get("reduceRegions", []),
+        "favorRegions": rotation.get("favorRegions", []),
+        "summary": rotation.get("summary", ""),
     }
 
 

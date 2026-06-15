@@ -4,6 +4,7 @@ from pathlib import Path
 
 from scripts.install_launch_agent import build_launch_agent_plist
 from scripts.install_health_agent import build_health_agent_plist
+from scripts.install_regional_alerts_agent import build_regional_alerts_agent_plist
 
 
 class LaunchAgentTests(unittest.TestCase):
@@ -51,6 +52,27 @@ class LaunchAgentTests(unittest.TestCase):
         self.assertIn("http://127.0.0.1:8451/api/health", command)
         self.assertIn("--notify", command)
         self.assertIn("health.out.log", payload["StandardOutPath"])
+
+    def test_regional_alerts_plist_runs_daily_breach_check_with_notification(self):
+        raw = build_regional_alerts_agent_plist(
+            label="com.example.treasury-regional",
+            python_path=Path("/usr/bin/python3"),
+            daily_at="16:50",
+            port=8451,
+            log_dir=Path("/tmp/treasury-logs"),
+            notify=True,
+        )
+        payload = plistlib.loads(raw)
+
+        self.assertEqual(payload["Label"], "com.example.treasury-regional")
+        self.assertTrue(payload["RunAtLoad"])
+        self.assertNotIn("KeepAlive", payload)
+        self.assertEqual(payload["StartCalendarInterval"], {"Hour": 16, "Minute": 50})
+        command = payload["ProgramArguments"][2]
+        self.assertIn("check_regional_alerts.py", command)
+        self.assertIn("http://127.0.0.1:8451/api/health", command)
+        self.assertIn("--notify", command)
+        self.assertIn("regional-alerts.out.log", payload["StandardOutPath"])
 
 
 if __name__ == "__main__":

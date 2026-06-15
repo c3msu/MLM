@@ -99,6 +99,21 @@ const DEFAULT_DATA = {
     buckets: [],
     series: []
   },
+  signalValidation: {
+    available: false,
+    reason: "HTTP模式读取 data/dashboard.json 后显示走出样本信号验证。",
+    factors: [],
+    composites: [],
+    clusters: [],
+    effectiveWeights: []
+  },
+  portfolioOverview: {
+    available: false,
+    summary: "HTTP模式读取 data/dashboard.json 后显示组合总览。",
+    layers: [],
+    conflicts: [],
+    suggestedEquityExposureBand: null
+  },
   spyEarlyWarning: {
     available: false,
     title: "SPY Early Warning Index",
@@ -143,6 +158,13 @@ const DEFAULT_DATA = {
     backtest: { available: false, sampleSize: 0, threshold: 65, horizonTests: [] },
     perIndexHistory: {},
     perIndexBacktests: {}
+  },
+  regionalMonitor: {
+    available: false,
+    summary: "HTTP模式读取 data/dashboard.json 后显示地区监控。",
+    regions: [],
+    regionOrder: [],
+    alertingRegions: []
   },
   groups: [
     {
@@ -502,6 +524,7 @@ let equityFreshnessStatus = null;
 let runtimeAutoRefreshTimer = null;
 let equityFreshnessRefreshTimer = null;
 let equityFreshnessRefreshInFlight = false;
+let selectedRegionKey = null;
 let equityFreshnessFailureCount = 0;
 let sourceStatusFilter = "all";
 let sourceStatusQuery = "";
@@ -980,6 +1003,9 @@ function renderAll() {
   renderSupply();
   renderPositioning();
   renderCrossMarket();
+  renderRegionalMonitor();
+  renderSignalValidation();
+  renderPortfolioOverview();
   renderEvents();
   renderIdeas();
   bindNavObserver();
@@ -1763,6 +1789,217 @@ function renderMacroLiquidityEquityLead() {
   if (rollingNode) rollingNode.innerHTML = renderLiquidityRolling(panel.rollingCorrelation || {}, panel.drawdownRisk || {});
 }
 
+function portfolioOverviewEvidenceText(evidence) {
+  if (!evidence || typeof evidence !== "object" || !evidence.available) {
+    return (evidence && evidence.note) || "证据不足";
+  }
+  const hit = Number(evidence.oosHitRate);
+  const base = Number(evidence.baseRate);
+  const lift = Number(evidence.lift);
+  const lead = Number(evidence.leadTimeDays);
+  const sample = Number(evidence.sampleSize);
+  const parts = [];
+  if (Number.isFinite(hit) && Number.isFinite(base)) parts.push(`OOS命中 ${(hit * 100).toFixed(0)}% vs 基准 ${(base * 100).toFixed(0)}%`);
+  if (Number.isFinite(lift)) parts.push(`lift ${lift.toFixed(2)}x`);
+  if (Number.isFinite(lead)) parts.push(`提前≈${lead.toFixed(0)}天`);
+  if (Number.isFinite(sample)) parts.push(`n=${sample}`);
+  return parts.length ? parts.join(" · ") : "证据不足";
+}
+
+function renderPortfolioOverview() {
+  const panel = state.portfolioOverview || DEFAULT_DATA.portfolioOverview || {};
+  const root = $("#portfolioOverviewPanel");
+  if (!root) return;
+  const summaryNode = $("#portfolioOverviewSummary");
+  const bandNode = $("#portfolioOverviewBand");
+  const layersNode = $("#portfolioOverviewLayers");
+  const tiltNode = $("#portfolioOverviewRegionalTilt");
+  const conflictsNode = $("#portfolioOverviewConflicts");
+  if (summaryNode) summaryNode.textContent = panel.summary || "--";
+  if (bandNode) {
+    const band = Array.isArray(panel.suggestedEquityExposureBand) ? panel.suggestedEquityExposureBand : null;
+    bandNode.textContent = band ? `权益仓位 ${Number(band[0]).toFixed(0)}-${Number(band[1]).toFixed(0)}%` : "仓位区间 --";
+    bandNode.dataset.tone = band && Number(band[1]) < 90 ? "restrictive" : "neutral";
+  }
+  if (!panel.available) {
+    if (layersNode) layersNode.innerHTML = "";
+    if (tiltNode) tiltNode.innerHTML = "";
+    if (conflictsNode) conflictsNode.innerHTML = "";
+    return;
+  }
+  if (tiltNode) {
+    const tilt = panel.regionalTilt && typeof panel.regionalTilt === "object" ? panel.regionalTilt : {};
+    const breaches = Array.isArray(tilt.breachedRegions) ? tilt.breachedRegions : [];
+    const usTilt = panel.usInternalTilt && typeof panel.usInternalTilt === "object" ? panel.usInternalTilt : {};
+    const usTiltRow = usTilt.available
+      ? `<div class="pot-us-internal"><span class="pol-horizon">美股内部</span>${escapeHtml(usTilt.tiltCn || "")}</div>`
+      : "";
+    tiltNode.innerHTML = tilt.available ? `
+      <div class="portfolio-overview-tilt-card${breaches.length ? " has-breach" : ""}">
+        <div class="pot-head"><span class="pol-horizon">${escapeHtml(tilt.horizonCn || "地区轮动")}</span><strong>全球地区倾斜</strong></div>
+        <span class="pot-summary">${escapeHtml(tilt.summary || "")}</span>
+        ${usTiltRow}
+      </div>
+    ` : usTilt.available ? `
+      <div class="portfolio-overview-tilt-card">
+        <div class="pot-head"><strong>全球地区倾斜</strong></div>
+        ${usTiltRow}
+      </div>
+    ` : "";
+  }
+  const layers = Array.isArray(panel.layers) ? panel.layers : [];
+  if (layersNode) {
+    layersNode.innerHTML = layers.map((layer) => {
+      const band = Array.isArray(layer.exposureBandPct) ? layer.exposureBandPct : null;
+      const score = Number(layer.score);
+      return `
+        <div class="portfolio-overview-layer">
+          <div class="pol-head">
+            <span class="pol-horizon">${escapeHtml(layer.horizonCn || layer.horizon || "")}</span>
+            <strong>${escapeHtml(layer.labelCn || layer.label || "")}</strong>
+            <em>${Number.isFinite(score) ? score.toFixed(1) : "--"} · ${escapeHtml(layer.regimeCn || layer.regime || "--")}</em>
+          </div>
+          <div class="pol-body">
+            <span>${band ? `仓位带 ${Number(band[0]).toFixed(0)}-${Number(band[1]).toFixed(0)}%` : "背景层(不直接给仓位)"}</span>
+            <span class="pol-stance">${escapeHtml(layer.stance || "")}</span>
+          </div>
+          <div class="pol-evidence">${escapeHtml(portfolioOverviewEvidenceText(layer.evidence))}${layer.note ? ` · ${escapeHtml(layer.note)}` : ""}</div>
+        </div>
+      `;
+    }).join("") || `<div class="empty-state compact">暂无可用信号层</div>`;
+  }
+  if (conflictsNode) {
+    const conflicts = Array.isArray(panel.conflicts) ? panel.conflicts : [];
+    conflictsNode.innerHTML = conflicts.length ? `
+      <h4 class="sv-heading">跨层冲突与调和 · Conflicts</h4>
+      ${conflicts.map((conflict) => `
+        <div class="portfolio-overview-conflict">
+          <strong>${escapeHtml(conflict.description || "")}</strong>
+          <span>${escapeHtml(conflict.resolution || "")}</span>
+        </div>
+      `).join("")}
+    ` : "";
+  }
+}
+
+function signalValidationBadge(classification) {
+  const map = {
+    leading: ["领先", "leading"],
+    coincident: ["同步", "coincident"],
+    lagging: ["滞后", "lagging"],
+    none: ["无信号", "none"],
+  };
+  const [label, cls] = map[classification] || ["--", "none"];
+  return `<span class="sv-badge ${cls}">${label}</span>`;
+}
+
+function formatSignalIc(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric.toFixed(2) : "--";
+}
+
+function formatSignalRate(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? `${(numeric * 100).toFixed(0)}%` : "--";
+}
+
+function formatSignalLift(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? `${numeric.toFixed(2)}x` : "--";
+}
+
+function formatSignalDays(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? `${numeric.toFixed(0)}d` : "--";
+}
+
+function signalValidationRowHtml(row, { showModule = false, showCluster = false } = {}) {
+  const name = `${escapeHtml(row.labelCn || row.label || row.id || "--")}`;
+  const moduleCell = showModule ? `<td>${escapeHtml(row.module || "--")}</td>` : "";
+  const clusterCell = showCluster ? `<td>${row.clusterId ? escapeHtml(row.clusterId) : "--"}</td>` : "";
+  const hitText = `${formatSignalRate(row.hitRateOos)} / ${formatSignalRate(row.baseRate)}`;
+  return `
+    <tr>
+      <td class="sv-name" title="${escapeHtml(row.label || "")}">${name}</td>
+      ${moduleCell}
+      <td>${formatSignalIc(row.ic3m)}</td>
+      <td>${formatSignalIc(row.oosIc1m)}</td>
+      <td>${formatSignalIc(row.oosIc3m)}</td>
+      <td>${hitText}</td>
+      <td>${formatSignalLift(row.lift)}</td>
+      <td>${formatSignalDays(row.leadTimeDays)}</td>
+      <td>${signalValidationBadge(row.classification)}</td>
+      ${clusterCell}
+    </tr>
+  `;
+}
+
+function renderSignalValidation() {
+  const panel = state.signalValidation || DEFAULT_DATA.signalValidation || {};
+  const root = $("#signalValidationPanel");
+  if (!root) return;
+  const method = $("#signalValidationMethod");
+  if (method) method.textContent = panel.available ? `weekly replay · OOS ${panel.oosSplitPct || 65}/${100 - (panel.oosSplitPct || 65)} split · ${panel.drawdownRule || ""}` : "weekly point-in-time replay · out-of-sample split";
+  const coverage = $("#signalValidationCoverage");
+  if (coverage) coverage.textContent = panel.available ? `${Number(panel.weeklyObservationCount) || 0} weekly obs · asOf ${panel.asOf || "--"}` : "waiting for public history";
+  const read = $("#signalValidationRead");
+  const compositesNode = $("#signalValidationComposites");
+  const factorsNode = $("#signalValidationFactors");
+  const clustersNode = $("#signalValidationClusters");
+  if (!panel.available) {
+    if (read) read.textContent = panel.reason || "暂无走出样本验证。";
+    if (compositesNode) compositesNode.innerHTML = "";
+    if (factorsNode) factorsNode.innerHTML = "";
+    if (clustersNode) clustersNode.innerHTML = "";
+    return;
+  }
+  const composites = Array.isArray(panel.composites) ? panel.composites : [];
+  const factors = Array.isArray(panel.factors) ? panel.factors : [];
+  const leadingCount = factors.filter((row) => row.classification === "leading").length;
+  const coincidentCount = factors.filter((row) => row.classification === "coincident").length;
+  if (read) {
+    read.textContent = `IC为信号与SPX远期收益的秩相关(已按方向校正,正值=有预测力); 命中率与基准率均在走出样本段计算。当前${factors.length}个因子中${leadingCount}个领先、${coincidentCount}个同步。`;
+  }
+  if (compositesNode) {
+    const lens = panel.predictiveLens && typeof panel.predictiveLens === "object" ? panel.predictiveLens : {};
+    const lensFactors = Array.isArray(lens.selectedFactors) ? lens.selectedFactors : [];
+    const lensHtml = lens.available
+      ? `<div class="sv-lens">预测镜头(领先因子) 最新 <strong>${escapeHtml(String(lens.latestScore ?? "--"))}</strong> · 成分: ${lensFactors.map((item) => `${escapeHtml(item.id || "")}(校准IC ${escapeHtml(String(item.calibrationIc ?? "--"))})`).join(" · ")}</div>`
+      : (lens.reason ? `<div class="sv-lens muted">${escapeHtml(lens.reason)}</div>` : "");
+    compositesNode.innerHTML = composites.length ? `
+      <h4 class="sv-heading">复合信号 · Composites</h4>
+      <div class="sv-table-wrap">
+        <table class="sv-table">
+          <thead><tr><th>信号</th><th>IC 3M</th><th>OOS IC 1M</th><th>OOS IC 3M</th><th>命中/基准</th><th>Lift</th><th>提前量</th><th>分类</th></tr></thead>
+          <tbody>${composites.map((row) => signalValidationRowHtml(row)).join("")}</tbody>
+        </table>
+      </div>
+      ${lensHtml}
+    ` : `<div class="empty-state compact">暂无复合信号验证</div>`;
+  }
+  if (factorsNode) {
+    const sorted = factors.slice().sort((first, second) => Math.abs(Number(second.oosIc3m) || 0) - Math.abs(Number(first.oosIc3m) || 0));
+    factorsNode.innerHTML = sorted.length ? `
+      <h4 class="sv-heading">单因子 · Factors (按|OOS IC 3M|排序)</h4>
+      <div class="sv-table-wrap">
+        <table class="sv-table">
+          <thead><tr><th>因子</th><th>模块</th><th>IC 3M</th><th>OOS IC 1M</th><th>OOS IC 3M</th><th>命中/基准</th><th>Lift</th><th>提前量</th><th>分类</th><th>簇</th></tr></thead>
+          <tbody>${sorted.map((row) => signalValidationRowHtml(row, { showModule: true, showCluster: true })).join("")}</tbody>
+        </table>
+      </div>
+    ` : `<div class="empty-state compact">暂无因子验证</div>`;
+  }
+  if (clustersNode) {
+    const clusters = Array.isArray(panel.clusters) ? panel.clusters : [];
+    clustersNode.innerHTML = clusters.length ? `
+      <h4 class="sv-heading">冗余簇 · Redundancy Clusters (|corr|≥0.8, 簇内权重均摊)</h4>
+      <div class="sv-clusters">${clusters.map((cluster) => `
+        <div class="sv-cluster"><strong>${escapeHtml(cluster.id || "")}</strong><span>${(cluster.factorIds || []).map((id) => escapeHtml(id)).join(" · ")}</span></div>
+      `).join("")}</div>
+    ` : `<div class="empty-state compact">未检测到高相关因子簇</div>`;
+  }
+}
+
 function renderSpyEarlyWarning(warning) {
   const item = warning && typeof warning === "object" ? warning : DEFAULT_DATA.spyEarlyWarning;
   if (!item.available) {
@@ -2326,8 +2563,7 @@ function renderGlobalLpplRisk(payload) {
     ${renderGlobalLpplBreadthConfirmation(item.breadthConfirmation)}
     ${indexValidation.summary ? `<p class="global-lppl-validation-summary">${escapeHtml(indexValidation.summary)}</p>` : ""}
     ${renderGlobalLpplPerIndexBacktestStrip(item)}
-    ${renderGlobalLpplIndexGrid(indices)}
-    ${renderGlobalLpplIndexHistoryCharts(item)}
+    <a class="global-lppl-regional-pointer" href="#regions">逐市场卡片、价格因子、配置建议与历史曲线见「地区监控」板块 →</a>
   `;
 }
 
@@ -2443,6 +2679,300 @@ function renderGlobalLpplPerIndexBacktestStrip(item) {
   `;
 }
 
+function regionalMonitorPanel() {
+  return state.regionalMonitor || DEFAULT_DATA.regionalMonitor || {};
+}
+
+function regionStatusClass(status) {
+  if (status === "risk") return "risk";
+  if (status === "watch") return "watch";
+  if (status === "quiet") return "quiet";
+  return "neutral";
+}
+
+function marketStateClass(state) {
+  if (state === "stressed") return "risk";
+  if (state === "constructive") return "quiet";
+  return "neutral";
+}
+
+function regionStanceClass(stance) {
+  if (stance === "underweight") return "risk";
+  if (stance === "overweight") return "quiet";
+  return "neutral";
+}
+
+function marketStateLabel(factors) {
+  const cn = factors && (factors.marketStateCn || factors.marketState);
+  return cn ? String(cn) : "--";
+}
+
+function regionalRepresentativeIndex(region) {
+  const indices = Array.isArray(region.indices) ? region.indices : [];
+  const withValidation = indices.filter((row) => row.factorValidation && row.factorValidation.available);
+  if (!withValidation.length) return null;
+  // Prefer the US benchmark (SPY) for the US region; otherwise the first validated index.
+  return withValidation.find((row) => String(row.symbol).toUpperCase() === "SPY") || withValidation[0];
+}
+
+function globalLpplBreachEventsForSymbol(symbol) {
+  const target = String(symbol || "").toUpperCase();
+  const monitor = state.regionalMonitor || DEFAULT_DATA.regionalMonitor || {};
+  const regions = Array.isArray(monitor.regions) ? monitor.regions : [];
+  for (const region of regions) {
+    const rep = regionalRepresentativeIndex(region);
+    if (!rep || String(rep.symbol || "").toUpperCase() !== target) continue;
+    const fa = region.factorAlert && typeof region.factorAlert === "object" ? region.factorAlert : {};
+    if (fa.available && Array.isArray(fa.breachEvents)) return fa.breachEvents;
+  }
+  return [];
+}
+
+function globalLpplBreachMarkersSvg(symbol, scale) {
+  const events = globalLpplBreachEventsForSymbol(symbol);
+  if (!events.length) return "";
+  const { x, pad, H, minTime, maxTime } = scale;
+  const markers = events.map((event) => {
+    const time = Date.parse(event && event.date || "");
+    if (!Number.isFinite(time) || time < minTime || time > maxTime) return "";
+    const px = x(time).toFixed(1);
+    const cls = event && event.hit ? "hit" : "miss";
+    return `<line class="global-lppl-breach-marker ${cls}" x1="${px}" x2="${px}" y1="${pad.t}" y2="${H - pad.b}"></line>`
+      + `<polygon class="global-lppl-breach-flag ${cls}" points="${px},${pad.t} ${(Number(px) - 4).toFixed(1)},${pad.t - 6} ${(Number(px) + 4).toFixed(1)},${pad.t - 6}"></polygon>`;
+  }).join("");
+  return markers ? `<g class="global-lppl-breach-markers">${markers}</g>` : "";
+}
+
+function renderRegionalFactorValidation(region) {
+  const representative = regionalRepresentativeIndex(region);
+  if (!representative) return "";
+  const validation = representative.factorValidation || {};
+  const factors = Array.isArray(validation.factors) ? validation.factors : [];
+  if (!factors.length) return "";
+  const sorted = factors.slice().sort((a, b) => Math.abs(Number(b.oosIc3m) || 0) - Math.abs(Number(a.oosIc3m) || 0));
+  const proxy = escapeHtml(representative.proxyNoteCn || representative.proxyNote || representative.symbol || "");
+  const rows = sorted.map((row) => `
+    <tr>
+      <td class="sv-name">${escapeHtml(row.labelCn || row.label || row.id || "--")}</td>
+      <td>${formatSignalIc(row.ic3m)}</td>
+      <td>${formatSignalIc(row.oosIc3m)}</td>
+      <td>${formatSignalRate(row.hitRateOos)} / ${formatSignalRate(row.baseRate)}</td>
+      <td>${formatSignalLift(row.lift)}</td>
+      <td>${formatSignalDays(row.leadTimeDays)}</td>
+      <td>${signalValidationBadge(row.classification)}</td>
+    </tr>
+  `).join("");
+  const composite = validation.composite && typeof validation.composite === "object" ? validation.composite : {};
+  let compositeHtml = "";
+  if (composite.available) {
+    const weights = Array.isArray(composite.weights) ? composite.weights.filter((w) => Number(w.weight) > 0) : [];
+    const weightText = weights.map((w) => `${escapeHtml(w.labelCn || w.id)} ${(Number(w.weight) * 100).toFixed(0)}%`).join(" · ");
+    const beats = composite.beatsBestSingleFactor;
+    const verdict = beats === true ? `<span class="sv-badge leading">优于最强单因子</span>` : beats === false ? `<span class="sv-badge none">未超过最强单因子</span>` : "";
+    compositeHtml = `
+      <div class="region-composite ${beats === true ? "beats" : ""}">
+        <div class="region-composite-head">
+          <strong>证据加权综合信号 · Composite</strong>
+          <span>OOS IC 3M ${formatSignalIc(composite.oosIc3m)} · 命中 ${formatSignalRate(composite.hitRateOos)}/基准 ${formatSignalRate(composite.baseRate)} · Lift ${formatSignalLift(composite.lift)} · ${signalValidationBadge(composite.classification)}</span>
+          ${verdict}
+        </div>
+        ${weightText ? `<span class="region-composite-weights">校准段权重: ${weightText}</span>` : ""}
+      </div>
+    `;
+  }
+  return `
+    <h4 class="sv-heading">本地区因子前瞻验证 · ${escapeHtml(region.nameCn || region.name || "")} <small>(对该地区自身远期收益, 走出样本; 代理 ${proxy})</small></h4>
+    ${compositeHtml}
+    <div class="sv-table-wrap">
+      <table class="sv-table">
+        <thead><tr><th>因子</th><th>IC 3M</th><th>OOS IC 3M</th><th>命中/基准</th><th>Lift</th><th>提前量</th><th>分类</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function globalLpplPriceFactorSummary(factors) {
+  if (!factors || typeof factors !== "object" || !factors.available) return "";
+  const parts = [`市场状态 ${escapeHtml(marketStateLabel(factors))}`];
+  if (Number.isFinite(Number(factors.return3m))) parts.push(`3M ${formatSignedMetric(factors.return3m, 1)}%`);
+  if (Number.isFinite(Number(factors.realizedVol))) parts.push(`波动 ${Number(factors.realizedVol).toFixed(0)}%`);
+  if (Number.isFinite(Number(factors.drawdownFromHigh))) parts.push(`回撤 ${formatSignedMetric(factors.drawdownFromHigh, 0)}%`);
+  if (!factors.isBenchmark && Number.isFinite(Number(factors.relativeStrength3m))) parts.push(`相对美国 ${formatSignedMetric(factors.relativeStrength3m, 1)}%`);
+  return parts.join(" · ");
+}
+
+function renderRegionalMonitor() {
+  const panel = regionalMonitorPanel();
+  const tabsNode = $("#regionalMonitorTabs");
+  if (!tabsNode) return;
+  const aggNode = $("#regionalMonitorAggregate");
+  const gridNode = $("#regionalMonitorGrid");
+  const validationNode = $("#regionalMonitorValidation");
+  const chartsNode = $("#regionalMonitorCharts");
+  const rotationNode = $("#regionalMonitorRotation");
+  const summaryNode = $("#regionalMonitorSummary");
+  const methodNode = $("#regionalMonitorMethod");
+  const regions = (Array.isArray(panel.regions) ? panel.regions : []).filter(
+    (region) => region && Number(region.aggregate && region.aggregate.availableCount) > 0
+  );
+  if (methodNode) methodNode.textContent = panel.available ? `${regions.length} regions · per-region LPPL factors` : "per-region bubble factors";
+  if (summaryNode) summaryNode.textContent = panel.summary || (panel.available ? "" : "等待数据");
+  if (!panel.available || !regions.length) {
+    tabsNode.innerHTML = "";
+    if (rotationNode) rotationNode.innerHTML = "";
+    if (aggNode) aggNode.innerHTML = "";
+    if (gridNode) gridNode.innerHTML = `<div class="empty-state compact">${escapeHtml(panel.reason || panel.summary || "暂无地区LPPL数据")}</div>`;
+    if (validationNode) validationNode.innerHTML = "";
+    if (chartsNode) chartsNode.innerHTML = "";
+    return;
+  }
+  if (rotationNode) {
+    const rotation = panel.rotation && typeof panel.rotation === "object" ? panel.rotation : {};
+    const clusters = Array.isArray(rotation.reduceClusters) ? rotation.reduceClusters : [];
+    const clusterChips = clusters.map((cluster) => {
+      const band = Array.isArray(cluster.exposureBandPct) ? cluster.exposureBandPct : null;
+      const bandText = band ? ` ${Number(band[0]).toFixed(0)}-${Number(band[1]).toFixed(0)}%` : "";
+      const names = (cluster.names || []).join("+");
+      return `<span class="region-reduce-cluster ${cluster.merged ? "merged" : ""}">${escapeHtml(names)}${escapeHtml(bandText)}${cluster.merged ? " · 共享额度" : ""}</span>`;
+    }).join("");
+    const clusterRow = clusterChips
+      ? `<div class="region-reduce-clusters">减持风险预算: ${clusterChips}</div>`
+      : "";
+    rotationNode.innerHTML = rotation.available
+      ? `<div class="region-rotation-card"><strong>地区轮动建议 · Regional Rotation</strong><span>${escapeHtml(rotation.summary || "")}</span>${clusterRow}</div>`
+      : "";
+  }
+  if (!regions.some((region) => region.key === selectedRegionKey)) {
+    const alerting = regions.find((region) => (panel.alertingRegions || []).includes(region.key));
+    selectedRegionKey = (alerting || regions[0]).key;
+  }
+  tabsNode.innerHTML = regions.map((region) => {
+    const agg = region.aggregate || {};
+    const score = Number(agg.maxScore);
+    const alloc = region.allocation && typeof region.allocation === "object" ? region.allocation : {};
+    const stancePill = alloc.stanceCn
+      ? `<span class="region-tab-stance ${regionStanceClass(alloc.stance)}">${escapeHtml(alloc.stanceCn)}</span>`
+      : "";
+    const breached = region.factorAlert && region.factorAlert.available && region.factorAlert.state === "breached";
+    const breachMark = breached ? `<span class="region-tab-breach" title="已验证领先因子突破阈值">⚠</span>` : "";
+    return `
+      <button type="button" role="tab" class="region-tab ${regionStatusClass(agg.status)} ${region.key === selectedRegionKey ? "active" : ""}" data-region-key="${escapeHtml(region.key)}" aria-selected="${region.key === selectedRegionKey ? "true" : "false"}">
+        <span class="region-tab-name">${breachMark}${escapeHtml(region.nameCn || region.name || region.key)}${stancePill}</span>
+        <span class="region-tab-score">${Number.isFinite(score) ? score.toFixed(0) : "--"}</span>
+        <span class="region-tab-status">${escapeHtml(agg.statusCn || "--")}</span>
+      </button>
+    `;
+  }).join("");
+  const active = regions.find((region) => region.key === selectedRegionKey) || regions[0];
+  const agg = active.aggregate || {};
+  if (aggNode) {
+    const days = Number(agg.minDaysToCritical);
+    const daysText = Number.isFinite(days) ? `最近临界窗口约 ${days} 个交易日` : "无临界窗口告警";
+    const score = Number(agg.maxScore);
+    const pf = agg.priceFactors && typeof agg.priceFactors === "object" ? agg.priceFactors : {};
+    const factorStrip = pf.available ? `
+      <div class="region-factor-strip">
+        <span class="region-factor-state ${marketStateClass(pf.marketState)}">市场状态 ${escapeHtml(marketStateLabel(pf))}</span>
+        <span>3M 动量 <strong>${formatSignedMetric(pf.return3m, 1)}%</strong></span>
+        <span>年化波动 <strong>${Number.isFinite(Number(pf.realizedVol)) ? Number(pf.realizedVol).toFixed(0) + "%" : "--"}</strong></span>
+        <span>距高点 <strong>${formatSignedMetric(pf.worstDrawdownFromHigh, 0)}%</strong></span>
+        <span>相对美国 <strong>${Number.isFinite(Number(pf.relativeStrength3m)) ? formatSignedMetric(pf.relativeStrength3m, 1) + "%" : "—"}</strong></span>
+      </div>
+    ` : "";
+    const fa = active.factorAlert && typeof active.factorAlert === "object" ? active.factorAlert : {};
+    const sourceTag = fa.source === "composite" ? `<span class="region-alert-source">综合</span>` : "";
+    const alertBanner = fa.available && fa.state !== "normal" ? `
+      <div class="region-factor-alert ${fa.state === "breached" ? "breached" : "approaching"}">
+        <span class="region-factor-alert-tag">${fa.state === "breached" ? "⚠ 信号突破" : "信号逼近"}</span>
+        <span>${sourceTag}${escapeHtml(fa.factorLabelCn || "")} 当前 <strong>${escapeHtml(String(fa.current))}</strong> / 验证阈值 ${escapeHtml(String(fa.threshold))}${fa.evidence ? ` · ${escapeHtml(fa.evidence)}` : ""}${fa.trackRecord ? ` · ${escapeHtml(fa.trackRecord)}` : ""}</span>
+      </div>
+    ` : "";
+    const breachEvents = fa.available && Array.isArray(fa.breachEvents) ? fa.breachEvents : [];
+    const timelineRep = regionalRepresentativeIndex(active);
+    const timelineSymbol = timelineRep ? String(timelineRep.symbol || "").toUpperCase() : "";
+    const breachTimeline = breachEvents.length ? `
+      <button type="button" class="region-breach-timeline${timelineSymbol ? " clickable" : ""}"${timelineSymbol ? ` data-global-lppl-symbol="${escapeHtml(timelineSymbol)}" title="点击查看 ${escapeHtml(timelineSymbol)} 历史曲线"` : ""}>
+        <span class="region-breach-timeline-label">历史突破回放(近${breachEvents.length}次, ●=随后回撤命中)${timelineSymbol ? " · 点击看历史图" : ""}:</span>
+        <span class="region-breach-dots">${breachEvents.map((event) => {
+          const hit = event && event.hit;
+          const dd = Number(event && event.drawdownPct);
+          const title = `${escapeHtml(String(event && event.date || ""))}${Number.isFinite(dd) ? ` 后续回撤 ${dd.toFixed(1)}%` : ""}`;
+          return `<span class="region-breach-dot ${hit ? "hit" : "miss"}" title="${title}">${hit ? "●" : "○"}</span>`;
+        }).join("")}</span>
+      </button>
+    ` : "";
+    const alloc = active.allocation && typeof active.allocation === "object" ? active.allocation : {};
+    const band = Array.isArray(alloc.exposureBandPct) ? alloc.exposureBandPct : null;
+    const allocBlock = alloc.stanceCn ? `
+      <div class="region-alloc ${regionStanceClass(alloc.stance)}">
+        <div class="region-alloc-head">
+          <span class="region-alloc-stance">${escapeHtml(alloc.stanceCn)}</span>
+          ${band ? `<span class="region-alloc-band">仓位 ${Number(band[0]).toFixed(0)}-${Number(band[1]).toFixed(0)}%</span>` : ""}
+          <span class="region-alloc-conf">置信 ${escapeHtml(alloc.confidenceCn || "--")}</span>
+        </div>
+        <span class="region-alloc-rationale">${escapeHtml(alloc.rationale || "")}</span>
+      </div>
+    ` : "";
+    const internal = active.internalRotation && typeof active.internalRotation === "object" ? active.internalRotation : {};
+    const internalBlock = internal.available ? `
+      <div class="region-internal-rotation ${internal.tilt === "balanced" ? "balanced" : "tilted"}">
+        <strong>美股内部轮动 · ${escapeHtml(internal.tiltCn || "")}</strong>
+        <span>${escapeHtml(internal.rationale || "")}</span>
+      </div>
+    ` : "";
+    aggNode.innerHTML = `
+      <div class="region-agg ${regionStatusClass(agg.status)}">
+        <strong>${escapeHtml(active.nameCn || active.name)}</strong>
+        <span>泡沫: ${escapeHtml(agg.statusCn || "--")} · 峰值评分 ${Number.isFinite(score) ? score.toFixed(0) : "--"} · ${daysText} · ${Number(agg.availableCount) || 0}/${Number(agg.indexCount) || 0} 指数可用</span>
+      </div>
+      ${factorStrip}
+      ${alertBanner}
+      ${breachTimeline}
+      ${internalBlock}
+      ${allocBlock}
+    `;
+  }
+  if (gridNode) gridNode.innerHTML = renderGlobalLpplIndexGrid(active.indices || []);
+  if (validationNode) validationNode.innerHTML = renderRegionalFactorValidation(active);
+  const diversificationNode = $("#regionalMonitorDiversification");
+  if (diversificationNode) diversificationNode.innerHTML = renderRegionalDiversification(panel.diversification);
+  if (chartsNode) {
+    const item = state.globalLpplRisk || DEFAULT_DATA.globalLpplRisk;
+    const chartable = (active.indices || []).filter((row) => row.available && globalLpplIndexHistory(item, row.symbol).available);
+    chartsNode.innerHTML = chartable.length
+      ? `<div class="global-lppl-chart-grid">${chartable.map((row) => renderGlobalLpplRiskHistoryChart(item, { symbol: row.symbol, fullWidth: true })).join("")}</div>`
+      : "";
+  }
+}
+
+function regionCorrelationClass(corr) {
+  const value = Number(corr);
+  if (!Number.isFinite(value)) return "neutral";
+  if (value >= 0.7) return "risk";
+  if (value <= 0.3) return "quiet";
+  return "neutral";
+}
+
+function renderRegionalDiversification(diversification) {
+  const div = diversification && typeof diversification === "object" ? diversification : {};
+  if (!div.available) return "";
+  const matrix = Array.isArray(div.matrix) ? div.matrix : [];
+  const stats = Array.isArray(div.regionStats) ? div.regionStats : [];
+  const pairs = matrix.slice().sort((a, b) => Number(b.corr) - Number(a.corr)).map((pair) => `
+    <span class="region-corr-pair ${regionCorrelationClass(pair.corr)}">${escapeHtml(pair.aCn)}·${escapeHtml(pair.bCn)} ${Number(pair.corr) >= 0 ? "+" : ""}${Number(pair.corr).toFixed(2)}</span>
+  `).join("");
+  const statText = stats.map((s) => `${escapeHtml(s.nameCn)} ${Number(s.avgCorr) >= 0 ? "+" : ""}${Number(s.avgCorr).toFixed(2)}`).join(" · ");
+  return `
+    <h4 class="sv-heading">跨地区相关性与分散度 · Diversification <small>(周度收益两两相关; 高=同向风险冗余, 低=分散价值)</small></h4>
+    <div class="region-diversification">
+      <p class="region-diversification-summary">${escapeHtml(div.summary || "")}</p>
+      <div class="region-corr-pairs">${pairs}</div>
+      ${statText ? `<div class="region-corr-stats">平均相关性: ${statText}</div>` : ""}
+    </div>
+  `;
+}
+
 function renderGlobalLpplIndexGrid(indices) {
   return `
     <div class="global-lppl-index-grid">
@@ -2461,14 +2991,16 @@ function renderGlobalLpplIndexGrid(indices) {
         const forwardText = forwardSignal
           ? `前瞻压力 ${Number(forwardSignal.score).toFixed(0)} · ${escapeHtml(forwardSignal.regimeCn || forwardSignal.regime || "")} · 20D ${formatSignedMetric(forwardSignal.scoreMomentum20d, 1)}`
           : "";
+        const factorText = globalLpplPriceFactorSummary(row.priceFactors);
         return `
           <div class="global-lppl-index-card ${riskClass} ${row.available ? "" : "missing"}">
-            <span>${escapeHtml(row.name || row.symbol || "")}<small>${escapeHtml(row.region || row.symbol || "")}</small></span>
+            <span>${escapeHtml(row.name || row.symbol || "")}<small>${escapeHtml(row.proxyNoteCn || row.proxyNote || row.region || row.symbol || "")}</small></span>
             <strong>${row.available && Number.isFinite(score) ? score.toFixed(0) : "--"}</strong>
             <b>${escapeHtml(row.statusCn || row.status || "--")}</b>
             <small>${row.available ? `criticalDate ${escapeHtml(row.criticalDate || "--")} · ${Number(row.daysToCritical) || "--"}D · fitR2 ${formatNumberMetric(row.fitR2, 2)} · conf ${formatPercentMetric(confidence * 100)}` : escapeHtml(row.reason || "source unavailable")}</small>
             ${tcText ? `<small>${escapeHtml(tcText)}</small>` : ""}
             ${forwardText ? `<small>${forwardText}</small>` : ""}
+            ${factorText ? `<small class="global-lppl-factor-note">${factorText}</small>` : ""}
             ${clipText ? `<small class="global-lppl-clip-note">${escapeHtml(clipText)}</small>` : ""}
             ${validationText ? `<small>${validationText}</small>` : ""}
             ${row.available ? `<button class="icon-btn chart-expand-btn expandGlobalLpplRiskHistory" type="button" data-global-lppl-symbol="${escapeHtml(symbol)}" title="放大查看${escapeHtml(symbol)} LPPL历史曲线" aria-label="放大查看${escapeHtml(symbol)} LPPL历史曲线">⛶</button>` : ""}
@@ -2565,6 +3097,7 @@ function renderGlobalLpplRiskHistoryChart(item, options = {}) {
         </div>
       </div>
       ${clipText ? `<small class="global-lppl-clip-note">${escapeHtml(clipText)}</small>` : ""}
+      ${options.large && globalLpplBreachEventsForSymbol(symbol).length ? `<small class="global-lppl-breach-legend">▲ 历史突破标记: <i class="bm hit"></i>红=突破后回撤命中 · <i class="bm miss"></i>灰=未命中</small>` : ""}
       <svg data-global-lppl-history-chart data-global-lppl-symbol="${escapeHtml(symbol)}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${escapeHtml(symbol)} LPPL risk historical curve versus indexed price">
         <rect x="0" y="0" width="${W}" height="${H}" fill="transparent"></rect>
         ${[45, 65, 75].map((tick) => `
@@ -2572,6 +3105,7 @@ function renderGlobalLpplRiskHistoryChart(item, options = {}) {
           <text x="8" y="${yRisk(tick).toFixed(1)}" dy="4">${tick}</text>
         `).join("")}
         ${ticks.map((point) => `<text x="${x(point.time).toFixed(1)}" y="${H - 8}" text-anchor="middle">${formatMonthLabel(point.time)}</text>`).join("")}
+        ${options.large ? globalLpplBreachMarkersSvg(symbol, scale) : ""}
         ${pricePath ? `<path d="${pricePath}" class="global-lppl-price-line"></path>` : ""}
         <path d="${riskPath}" class="global-lppl-score-line"></path>
         <circle class="global-lppl-score-dot" cx="${x(latest.time).toFixed(1)}" cy="${yRisk(latest.score).toFixed(1)}" r="4.2"></circle>
@@ -4206,6 +4740,12 @@ document.addEventListener("click", (event) => {
   if (event.target.closest("#expandEquityRiskHistory")) openEquityRiskHistoryModal();
   const lpplHistoryButton = event.target.closest("[data-global-lppl-symbol], .expandGlobalLpplRiskHistory, #expandGlobalLpplRiskHistory");
   if (lpplHistoryButton) openGlobalLpplRiskHistoryModal(lpplHistoryButton.dataset.globalLpplSymbol || "");
+});
+$("#regionalMonitorTabs")?.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-region-key]");
+  if (!button) return;
+  selectedRegionKey = button.dataset.regionKey || null;
+  renderRegionalMonitor();
 });
 $("#closeEquityRiskHistoryModal")?.addEventListener("click", closeEquityRiskHistoryModal);
 $$("[data-close-equity-risk-history-modal]").forEach((node) => {

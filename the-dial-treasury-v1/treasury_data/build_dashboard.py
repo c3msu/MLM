@@ -52,6 +52,16 @@ from .sources import (
     fetch_text_curl_first,
     nearest_record,
 )
+from .signal_validation import (
+    SortedSeries,
+    classify_lead_lag,
+    effective_weights,
+    evaluate_signal,
+    pearson_correlation,
+    redundancy_clusters,
+    spearman_ic,
+    weekly_dates,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OVERRIDES_PATH = PROJECT_ROOT / "content" / "overrides.json"
@@ -192,10 +202,10 @@ BHADIAL_CONDITION_MODULES: list[dict[str, Any]] = [
         "name": "Liquidity",
         "nameCn": "流动性",
         "factors": [
-            {"id": "fed_net_liquidity", "remoteName": "Fed Net Liquidity", "name": "净流动性", "weight": 0.30, "scoreKey": "net_liquidity", "direction": "higher_better", "method": "level_percentile", "valueKey": "net_liquidity_trillions", "format": "usd_t", "source": "FRED WALCL - WTREGEN - RRPONTSYD"},
-            {"id": "bank_reserves", "remoteName": "Bank Reserves", "name": "银行准备金", "weight": 0.20, "scoreKey": "bank_reserves", "direction": "higher_better", "method": "level_percentile", "valueKey": "bank_reserves_trillions", "format": "usd_t", "source": "FRED WRESBAL"},
-            {"id": "delta_net_liq_13w", "remoteName": "Net Liquidity Momentum (13W)", "name": "13周净流动性动量", "weight": 0.25, "scoreKey": "net_liquidity_13w_momentum", "direction": "higher_better", "method": "level_percentile", "valueKey": "net_liquidity_13w_change_trillions", "format": "signed_usd_t", "source": "Net liquidity 13W change"},
-            {"id": "tga_dev_signed", "remoteName": "TGA Deviation", "name": "TGA偏离度", "weight": 0.15, "scoreKey": "tga_deviation", "direction": "lower_better", "method": "level_percentile", "valueKey": "tga_deviation_trillions", "format": "signed_usd_t", "source": "FRED WTREGEN - 52W median"},
+            {"id": "fed_net_liquidity", "publicationLagDays": 2, "remoteName": "Fed Net Liquidity", "name": "净流动性", "weight": 0.30, "scoreKey": "net_liquidity", "direction": "higher_better", "method": "level_percentile", "valueKey": "net_liquidity_trillions", "format": "usd_t", "source": "FRED WALCL - WTREGEN - RRPONTSYD"},
+            {"id": "bank_reserves", "publicationLagDays": 2, "remoteName": "Bank Reserves", "name": "银行准备金", "weight": 0.20, "scoreKey": "bank_reserves", "direction": "higher_better", "method": "level_percentile", "valueKey": "bank_reserves_trillions", "format": "usd_t", "source": "FRED WRESBAL"},
+            {"id": "delta_net_liq_13w", "publicationLagDays": 2, "remoteName": "Net Liquidity Momentum (13W)", "name": "13周净流动性动量", "weight": 0.25, "scoreKey": "net_liquidity_13w_momentum", "direction": "higher_better", "method": "level_percentile", "valueKey": "net_liquidity_13w_change_trillions", "format": "signed_usd_t", "source": "Net liquidity 13W change"},
+            {"id": "tga_dev_signed", "publicationLagDays": 2, "remoteName": "TGA Deviation", "name": "TGA偏离度", "weight": 0.15, "scoreKey": "tga_deviation", "direction": "lower_better", "method": "level_percentile", "valueKey": "tga_deviation_trillions", "format": "signed_usd_t", "source": "FRED WTREGEN - 52W median"},
             {"id": "onrrp_near_zero_risk", "remoteName": "ON RRP Buffer Risk", "name": "ON RRP缓冲风险", "weight": 0.10, "scoreKey": "onrrp_buffer_risk", "direction": "lower_better", "method": "risk_signal", "valueKey": "onrrp_buffer_risk", "format": "risk", "source": "FRED RRPONTSYD bounded risk"},
         ],
     },
@@ -234,7 +244,7 @@ BHADIAL_CONDITION_MODULES: list[dict[str, Any]] = [
         "name": "Credit",
         "nameCn": "信用",
         "factors": [
-            {"id": "nfci", "remoteName": "NFCI", "name": "金融条件指数(NFCI)", "weight": 0.40, "scoreKey": "nfci", "direction": "lower_better", "method": "level_percentile", "valueKey": "nfci", "format": "signed_number", "source": "FRED NFCI"},
+            {"id": "nfci", "publicationLagDays": 7, "remoteName": "NFCI", "name": "金融条件指数(NFCI)", "weight": 0.40, "scoreKey": "nfci", "direction": "lower_better", "method": "level_percentile", "valueKey": "nfci", "format": "signed_number", "source": "FRED NFCI"},
             {"id": "hy_credit", "remoteName": "HY Credit", "name": "HY信用偏好(HY/UST)", "weight": 0.25, "scoreKey": "hy_credit_preference", "direction": "higher_better", "method": "level_percentile", "valueKey": "hy_credit_preference", "format": "number", "source": "FRED HY total-return / DGS10 price proxy"},
             {"id": "ig_credit", "remoteName": "IG Credit", "name": "IG信用偏好(IG/UST)", "weight": 0.15, "scoreKey": "ig_credit_preference", "direction": "higher_better", "method": "level_percentile", "valueKey": "ig_credit_preference", "format": "number", "source": "FRED IG total-return / DGS10 price proxy"},
             {"id": "kre_spy", "remoteName": "Regional Banks vs SPY", "name": "银行股相对S&P500", "weight": 0.20, "scoreKey": "regional_bank_vs_market", "direction": "higher_better", "method": "level_percentile", "valueKey": "regional_bank_vs_market", "format": "number", "source": "FRED NASDAQBANK / SP500 proxy"},
@@ -352,11 +362,19 @@ EQUITY_RISK_COMPONENT_WEIGHTS: dict[str, float] = {
     "eventRisk": 0.01,
     "optionOI": 0.00,
 }
+# Each index carries structured region metadata so the dashboard can group factors by
+# first-class region (US groups SPY+QQQ) rather than burying HK/TW/JP as "ETF proxy"
+# sub-rows. regionKey is the stable grouping key; proxyNote keeps the data source transparent.
 GLOBAL_LPPL_INDEX_SPECS: list[dict[str, Any]] = [
     {
         "symbol": "SPY",
-        "name": "SPY",
-        "region": "US broad",
+        "name": "S&P 500",
+        "region": "United States",
+        "regionKey": "us",
+        "regionName": "United States",
+        "regionNameCn": "美国",
+        "proxyNote": "S&P 500 ETF · SPY",
+        "proxyNoteCn": "标普500 · SPY",
         "source": "nasdaq",
         "sourceSymbol": "SPY",
         "fallbackSymbol": "spy.us",
@@ -366,8 +384,13 @@ GLOBAL_LPPL_INDEX_SPECS: list[dict[str, Any]] = [
     },
     {
         "symbol": "QQQ",
-        "name": "Nasdaq / QQQ proxy",
-        "region": "US tech",
+        "name": "Nasdaq 100",
+        "region": "United States",
+        "regionKey": "us",
+        "regionName": "United States",
+        "regionNameCn": "美国",
+        "proxyNote": "Nasdaq 100 ETF · QQQ",
+        "proxyNoteCn": "纳斯达克100 · QQQ",
         "source": "nasdaq",
         "sourceSymbol": "QQQ",
         "fallbackSymbol": "qqq.us",
@@ -377,8 +400,13 @@ GLOBAL_LPPL_INDEX_SPECS: list[dict[str, Any]] = [
     },
     {
         "symbol": "KOSPI",
-        "name": "KOSPI / EWY proxy",
-        "region": "Korea ETF proxy",
+        "name": "KOSPI",
+        "region": "South Korea",
+        "regionKey": "korea",
+        "regionName": "South Korea",
+        "regionNameCn": "韩国",
+        "proxyNote": "US-listed ETF proxy · EWY",
+        "proxyNoteCn": "美上市ETF代理 · EWY",
         "source": "nasdaq",
         "sourceSymbol": "EWY",
         "fallbackSymbol": "ewy.us",
@@ -388,8 +416,13 @@ GLOBAL_LPPL_INDEX_SPECS: list[dict[str, Any]] = [
     },
     {
         "symbol": "HSI",
-        "name": "Hang Seng / EWH proxy",
-        "region": "Hong Kong ETF proxy",
+        "name": "Hang Seng",
+        "region": "Hong Kong",
+        "regionKey": "hongkong",
+        "regionName": "Hong Kong",
+        "regionNameCn": "香港",
+        "proxyNote": "US-listed ETF proxy · EWH",
+        "proxyNoteCn": "美上市ETF代理 · EWH",
         "source": "nasdaq",
         "sourceSymbol": "EWH",
         "fallbackSymbol": "ewh.us",
@@ -399,8 +432,13 @@ GLOBAL_LPPL_INDEX_SPECS: list[dict[str, Any]] = [
     },
     {
         "symbol": "TWII",
-        "name": "Taiwan Weighted / EWT proxy",
-        "region": "Taiwan ETF proxy",
+        "name": "Taiwan Weighted",
+        "region": "Taiwan",
+        "regionKey": "taiwan",
+        "regionName": "Taiwan",
+        "regionNameCn": "台湾",
+        "proxyNote": "US-listed ETF proxy · EWT",
+        "proxyNoteCn": "美上市ETF代理 · EWT",
         "source": "nasdaq",
         "sourceSymbol": "EWT",
         "fallbackSymbol": "ewt.us",
@@ -410,8 +448,13 @@ GLOBAL_LPPL_INDEX_SPECS: list[dict[str, Any]] = [
     },
     {
         "symbol": "NIKKEI",
-        "name": "Nikkei / EWJ proxy",
-        "region": "Japan ETF proxy",
+        "name": "Nikkei 225",
+        "region": "Japan",
+        "regionKey": "japan",
+        "regionName": "Japan",
+        "regionNameCn": "日本",
+        "proxyNote": "US-listed ETF proxy · EWJ",
+        "proxyNoteCn": "美上市ETF代理 · EWJ",
         "source": "nasdaq",
         "sourceSymbol": "EWJ",
         "fallbackSymbol": "ewj.us",
@@ -553,12 +596,18 @@ def annotate_source_status_freshness(
     annotated: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
-        cadence = expected_source_cadence_days(str(item.get("name") or ""))
+        name = str(item.get("name") or "")
+        cadence = expected_source_cadence_days(name)
         latest_date = parse_source_latest_date(item.get("latest"))
         if cadence is not None:
             item["expectedMaxAgeDays"] = cadence
         if latest_date is not None:
-            item["ageDays"] = max(0, (target - latest_date).days)
+            # Weekday markets are only fresh on trading days, so a Friday close is NOT stale on
+            # a Monday — measure trading-day age for daily OHLCV, calendar age otherwise.
+            if is_market_daily_source(name):
+                item["ageDays"] = business_days_between(latest_date, target)
+            else:
+                item["ageDays"] = max(0, (target - latest_date).days)
         if (
             cadence is not None
             and latest_date is not None
@@ -566,18 +615,36 @@ def annotate_source_status_freshness(
             and item["ageDays"] > cadence
         ):
             item["status"] = "stale"
-            item["note"] = f"Latest observation is {item['ageDays']} days old; expected <= {cadence} days."
+            unit = "trading days" if is_market_daily_source(name) else "days"
+            item["note"] = f"Latest observation is {item['ageDays']} {unit} old; expected <= {cadence}."
         annotated.append(item)
     return annotated
+
+
+def business_days_between(latest: date, target: date) -> int:
+    """Count weekdays strictly after `latest` up to and including `target` (Mon-Fri)."""
+    if target <= latest:
+        return 0
+    count = 0
+    cursor = latest + timedelta(days=1)
+    while cursor <= target:
+        if cursor.weekday() < 5:
+            count += 1
+        cursor += timedelta(days=1)
+    return count
+
+
+def is_market_daily_source(name: str) -> bool:
+    return (name.startswith("Nasdaq ") and name.endswith(" OHLCV")) or (
+        name.startswith("Global LPPL ") and name.endswith(" OHLCV")
+    )
 
 
 def expected_source_cadence_days(name: str) -> int | None:
     configured = EXPECTED_SOURCE_CADENCE_DAYS.get(name)
     if configured is not None:
         return configured
-    if name.startswith("Nasdaq ") and name.endswith(" OHLCV"):
-        return 2
-    if name.startswith("Global LPPL ") and name.endswith(" OHLCV"):
+    if is_market_daily_source(name):
         return 2
     return None
 
@@ -987,6 +1054,19 @@ def build_dashboard_from_inputs(
     lppl_bars = dict(equity_market_bars or {})
     lppl_bars.update(global_lppl_market_bars or {})
     global_lppl_risk = build_global_lppl_risk_index(market_bars=lppl_bars)
+    regional_monitor = build_regional_monitor(global_lppl_risk)
+    signal_validation = build_signal_validation(indicators, equity_short_term_risk=equity_short_term_risk)
+    amplifier_audit = signal_validation.pop("amplifierAudit", None)
+    if isinstance(spy_early_warning, dict) and isinstance(amplifier_audit, dict):
+        spy_early_warning["amplifierAudit"] = amplifier_audit
+    portfolio_overview = build_portfolio_overview(
+        spy_early_warning=spy_early_warning,
+        equity_short_term_risk=equity_short_term_risk,
+        global_lppl_risk=global_lppl_risk,
+        macro_liquidity=macro_liquidity,
+        signal_validation=signal_validation,
+        regional_monitor=regional_monitor,
+    )
     bhadial_coverage = build_bhadial_coverage(groups)
     source_status = [
         {"name": "Fed path", "status": "modeled", "latest": "public futures proxy + curve/macro model" if fed_funds_futures else "curve/macro proxy"},
@@ -1055,6 +1135,9 @@ def build_dashboard_from_inputs(
         "spyEarlyWarning": spy_early_warning,
         "equityShortTermRisk": equity_short_term_risk,
         "globalLpplRisk": global_lppl_risk,
+        "regionalMonitor": regional_monitor,
+        "signalValidation": signal_validation,
+        "portfolioOverview": portfolio_overview,
         "policy": policy,
         "auctions": build_auctions(auctions),
         "fiscal": build_fiscal(indicators, quarterly_refunding=quarterly_refunding, debt_limit_status=debt_limit_status),
@@ -3344,43 +3427,720 @@ def unavailable_macro_liquidity_equity(reason: str) -> dict[str, Any]:
     }
 
 
+# Component-sleeve weights re-balanced 2026-06-13 within an unchanged 0.75 total
+# (the macroLevel 0.10 + macroDeterioration 0.20 sleeves are unchanged). The move is
+# theory-anchored: credit/volatility stress (VIX, OAS, NFCI) is a contemporaneous-to-
+# lagging risk gauge that spikes during/after drawdowns, whereas Fed liquidity and
+# funding-market stress lead equities by weeks. The 2026-06-12 weekly walk-forward audit
+# (262 weeks) MOTIVATED the direction: creditVolStress OOS IC 3M was -0.546 (inverted),
+# fundingStress +0.407 (lift 1.11) and liquidityStress +0.376 were the cleanest leaders.
+# CAVEAT: because the OOS slice informed these weights they are now quasi-in-sample for
+# the SPY warning composite — revalidate on fresh data, do not cite the post-reweight OOS
+# improvement as independent confirmation. Changes are bounded (no sign flip, no zeroing).
 SPY_WARNING_COMPONENT_SLEEVES: list[dict[str, Any]] = [
     {
         "key": "liquidityStress",
         "label": "流动性压力",
-        "weight": 0.10,
+        "weight": 0.16,
+        "weightBasis": "领先(OOS IC 3M +0.38): Fed净流动性/准备金领先股市数周; 2026-06-13上调0.10→0.16",
         "componentIds": ["fed_net_liquidity", "bank_reserves", "delta_net_liq_13w", "tga_dev_signed", "onrrp_near_zero_risk"],
     },
     {
         "key": "fundingStress",
         "label": "融资压力",
-        "weight": 0.10,
+        "weight": 0.14,
+        "weightBasis": "最强领先(OOS IC 3M +0.41, lift 1.11): 融资市场先于股市收紧; 2026-06-13上调0.10→0.14",
         "componentIds": ["collateral_friction", "corridor_friction_1", "corridor_friction_2", "effr_iorb", "cp_tbill_spread", "fragmentation_21d"],
     },
     {
         "key": "ratesCurveStress",
         "label": "利率/曲线压力",
         "weight": 0.20,
+        "weightBasis": "3M维度领先(OOS IC 3M +0.39); 权重维持0.20",
         "componentIds": ["dgs30_dgs10", "dgs10_vol_21d", "curve_curvature_abs", "real_rate_level", "real_curve", "t10yie"],
     },
     {
         "key": "creditVolStress",
         "label": "信用/波动压力",
-        "weight": 0.25,
+        "weight": 0.15,
+        "weightBasis": "同步-滞后(OOS IC 3M -0.55, 反向): VIX/OAS在回撤中后飙升而非之前; 2026-06-13下调0.25→0.15",
         "componentIds": ["nfci", "hy_credit", "ig_credit", "kre_spy", "vix", "vix_term_structure", "risk_vs_safe", "high_beta_pref"],
     },
     {
         "key": "externalShock",
         "label": "外部冲击",
         "weight": 0.10,
+        "weightBasis": "连续IC弱但告警版lift 1.62; 权重维持0.10",
         "componentIds": ["dxy", "fx_vol", "wti", "ovx_dev", "natgas"],
     },
 ]
 
 SPY_WARNING_NONLINEAR_SCALE = 1.08
+# Dampener retained: 2026-06-12 weekly OOS audit (91 weeks, base drawdown rate 30.8%)
+# showed lift 0.81 after firing with avg forward 3M +7.14% — it suppresses noise, not real risk.
 SPY_WARNING_POST_SELLOFF_DAMPENER = -10.0
-SPY_WARNING_LATE_RALLY_ROLLOVER_BOOST = 3.0
-SPY_WARNING_LOW_SCORE_STALL_BOOST = 4.0
+# Zeroed 2026-06-12: 3 fires in 5Y, 0% OOS drawdown hit rate.
+SPY_WARNING_LATE_RALLY_ROLLOVER_BOOST = 0.0
+# Zeroed 2026-06-12: 1 fire in 5Y, no out-of-sample evidence.
+SPY_WARNING_LOW_SCORE_STALL_BOOST = 0.0
+# Zeroed 2026-06-12: OOS lift 0.59 (18.2% hit vs 30.8% base) and avg forward 3M +5.39%
+# after firing — the rule fired into recoveries, raising false alarms.
+SPY_WARNING_FRAGILE_LOW_SCORE_BOOST = 0.0
+# Halved 6.0→3.0 2026-06-12: 0% OOS drawdown hit, but avg forward 3M after firing was
+# -0.96% vs +3.34% base — keeps the negative-forward-return half of the target at half weight.
+SPY_WARNING_RALLY_FRAGILITY_BOOST = 3.0
+SPY_WARNING_RULES_VERSION = "2026-06-12-v2"
+
+
+REGIONAL_MONITOR_ORDER = ["us", "korea", "hongkong", "taiwan", "japan"]
+REGION_STATUS_SEVERITY = {"risk": 3, "watch": 2, "quiet": 1, "missing": 0, "": 0}
+
+
+def build_regional_monitor(global_lppl_risk: dict[str, Any] | None) -> dict[str, Any]:
+    """Group the per-index LPPL factors into first-class regions (US groups SPY+QQQ)
+    so the dashboard can surface region-distinguished factors at the top level instead
+    of burying HK/TW/JP as 'ETF proxy' sub-rows. Purely a regrouping of existing index
+    rows — each row already embeds its own history/backtest/forwardSignal/validation."""
+    indices = global_lppl_risk.get("indices") if isinstance(global_lppl_risk, dict) else None
+    if not isinstance(indices, list) or not indices:
+        return {"available": False, "reason": "缺少逐指数LPPL数据,暂不能按地区拆分。", "regions": []}
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    meta: dict[str, dict[str, str]] = {}
+    for row in indices:
+        if not isinstance(row, dict):
+            continue
+        key = str(row.get("regionKey") or "").strip() or "other"
+        grouped.setdefault(key, []).append(row)
+        if key not in meta:
+            meta[key] = {
+                "name": str(row.get("regionName") or row.get("region") or key),
+                "nameCn": str(row.get("regionNameCn") or row.get("regionName") or key),
+            }
+
+    ordered_keys = [key for key in REGIONAL_MONITOR_ORDER if key in grouped]
+    ordered_keys += [key for key in grouped if key not in REGIONAL_MONITOR_ORDER]
+
+    regions: list[dict[str, Any]] = []
+    for key in ordered_keys:
+        rows = grouped[key]
+        region = {
+            "key": key,
+            "name": meta[key]["name"],
+            "nameCn": meta[key]["nameCn"],
+            "indices": rows,
+            "aggregate": regional_monitor_aggregate(rows),
+        }
+        if region["aggregate"]["availableCount"] > 0:
+            region["factorAlert"] = build_region_factor_alert(region)
+            region["allocation"] = build_region_allocation(region)
+            if region["key"] == "us" and len(region["indices"]) >= 2:
+                region["internalRotation"] = build_us_internal_rotation(region)
+        regions.append(region)
+    available_regions = [region for region in regions if region["aggregate"]["availableCount"] > 0]
+    alerting = [region for region in available_regions if region["aggregate"]["status"] == "risk"]
+    diversification = build_regional_diversification(regions)
+    return {
+        "available": bool(available_regions),
+        "asOf": str(global_lppl_risk.get("asOf") or ""),
+        "method": (
+            "Region-grouped LPPL bubble factors (US groups SPY+QQQ; Korea/HK/Taiwan/Japan via US-listed "
+            "ETF proxies). Each region carries its own indices' bubble fit, critical-date window, validation "
+            "and forward signal; region status is the worst constituent status."
+        ),
+        "regionOrder": [region["key"] for region in regions],
+        "alertingRegions": [region["key"] for region in alerting],
+        "summary": regional_monitor_summary(available_regions, alerting),
+        "rotation": build_regional_rotation(regions, diversification),
+        "diversification": diversification,
+        "regions": regions,
+    }
+
+
+def regional_monitor_aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    available = [row for row in rows if row.get("available") and optional_float(row.get("score")) is not None]
+    statuses = [str(row.get("status") or "") for row in available]
+    worst_status = max(statuses, key=lambda s: REGION_STATUS_SEVERITY.get(s, 0)) if statuses else "missing"
+    worst_cn = next((str(row.get("statusCn") or "") for row in available if str(row.get("status")) == worst_status), "缺失")
+    scores = [optional_float(row.get("score")) for row in available]
+    scores = [value for value in scores if value is not None]
+    # Nearest critical window only counts rows that are actually flagged (risk/watch).
+    flagged_days = [
+        optional_float(row.get("daysToCritical"))
+        for row in available
+        if str(row.get("status")) in {"risk", "watch"} and optional_float(row.get("daysToCritical")) is not None
+    ]
+    factor_rows = [row.get("priceFactors") for row in available if isinstance(row.get("priceFactors"), dict) and row["priceFactors"].get("available")]
+    return {
+        "status": worst_status,
+        "statusCn": worst_cn,
+        "maxScore": round(max(scores), 1) if scores else None,
+        "minDaysToCritical": min(flagged_days) if flagged_days else None,
+        "availableCount": len(available),
+        "indexCount": len(rows),
+        "priceFactors": regional_price_factor_rollup(factor_rows),
+    }
+
+
+def regional_price_factor_rollup(factor_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if not factor_rows:
+        return {"available": False}
+    return_3m = average_optional([row.get("return3m") for row in factor_rows])
+    realized_vol = average_optional([row.get("realizedVol") for row in factor_rows])
+    relative_rows = [row.get("relativeStrength3m") for row in factor_rows if not row.get("isBenchmark")]
+    relative_strength = average_optional(relative_rows)
+    drawdowns = [optional_float(row.get("drawdownFromHigh")) for row in factor_rows]
+    drawdowns = [value for value in drawdowns if value is not None]
+    # Region market-state = worst constituent state (stressed > neutral > constructive).
+    state_severity = {"stressed": 2, "neutral": 1, "constructive": 0}
+    states = [str(row.get("marketState") or "neutral") for row in factor_rows]
+    worst_state = max(states, key=lambda s: state_severity.get(s, 1)) if states else "neutral"
+    worst_state_cn = {"stressed": "承压", "neutral": "中性", "constructive": "偏强"}[worst_state]
+    # return3m / realizedVol / relativeStrength3m on each row are already percentages
+    # (pct_metric scaled at the index level), so average-then-round here — do not rescale.
+    return {
+        "available": True,
+        "return3m": round(return_3m, 2) if return_3m is not None else None,
+        "realizedVol": round(realized_vol, 2) if realized_vol is not None else None,
+        "relativeStrength3m": round(relative_strength, 2) if relative_strength is not None else None,
+        "worstDrawdownFromHigh": round(min(drawdowns), 1) if drawdowns else None,
+        "marketState": worst_state,
+        "marketStateCn": worst_state_cn,
+    }
+
+
+REGIONAL_DIVERSIFICATION_MIN_OVERLAP = 26
+
+
+def region_weekly_returns(representative: dict[str, Any]) -> dict[date, float]:
+    """Weekly returns for a region derived from its representative index's daily history closes."""
+    history = representative.get("history") if isinstance(representative.get("history"), dict) else {}
+    points = history.get("points", []) if isinstance(history, dict) else []
+    close_points: list[SeriesPoint] = []
+    for point in points:
+        if not isinstance(point, dict):
+            continue
+        close = optional_float(point.get("close"))
+        try:
+            point_date = date.fromisoformat(str(point.get("date")))
+        except (TypeError, ValueError):
+            continue
+        if close is not None and close > 0:
+            close_points.append(SeriesPoint(date=point_date, value=close))
+    if len(close_points) < REGIONAL_DIVERSIFICATION_MIN_OVERLAP + 1:
+        return {}
+    sorted_closes = SortedSeries(close_points)
+    week_dates = weekly_dates(close_points, years=5)
+    returns: dict[date, float] = {}
+    previous_close: float | None = None
+    for target in week_dates:
+        close = sorted_closes.value_at_or_before(target)
+        if close is not None and previous_close is not None and previous_close > 0:
+            returns[target] = close / previous_close - 1
+        if close is not None:
+            previous_close = close
+    return returns
+
+
+def build_regional_diversification(regions: list[dict[str, Any]]) -> dict[str, Any]:
+    """Pairwise correlation of regions' weekly returns → which regions co-move (redundant
+    risk) and which diversify. Lower average correlation = better diversifier."""
+    returns_by_key: dict[str, dict[date, float]] = {}
+    name_by_key: dict[str, str] = {}
+    for region in regions:
+        if region.get("aggregate", {}).get("availableCount", 0) <= 0:
+            continue
+        representative = regional_representative_index(region.get("indices", []) if isinstance(region.get("indices"), list) else [])
+        if representative is None:
+            continue
+        weekly = region_weekly_returns(representative)
+        if weekly:
+            returns_by_key[region["key"]] = weekly
+            name_by_key[region["key"]] = str(region.get("nameCn") or region.get("name") or region["key"])
+    keys = sorted(returns_by_key)
+    if len(keys) < 2:
+        return {"available": False, "reason": "可用地区不足两个,暂不能做相关性分析。", "matrix": []}
+
+    matrix: list[dict[str, Any]] = []
+    corr_lookup: dict[tuple[str, str], float] = {}
+    for index, first in enumerate(keys):
+        for second in keys[index + 1:]:
+            shared = sorted(set(returns_by_key[first]) & set(returns_by_key[second]))
+            if len(shared) < REGIONAL_DIVERSIFICATION_MIN_OVERLAP:
+                continue
+            corr = pearson_correlation([returns_by_key[first][d] for d in shared], [returns_by_key[second][d] for d in shared])
+            if corr is None:
+                continue
+            corr_lookup[(first, second)] = corr
+            matrix.append({"a": first, "aCn": name_by_key[first], "b": second, "bCn": name_by_key[second], "corr": round(corr, 2)})
+    if not matrix:
+        return {"available": False, "reason": "地区周度收益重叠不足,暂不能做相关性分析。", "matrix": []}
+
+    region_stats: list[dict[str, Any]] = []
+    for key in keys:
+        pair_corrs = [corr for (a, b), corr in corr_lookup.items() if key in (a, b)]
+        if pair_corrs:
+            region_stats.append({"key": key, "nameCn": name_by_key[key], "avgCorr": round(sum(pair_corrs) / len(pair_corrs), 2)})
+    region_stats.sort(key=lambda item: item["avgCorr"])
+    most_correlated = max(matrix, key=lambda item: item["corr"])
+    best_diversifier = region_stats[0] if region_stats else None
+    summary_parts = [
+        f"{most_correlated['aCn']}与{most_correlated['bCn']}相关性最高({most_correlated['corr']:+.2f}, 同涨同跌、分散价值低)"
+    ]
+    if best_diversifier is not None:
+        summary_parts.append(f"{best_diversifier['nameCn']}平均相关性最低({best_diversifier['avgCorr']:+.2f}, 分散价值最高)")
+    return {
+        "available": True,
+        "method": "各地区代表指数周度收益两两 Pearson 相关; 高相关=同向风险冗余, 低/负相关=分散价值。",
+        "matrix": matrix,
+        "regionStats": region_stats,
+        "mostCorrelatedPair": most_correlated,
+        "bestDiversifier": best_diversifier,
+        "summary": "; ".join(summary_parts) + "。",
+    }
+
+
+def regional_monitor_summary(available_regions: list[dict[str, Any]], alerting: list[dict[str, Any]]) -> str:
+    if not available_regions:
+        return "暂无可用地区LPPL样本。"
+    if alerting:
+        names = "、".join(region["nameCn"] for region in alerting)
+        return f"{len(available_regions)}个地区在监控; {names}出现泡沫临界风险,其余地区相对平静。"
+    return f"{len(available_regions)}个地区在监控,均未触发泡沫临界风险。"
+
+
+# Factor ids whose high readings mean MORE risk (used to gate evidence-backed caution).
+REGIONAL_RISK_FACTOR_IDS = {"lpplScore", "realizedVol"}
+
+
+def regional_representative_index(indices: list[dict[str, Any]]) -> dict[str, Any] | None:
+    validated = [
+        row for row in indices
+        if isinstance(row, dict)
+        and isinstance(row.get("factorValidation"), dict)
+        and row["factorValidation"].get("available")
+    ]
+    if not validated:
+        return None
+    return next(
+        (row for row in validated if str(row.get("symbol") or "").upper() == GLOBAL_LPPL_US_BENCHMARK_SYMBOL),
+        validated[0],
+    )
+
+
+def region_validated_leading_factors(factor_validation: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Factors that PASSED this region's own walk-forward OOS test as leading with lift>1 —
+    i.e. proven early-warning power for that region's equity. Used to gate conviction."""
+    if not isinstance(factor_validation, dict) or not factor_validation.get("available"):
+        return []
+    leading: list[dict[str, Any]] = []
+    for factor in factor_validation.get("factors", []):
+        if not isinstance(factor, dict):
+            continue
+        lift = optional_float(factor.get("lift"))
+        if str(factor.get("classification")) == "leading" and lift is not None and lift > 1.0:
+            leading.append(
+                {
+                    "id": str(factor.get("id") or ""),
+                    "labelCn": str(factor.get("labelCn") or factor.get("label") or ""),
+                    "lift": round(lift, 2),
+                    "oosIc3m": optional_float(factor.get("oosIc3m")),
+                    "leadTimeDays": optional_float(factor.get("leadTimeDays")),
+                }
+            )
+    return sorted(leading, key=lambda item: item["lift"] or 0.0, reverse=True)
+
+
+def composite_qualifies_as_alert(composite: dict[str, Any]) -> bool:
+    if not isinstance(composite, dict) or not composite.get("available"):
+        return False
+    if composite.get("currentValue") is None or composite.get("alertThreshold") is None:
+        return False
+    if composite.get("beatsBestSingleFactor") is True:
+        return True
+    return str(composite.get("classification")) == "leading" and (optional_float(composite.get("lift")) or 0.0) > 1.0
+
+
+def build_region_factor_alert(region: dict[str, Any]) -> dict[str, Any]:
+    """Live early-warning: compare a region's CURRENT reading of its strongest OOS-validated
+    leading RISK signal to its calibrated alert threshold. Prefers the evidence-weighted
+    COMPOSITE when the composite is validated and at least matches the best single factor;
+    otherwise falls back to the single strongest validated risk factor."""
+    representative = regional_representative_index(region.get("indices", []) if isinstance(region.get("indices"), list) else [])
+    if representative is None:
+        return {"available": False}
+    factor_validation = representative.get("factorValidation") if isinstance(representative.get("factorValidation"), dict) else {}
+    composite = factor_validation.get("composite") if isinstance(factor_validation.get("composite"), dict) else {}
+
+    if composite_qualifies_as_alert(composite):
+        source, label, factor_id = "composite", "证据加权综合信号", "regionComposite"
+        current = optional_float(composite.get("currentValue"))
+        threshold = optional_float(composite.get("alertThreshold"))
+        hit = optional_float(composite.get("hitRateOos"))
+        base = optional_float(composite.get("baseRate"))
+        lead = optional_float(composite.get("leadTimeDays"))
+        lift = optional_float(composite.get("lift"))
+        breach_count_total = composite.get("breachCountTotal")
+        hit_rate_total = optional_float(composite.get("breachHitRateTotal"))
+        breach_events = composite.get("breachEvents", [])
+        digits = 2
+    else:
+        validated = region_validated_leading_factors(factor_validation)
+        risk_validated = [factor for factor in validated if factor["id"] in REGIONAL_RISK_FACTOR_IDS]
+        if not risk_validated:
+            return {"available": False}
+        top = risk_validated[0]
+        factor_row = next(
+            (item for item in factor_validation.get("factors", []) if isinstance(item, dict) and item.get("id") == top["id"]),
+            {},
+        )
+        source, label, factor_id = "factor", top["labelCn"], top["id"]
+        threshold = optional_float(factor_row.get("alertThreshold"))
+        current = region_current_factor_reading(top["id"], representative)
+        hit = optional_float(factor_row.get("hitRateOos"))
+        base = optional_float(factor_row.get("baseRate"))
+        lead = optional_float(factor_row.get("leadTimeDays"))
+        lift = optional_float(top.get("lift"))
+        breach_count_total = factor_row.get("alertCountTotal")
+        hit_rate_total = optional_float(factor_row.get("hitRateTotal"))
+        breach_events = factor_row.get("breachEvents", [])
+        digits = 1
+
+    if threshold is None or current is None:
+        return {"available": False}
+    if current >= threshold:
+        state, state_cn = "breached", "已突破"
+    elif current >= threshold * 0.9:
+        state, state_cn = "approaching", "逼近"
+    else:
+        state, state_cn = "normal", "正常"
+    evidence = ""
+    if hit is not None and base is not None:
+        evidence = f"历史命中 {hit * 100:.0f}% vs 基准 {base * 100:.0f}%"
+        if lead is not None:
+            evidence += f"、提前{lead:.0f}天"
+    track_record = ""
+    if breach_count_total is not None and hit_rate_total is not None:
+        track_record = f"历史共突破{int(breach_count_total)}次, 命中{hit_rate_total * 100:.0f}%"
+    state_word = "突破" if state == "breached" else "逼近" if state == "approaching" else "低于"
+    return {
+        "available": True,
+        "source": source,
+        "factorId": factor_id,
+        "factorLabelCn": label,
+        "current": round(current, digits),
+        "threshold": round(threshold, digits),
+        "state": state,
+        "stateCn": state_cn,
+        "lift": lift,
+        "leadTimeDays": lead,
+        "evidence": evidence,
+        "breachCountTotal": breach_count_total,
+        "breachHitRateTotal": hit_rate_total,
+        "breachEvents": breach_events[-12:] if isinstance(breach_events, list) else [],
+        "trackRecord": track_record,
+        "message": (
+            f"{label} {current:.{digits}f} {state_word}验证阈值 {threshold:.{digits}f}"
+            + (f"; {evidence}" if evidence else "")
+            + (f"; {track_record}" if track_record else "")
+        ),
+    }
+
+
+def region_current_factor_reading(factor_id: str, representative: dict[str, Any]) -> float | None:
+    """Current reading of a validated factor on its representative index, in the SAME units
+    the validation series used (realizedVol as annualized %, lpplScore 0-100)."""
+    if factor_id == "realizedVol":
+        price_factors = representative.get("priceFactors") if isinstance(representative.get("priceFactors"), dict) else {}
+        return optional_float(price_factors.get("realizedVol"))
+    if factor_id == "lpplScore":
+        return optional_float(representative.get("score"))
+    return None
+
+
+def build_region_allocation(region: dict[str, Any]) -> dict[str, Any]:
+    aggregate = region.get("aggregate", {}) if isinstance(region.get("aggregate"), dict) else {}
+    price_factors = aggregate.get("priceFactors", {}) if isinstance(aggregate.get("priceFactors"), dict) else {}
+    bubble_status = str(aggregate.get("status") or "")
+    market_state = str(price_factors.get("marketState") or "neutral")
+    relative_strength = optional_float(price_factors.get("relativeStrength3m"))
+    representative = regional_representative_index(region.get("indices", []) if isinstance(region.get("indices"), list) else [])
+    validated = region_validated_leading_factors(representative.get("factorValidation") if representative else None)
+
+    days_to_critical = optional_float(aggregate.get("minDaysToCritical"))
+    caution = 0.0
+    drivers: list[str] = []
+    if bubble_status == "risk":
+        caution += 40.0
+        drivers.append("泡沫临界风险")
+    elif bubble_status == "watch":
+        caution += 18.0
+        drivers.append("泡沫观察区")
+    if market_state == "stressed":
+        caution += 30.0
+        drivers.append("市场承压(跌破趋势+深回撤)")
+    elif market_state == "neutral":
+        caution += 10.0
+    else:
+        drivers.append("市场偏强")
+    if relative_strength is not None:
+        # Strong momentum tempers but does NOT cancel a validated bubble warning — a leading
+        # signal fires while price is still rising, so cap the relief at -8.
+        if relative_strength <= -5.0:
+            caution += 10.0
+            drivers.append(f"跑输美国 {relative_strength:.0f}%")
+        elif relative_strength >= 5.0:
+            caution -= 8.0
+            drivers.append(f"跑赢美国 +{relative_strength:.0f}%")
+    # Evidence-backed conviction: a validated leading risk factor while bubble is flagged.
+    if validated and bubble_status in {"risk", "watch"} and any(f["id"] in REGIONAL_RISK_FACTOR_IDS for f in validated):
+        caution += 12.0
+        drivers.append("已验证领先因子佐证")
+    # Live trigger: the validated leading risk factor has BREACHED its calibrated threshold.
+    factor_alert = region.get("factorAlert") if isinstance(region.get("factorAlert"), dict) else {}
+    if factor_alert.get("available") and factor_alert.get("state") == "breached":
+        caution += 15.0
+        drivers.append(f"{factor_alert.get('factorLabelCn') or '领先因子'}突破验证阈值")
+    # Imminent LPPL critical window adds urgency.
+    if days_to_critical is not None and days_to_critical <= 30:
+        caution += 10.0
+        drivers.append(f"临界窗口仅{days_to_critical:.0f}天")
+    caution = max(0.0, min(100.0, caution))
+
+    # Overweight requires a genuinely constructive trend AND low caution — not merely the
+    # absence of acute risk; a bubble-watch or neutral-trend region stays at most neutral.
+    if caution >= 50.0:
+        stance, stance_cn, band = "underweight", "减持", [50, 75]
+    elif caution <= 10.0 and market_state == "constructive":
+        stance, stance_cn, band = "overweight", "增持", [100, 115]
+    else:
+        stance, stance_cn, band = "neutral", "中性", [80, 100]
+
+    # Conviction is high only when the region has a factor with PROVEN OOS lead power.
+    confidence = "high" if validated else ("medium" if drivers else "low")
+    confidence_cn = {"high": "高", "medium": "中", "low": "低"}[confidence]
+    return {
+        "stance": stance,
+        "stanceCn": stance_cn,
+        "cautionScore": round(caution, 1),
+        "exposureBandPct": band,
+        "confidence": confidence,
+        "confidenceCn": confidence_cn,
+        "drivers": drivers,
+        "validatedLeadingFactors": validated,
+        "rationale": build_region_alloc_rationale(region, stance_cn, bubble_status, aggregate, price_factors, validated),
+    }
+
+
+def build_region_alloc_rationale(
+    region: dict[str, Any],
+    stance_cn: str,
+    bubble_status: str,
+    aggregate: dict[str, Any],
+    price_factors: dict[str, Any],
+    validated: list[dict[str, Any]],
+) -> str:
+    name = str(region.get("nameCn") or region.get("name") or "")
+    bubble_cn = str(aggregate.get("statusCn") or "--")
+    state_cn = str(price_factors.get("marketStateCn") or "--")
+    parts = [f"{name}: 泡沫{bubble_cn}、市场{state_cn}".replace("泡沫泡沫", "泡沫")]
+    relative_strength = optional_float(price_factors.get("relativeStrength3m"))
+    if relative_strength is not None:
+        parts.append(f"相对美国{relative_strength:+.0f}%")
+    if validated:
+        top = validated[0]
+        lead = top.get("leadTimeDays")
+        lead_text = f"、提前{lead:.0f}天" if lead is not None else ""
+        parts.append(f"{top['labelCn']}为本地区已验证领先因子(OOS lift {top['lift']}{lead_text}),信号可信")
+    else:
+        parts.append("尚无 OOS 验证领先因子,信号置信偏低")
+    return "; ".join(parts) + f" → {stance_cn}。"
+
+
+REGIONAL_CORRELATION_CLUSTER_THRESHOLD = 0.7
+
+
+def cluster_correlated_regions(keys: list[str], diversification: dict[str, Any] | None) -> list[list[str]]:
+    """Union-find grouping of regions whose pairwise weekly-return correlation is high
+    (>= threshold) — co-moving regions are effectively ONE risk exposure."""
+    if not keys:
+        return []
+    matrix = diversification.get("matrix", []) if isinstance(diversification, dict) else []
+    parent = {key: key for key in keys}
+
+    def find(node: str) -> str:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    key_set = set(keys)
+    for pair in matrix:
+        if not isinstance(pair, dict):
+            continue
+        a, b = str(pair.get("a")), str(pair.get("b"))
+        if a in key_set and b in key_set and (optional_float(pair.get("corr")) or 0.0) >= REGIONAL_CORRELATION_CLUSTER_THRESHOLD:
+            parent[find(b)] = find(a)
+    groups: dict[str, list[str]] = {}
+    for key in keys:
+        groups.setdefault(find(key), []).append(key)
+    # Preserve input order within and across clusters.
+    ordered = sorted(groups.values(), key=lambda members: keys.index(members[0]))
+    return [sorted(members, key=keys.index) for members in ordered]
+
+
+US_INTERNAL_BROAD_SYMBOL = "SPY"
+US_INTERNAL_TECH_SYMBOL = "QQQ"
+
+
+def us_index_risk_points(index: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """A small, scale-free risk tally for a US index from its bubble status, LPPL score
+    and realized volatility (each compared head-to-head against the other index)."""
+    price_factors = index.get("priceFactors") if isinstance(index.get("priceFactors"), dict) else {}
+    return 0, {
+        "symbol": str(index.get("symbol") or "").upper(),
+        "statusSeverity": REGION_STATUS_SEVERITY.get(str(index.get("status") or ""), 0),
+        "statusCn": str(index.get("statusCn") or ""),
+        "lpplScore": optional_float(index.get("score")),
+        "realizedVol": optional_float(price_factors.get("realizedVol")),
+        "marketStateCn": str(price_factors.get("marketStateCn") or ""),
+    }
+
+
+def build_us_internal_rotation(us_region: dict[str, Any]) -> dict[str, Any]:
+    """US-internal factor rotation: compare broad (SPY) vs tech (QQQ) on bubble status,
+    LPPL score and realized vol → tilt toward the lower-risk sleeve. Descriptive risk-control
+    overlay within the US bucket, not a return forecast."""
+    indices = {str(i.get("symbol") or "").upper(): i for i in us_region.get("indices", []) if isinstance(i, dict)}
+    broad = indices.get(US_INTERNAL_BROAD_SYMBOL)
+    tech = indices.get(US_INTERNAL_TECH_SYMBOL)
+    if not broad or not tech:
+        return {"available": False, "reason": "美国地区缺少 SPY/QQQ 双指数,暂不能内部轮动。"}
+    _, broad_stats = us_index_risk_points(broad)
+    _, tech_stats = us_index_risk_points(tech)
+
+    drivers: list[str] = []
+    broad_points = 0
+    tech_points = 0
+
+    def compare(value_broad: float | None, value_tech: float | None, label: str, fmt: str = "{:.0f}") -> None:
+        nonlocal broad_points, tech_points
+        if value_broad is None or value_tech is None:
+            return
+        if value_tech > value_broad:
+            tech_points += 1
+            drivers.append(f"科技{label}更高({fmt.format(value_tech)} vs {fmt.format(value_broad)})")
+        elif value_broad > value_tech:
+            broad_points += 1
+            drivers.append(f"宽基{label}更高({fmt.format(value_broad)} vs {fmt.format(value_tech)})")
+
+    compare(float(broad_stats["statusSeverity"]), float(tech_stats["statusSeverity"]), "泡沫状态")
+    compare(broad_stats["lpplScore"], tech_stats["lpplScore"], "LPPL评分")
+    compare(broad_stats["realizedVol"], tech_stats["realizedVol"], "已实现波动")
+
+    if tech_points > broad_points:
+        tilt, tilt_cn = "broad", "偏宽基(SPY)、减科技(QQQ)"
+        riskier = "科技(QQQ)"
+    elif broad_points > tech_points:
+        tilt, tilt_cn = "tech", "偏科技(QQQ)、减宽基(SPY)"
+        riskier = "宽基(SPY)"
+    else:
+        tilt, tilt_cn = "balanced", "宽基/科技均衡"
+        riskier = ""
+    rationale = (
+        f"美股内部: {riskier}风险读数更高 → {tilt_cn}" + (f"; 依据: {'、'.join(drivers)}" if drivers else "")
+        if riskier
+        else f"美股内部: 宽基与科技风险读数相当 → {tilt_cn}"
+    )
+    return {
+        "available": True,
+        "tilt": tilt,
+        "tiltCn": tilt_cn,
+        "broadPoints": broad_points,
+        "techPoints": tech_points,
+        "broad": broad_stats,
+        "tech": tech_stats,
+        "drivers": drivers,
+        "rationale": rationale,
+        "method": "美股内部因子轮动: SPY宽基 vs QQQ科技, 逐项(泡沫/LPPL/波动)比较风险读数, 倾向风险更低的一侧。描述性风控叠加, 非收益预测。",
+    }
+
+
+def merged_cluster_band(bands: list[Any]) -> list[float] | None:
+    """Element-wise min of member exposure bands — correlated regions share the tightest
+    (most conservative) single allocation band rather than each cutting independently."""
+    valid = [band for band in bands if isinstance(band, list) and len(band) == 2]
+    if not valid:
+        return None
+    return [min(band[0] for band in valid), min(band[1] for band in valid)]
+
+
+def build_regional_rotation(regions: list[dict[str, Any]], diversification: dict[str, Any] | None = None) -> dict[str, Any]:
+    scored = [
+        region for region in regions
+        if isinstance(region.get("allocation"), dict) and region["aggregate"].get("availableCount", 0) > 0
+    ]
+    if not scored:
+        return {"available": False, "favorRegions": [], "reduceRegions": [], "reduceClusters": [], "summary": "暂无地区配置建议。"}
+    name_by_key = {region["key"]: region["nameCn"] for region in scored}
+    favor = [region["key"] for region in scored if region["allocation"]["stance"] == "overweight"]
+    reduce_regions = [region["key"] for region in scored if region["allocation"]["stance"] == "underweight"]
+    ranked = sorted(scored, key=lambda region: region["allocation"]["cautionScore"])
+
+    # Merge risk budget: co-moving reduce-regions count as one exposure, not independent cuts.
+    reduce_clusters_keys = cluster_correlated_regions(reduce_regions, diversification)
+    band_by_key = {
+        region["key"]: region["allocation"].get("exposureBandPct")
+        for region in scored
+        if isinstance(region["allocation"].get("exposureBandPct"), list)
+    }
+    reduce_clusters = [
+        {
+            "regions": cluster,
+            "names": [name_by_key.get(key, key) for key in cluster],
+            "merged": len(cluster) > 1,
+            # Correlated regions share ONE risk budget: the cluster's allowance is the tightest
+            # member band (element-wise min), applied to the cluster as a single exposure — not
+            # N independent cuts that would over-reduce a single underlying bet.
+            "exposureBandPct": merged_cluster_band([band_by_key.get(key) for key in cluster]),
+        }
+        for cluster in reduce_clusters_keys
+    ]
+    independent_cuts = len(reduce_clusters)
+    redundant = any(cluster["merged"] for cluster in reduce_clusters)
+
+    favor_names = "、".join(region["nameCn"] for region in scored if region["key"] in favor)
+    reduce_names = "、".join(region["nameCn"] for region in scored if region["key"] in reduce_regions)
+    if favor_names and reduce_names:
+        summary = f"地区轮动: 增持{favor_names}; 减持{reduce_names}(泡沫/承压且多有已验证领先因子佐证)。"
+    elif reduce_names:
+        summary = f"地区轮动: 建议减持{reduce_names}; 其余维持中性。"
+    elif favor_names:
+        summary = f"地区轮动: 可增持{favor_names}; 其余维持中性。"
+    else:
+        summary = "地区轮动: 各地区均维持中性,无显著倾斜。"
+    if redundant and len(reduce_regions) > independent_cuts:
+        merged_notes = []
+        for cluster in reduce_clusters:
+            if not cluster["merged"]:
+                continue
+            band = cluster.get("exposureBandPct")
+            band_text = f"共享仓位带 {band[0]:.0f}-{band[1]:.0f}%" if isinstance(band, list) and len(band) == 2 else ""
+            merged_notes.append("+".join(cluster["names"]) + (f"({band_text})" if band_text else ""))
+        summary += (
+            f" 注意: {'、'.join(merged_notes)}高度相关, 实为同一风险敞口, "
+            f"{len(reduce_regions)}个减持其实只是{independent_cuts}个独立风险预算——同簇地区共享一个减仓额度, 勿叠加减仓。"
+        )
+    return {
+        "available": True,
+        "favorRegions": favor,
+        "reduceRegions": reduce_regions,
+        "reduceClusters": reduce_clusters,
+        "independentReduceCount": independent_cuts,
+        "ranking": [region["key"] for region in ranked],
+        "summary": summary,
+        "method": "风险-轮动叠加层: 据泡沫状态、市场状态(趋势/回撤)、相对美国强弱合成谨慎度,并以各地区自身 OOS 验证的领先因子决定置信; 高相关减持地区合并为同一风险预算。属风险控制叠加,非收益预测。",
+    }
 
 
 def build_global_lppl_risk_index(
@@ -3397,6 +4157,8 @@ def build_global_lppl_risk_index(
     index_rows = attach_global_lppl_per_index_payloads(index_rows, per_index_history, per_index_backtests)
     index_rows = attach_global_lppl_tc_aggregations(index_rows)
     index_rows = attach_global_lppl_forward_signals(index_rows)
+    index_rows = attach_global_lppl_price_factors(index_rows, bars_by_symbol)
+    index_rows = attach_global_lppl_factor_validation(index_rows, bars_by_symbol, per_index_history)
     available_rows = [row for row in index_rows if row.get("available") and optional_float(row.get("score")) is not None]
     if not available_rows:
         return unavailable_global_lppl_risk(index_rows, "全球LPPL逐市场评估需要至少一个可回放指数样本; 当前公开日线源不足。")
@@ -3503,6 +4265,8 @@ def global_lppl_payload(
         "scoreUse": "independent",
         "regime": "Per-Index",
         "regimeCn": "逐市场",
+        "horizon": "tc-window",
+        "horizonCn": "临界窗口(各指数daysToCritical)",
         "asOf": latest_date.isoformat(),
         "summary": global_lppl_summary(available_rows, index_rows),
         "method": "LPPL grid search over constrained tc/m/omega with linear least-squares fit; each market is scored, charted, and backtested separately.",
@@ -3654,6 +4418,11 @@ def global_lppl_index_row(
             "symbol": symbol,
             "name": str(spec.get("name") or symbol),
             "region": str(spec.get("region") or ""),
+        "regionKey": str(spec.get("regionKey") or ""),
+        "regionName": str(spec.get("regionName") or spec.get("region") or ""),
+        "regionNameCn": str(spec.get("regionNameCn") or ""),
+        "proxyNote": str(spec.get("proxyNote") or ""),
+        "proxyNoteCn": str(spec.get("proxyNoteCn") or ""),
             "available": False,
             "score": None,
             "confidence": 0.0,
@@ -3676,6 +4445,11 @@ def global_lppl_index_row(
             "symbol": symbol,
             "name": str(spec.get("name") or symbol),
             "region": str(spec.get("region") or ""),
+        "regionKey": str(spec.get("regionKey") or ""),
+        "regionName": str(spec.get("regionName") or spec.get("region") or ""),
+        "regionNameCn": str(spec.get("regionNameCn") or ""),
+        "proxyNote": str(spec.get("proxyNote") or ""),
+        "proxyNoteCn": str(spec.get("proxyNoteCn") or ""),
             "available": False,
             "score": None,
             "confidence": 0.0,
@@ -3701,6 +4475,11 @@ def global_lppl_index_row(
         "symbol": symbol,
         "name": str(spec.get("name") or symbol),
         "region": str(spec.get("region") or ""),
+        "regionKey": str(spec.get("regionKey") or ""),
+        "regionName": str(spec.get("regionName") or spec.get("region") or ""),
+        "regionNameCn": str(spec.get("regionNameCn") or ""),
+        "proxyNote": str(spec.get("proxyNote") or ""),
+        "proxyNoteCn": str(spec.get("proxyNoteCn") or ""),
         "available": True,
         "score": round(score, 1),
         "confidence": round(confidence, 2),
@@ -3871,106 +4650,145 @@ def fit_lppl_window(sample: list[MarketDailyBar], *, fast: bool = False) -> dict
     omega_values = (7.0, 10.0, 12.0) if fast else (6.0, 8.0, 10.0, 12.0)
     candidates: list[dict[str, Any]] = []
     for tc_offset in tc_offsets:
-        tc = (n - 1) + tc_offset
         for m in m_values:
             for omega in omega_values:
-                rows = []
-                valid = True
-                for t in range(n):
-                    distance = tc - t
-                    if distance <= 0:
-                        valid = False
-                        break
-                    power = distance ** m
-                    log_distance = math.log(distance)
-                    rows.append([1.0, power, power * math.cos(omega * log_distance), power * math.sin(omega * log_distance)])
-                if not valid:
-                    continue
-                coefficients = linear_least_squares(rows, ys)
-                if coefficients is None:
-                    continue
-                fitted = [sum(coef * value for coef, value in zip(coefficients, row)) for row in rows]
-                fit_r2 = regression_r_squared(ys, fitted)
-                if fit_r2 is None:
-                    continue
-                fit_sse = sum((actual - predicted) ** 2 for actual, predicted in zip(ys, fitted))
-                power_rows = [[1.0, row[1]] for row in rows]
-                power_coefficients = linear_least_squares(power_rows, ys)
-                if power_coefficients is None:
-                    continue
-                power_fitted = [sum(coef * value for coef, value in zip(power_coefficients, row)) for row in power_rows]
-                power_sse = sum((actual - predicted) ** 2 for actual, predicted in zip(ys, power_fitted))
-                lppl_improvement_pct = 0.0 if power_sse <= 1e-12 else max(0.0, 100.0 * (power_sse - fit_sse) / power_sse)
-                oscillation_count = lppl_oscillation_count(
-                    tc=tc,
-                    omega=omega,
-                    start_index=0,
-                    end_index=n - 1,
-                )
-                residuals = [actual - predicted for actual, predicted in zip(ys, fitted)]
-                residual_diagnostics = lppl_residual_diagnostics(residuals)
-                bubble_coefficient = coefficients[1]
-                oscillation = math.sqrt(coefficients[2] ** 2 + coefficients[3] ** 2)
-                trailing_63 = closes[-1] / closes[max(0, n - 64)] - 1 if n >= 65 else 0.0
-                recent_63 = closes[-1] / closes[-64] - 1 if n >= 128 else trailing_63
-                prior_63 = closes[-64] / closes[-127] - 1 if n >= 128 else 0.0
-                acceleration = recent_63 - prior_63
-                fit_score = bounded_score(100 * fit_r2)
-                critical_score = bounded_score(100 * (1 - (tc_offset - 10) / 170))
-                trend_score = risk_linear(trailing_63, 0.04, 0.35)
-                acceleration_score = risk_linear(acceleration, 0.0, 0.12)
-                coherent_bubble = bubble_coefficient < 0 and acceleration > 0 and trailing_63 > 0.03
-                valid_oscillation_count = 2.0 <= oscillation_count <= 10.0
-                passes_lppl_core_diagnostics = (
-                    coherent_bubble
-                    and lppl_improvement_pct >= 5.0
-                    and valid_oscillation_count
-                )
-                passes_lppl_diagnostics = passes_lppl_core_diagnostics and bool(residual_diagnostics.get("meanReverting"))
-                raw_score = 0.38 * fit_score + 0.24 * critical_score + 0.18 * trend_score + 0.20 * acceleration_score
-                if not passes_lppl_core_diagnostics:
-                    raw_score = min(raw_score, 35.0)
-                oscillation_denominator = abs(oscillation) + abs(bubble_coefficient)
-                oscillation_balance = abs(oscillation) / oscillation_denominator if oscillation_denominator > 1e-6 else 0.0
-                confidence = (
-                    0.45 * max(0.0, min(1.0, fit_r2))
-                    + 0.25 * (critical_score / 100)
-                    + 0.20 * (acceleration_score / 100)
-                    + 0.10 * min(1.0, oscillation_balance)
-                )
-                if not passes_lppl_diagnostics:
-                    confidence = min(confidence, 0.45)
-                candidate = {
-                    "available": True,
-                    "score": bounded_score(raw_score),
-                    "confidence": max(0.0, min(1.0, confidence)),
-                    "fitR2": fit_r2,
-                    "fitSse": fit_sse,
-                    "powerLawSse": power_sse,
-                    "lpplImprovementPct": lppl_improvement_pct,
-                    "oscillationCount": oscillation_count,
-                    "passesLpplCoreDiagnostics": passes_lppl_core_diagnostics,
-                    "residualDiagnostics": residual_diagnostics,
-                    "passesLpplDiagnostics": passes_lppl_diagnostics,
-                    "daysToCritical": tc_offset,
-                    "windowDays": n,
-                    "bubbleCoefficient": bubble_coefficient,
-                    "oscillationAmplitude": oscillation,
-                    "trailingReturn63d": trailing_63,
-                    "acceleration": acceleration,
-                    "reason": (
-                        f"coherent LPPL acceleration; power-law improvement {lppl_improvement_pct:.1f}%, "
-                        f"{oscillation_count:.1f} log-periodic oscillations, residual mean reversion supported"
-                        if passes_lppl_diagnostics
-                        else f"LPPL core shape strong but residual mean reversion is weak: power-law improvement {lppl_improvement_pct:.1f}%, "
-                        f"{oscillation_count:.1f} oscillations"
-                        if passes_lppl_core_diagnostics
-                        else f"LPPL diagnostics weak: power-law improvement {lppl_improvement_pct:.1f}%, "
-                        f"{oscillation_count:.1f} oscillations, residual mean-reverting={bool(residual_diagnostics.get('meanReverting'))}"
-                    ),
-                }
-                candidates.append(candidate)
-    return select_lppl_fit_candidate(candidates) if candidates else {"available": False, "reason": "bounded LPPL grid produced no stable fit"}
+                candidate = lppl_candidate(ys, closes, n, tc_offset=tc_offset, m=m, omega=omega)
+                if candidate is not None:
+                    candidates.append(candidate)
+    if not candidates:
+        return {"available": False, "reason": "bounded LPPL grid produced no stable fit"}
+    best = select_lppl_fit_candidate(candidates)
+    if best.get("available") and not fast:
+        refined = lppl_refine_tc_candidates(ys, closes, n, best)
+        if refined:
+            best = select_lppl_fit_candidate([best, *refined])
+    return best
+
+
+def lppl_refine_tc_candidates(ys: list[float], closes: list[float], n: int, best: dict[str, Any]) -> list[dict[str, Any]]:
+    """Local tc search around the grid winner (±50%, step 5) so daysToCritical is
+    not snapped to the coarse grid; selection still ranks by fit quality."""
+    base_tc = optional_float(best.get("daysToCritical"))
+    m = optional_float(best.get("powerExponent"))
+    omega = optional_float(best.get("omega"))
+    if base_tc is None or m is None or omega is None:
+        return []
+    base_tc = int(round(base_tc))
+    low = max(5, int(round(base_tc * 0.5)))
+    high = int(round(base_tc * 1.5))
+    refined: list[dict[str, Any]] = []
+    for tc_offset in range(low, high + 1, 5):
+        if tc_offset == base_tc:
+            continue
+        candidate = lppl_candidate(ys, closes, n, tc_offset=tc_offset, m=m, omega=omega)
+        if candidate is not None:
+            refined.append(candidate)
+    return refined
+
+
+def lppl_candidate(
+    ys: list[float],
+    closes: list[float],
+    n: int,
+    *,
+    tc_offset: int,
+    m: float,
+    omega: float,
+) -> dict[str, Any] | None:
+    tc = (n - 1) + tc_offset
+    rows = []
+    for t in range(n):
+        distance = tc - t
+        if distance <= 0:
+            return None
+        power = distance ** m
+        log_distance = math.log(distance)
+        rows.append([1.0, power, power * math.cos(omega * log_distance), power * math.sin(omega * log_distance)])
+    coefficients = linear_least_squares(rows, ys)
+    if coefficients is None:
+        return None
+    fitted = [sum(coef * value for coef, value in zip(coefficients, row)) for row in rows]
+    fit_r2 = regression_r_squared(ys, fitted)
+    if fit_r2 is None:
+        return None
+    fit_sse = sum((actual - predicted) ** 2 for actual, predicted in zip(ys, fitted))
+    power_rows = [[1.0, row[1]] for row in rows]
+    power_coefficients = linear_least_squares(power_rows, ys)
+    if power_coefficients is None:
+        return None
+    power_fitted = [sum(coef * value for coef, value in zip(power_coefficients, row)) for row in power_rows]
+    power_sse = sum((actual - predicted) ** 2 for actual, predicted in zip(ys, power_fitted))
+    lppl_improvement_pct = 0.0 if power_sse <= 1e-12 else max(0.0, 100.0 * (power_sse - fit_sse) / power_sse)
+    oscillation_count = lppl_oscillation_count(
+        tc=tc,
+        omega=omega,
+        start_index=0,
+        end_index=n - 1,
+    )
+    residuals = [actual - predicted for actual, predicted in zip(ys, fitted)]
+    residual_diagnostics = lppl_residual_diagnostics(residuals)
+    bubble_coefficient = coefficients[1]
+    oscillation = math.sqrt(coefficients[2] ** 2 + coefficients[3] ** 2)
+    trailing_63 = closes[-1] / closes[max(0, n - 64)] - 1 if n >= 65 else 0.0
+    recent_63 = closes[-1] / closes[-64] - 1 if n >= 128 else trailing_63
+    prior_63 = closes[-64] / closes[-127] - 1 if n >= 128 else 0.0
+    acceleration = recent_63 - prior_63
+    fit_score = bounded_score(100 * fit_r2)
+    critical_score = bounded_score(100 * (1 - (tc_offset - 10) / 170))
+    trend_score = risk_linear(trailing_63, 0.04, 0.35)
+    acceleration_score = risk_linear(acceleration, 0.0, 0.12)
+    coherent_bubble = bubble_coefficient < 0 and acceleration > 0 and trailing_63 > 0.03
+    valid_oscillation_count = 2.0 <= oscillation_count <= 10.0
+    passes_lppl_core_diagnostics = (
+        coherent_bubble
+        and lppl_improvement_pct >= 5.0
+        and valid_oscillation_count
+    )
+    passes_lppl_diagnostics = passes_lppl_core_diagnostics and bool(residual_diagnostics.get("meanReverting"))
+    raw_score = 0.38 * fit_score + 0.24 * critical_score + 0.18 * trend_score + 0.20 * acceleration_score
+    if not passes_lppl_core_diagnostics:
+        raw_score = min(raw_score, 35.0)
+    oscillation_denominator = abs(oscillation) + abs(bubble_coefficient)
+    oscillation_balance = abs(oscillation) / oscillation_denominator if oscillation_denominator > 1e-6 else 0.0
+    confidence = (
+        0.45 * max(0.0, min(1.0, fit_r2))
+        + 0.25 * (critical_score / 100)
+        + 0.20 * (acceleration_score / 100)
+        + 0.10 * min(1.0, oscillation_balance)
+    )
+    if not passes_lppl_diagnostics:
+        confidence = min(confidence, 0.45)
+    return {
+        "available": True,
+        "score": bounded_score(raw_score),
+        "confidence": max(0.0, min(1.0, confidence)),
+        "fitR2": fit_r2,
+        "fitSse": fit_sse,
+        "powerLawSse": power_sse,
+        "lpplImprovementPct": lppl_improvement_pct,
+        "oscillationCount": oscillation_count,
+        "passesLpplCoreDiagnostics": passes_lppl_core_diagnostics,
+        "residualDiagnostics": residual_diagnostics,
+        "passesLpplDiagnostics": passes_lppl_diagnostics,
+        "daysToCritical": tc_offset,
+        "windowDays": n,
+        "powerExponent": m,
+        "omega": omega,
+        "bubbleCoefficient": bubble_coefficient,
+        "oscillationAmplitude": oscillation,
+        "trailingReturn63d": trailing_63,
+        "acceleration": acceleration,
+        "reason": (
+            f"coherent LPPL acceleration; power-law improvement {lppl_improvement_pct:.1f}%, "
+            f"{oscillation_count:.1f} log-periodic oscillations, residual mean reversion supported"
+            if passes_lppl_diagnostics
+            else f"LPPL core shape strong but residual mean reversion is weak: power-law improvement {lppl_improvement_pct:.1f}%, "
+            f"{oscillation_count:.1f} oscillations"
+            if passes_lppl_core_diagnostics
+            else f"LPPL diagnostics weak: power-law improvement {lppl_improvement_pct:.1f}%, "
+            f"{oscillation_count:.1f} oscillations, residual mean-reverting={bool(residual_diagnostics.get('meanReverting'))}"
+        ),
+    }
 
 
 def lppl_oscillation_count(*, tc: float, omega: float, start_index: int, end_index: int) -> float:
@@ -4326,6 +5144,323 @@ def attach_global_lppl_forward_signals(index_rows: list[dict[str, Any]]) -> list
     return enriched_rows
 
 
+GLOBAL_LPPL_US_BENCHMARK_SYMBOL = "SPY"
+
+
+def attach_global_lppl_price_factors(
+    index_rows: list[dict[str, Any]],
+    bars_by_symbol: dict[str, list[MarketDailyBar]],
+) -> list[dict[str, Any]]:
+    """Attach per-region price/technical factors computed from each index's own ETF
+    proxy bars (momentum, 200DMA trend, realized vol, drawdown, relative strength vs the
+    US benchmark). These describe each region's equity market-state — a complement to the
+    LPPL bubble-risk score, not a separately OOS-validated drawdown forecast."""
+    benchmark_bars = bars_by_symbol.get(GLOBAL_LPPL_US_BENCHMARK_SYMBOL, [])
+    enriched_rows: list[dict[str, Any]] = []
+    for row in index_rows:
+        enriched = dict(row)
+        symbol = str(row.get("symbol") or "").upper()
+        bars = bars_by_symbol.get(symbol, [])
+        as_of = date.fromisoformat(str(row.get("asOf"))) if parse_payload_date(row.get("asOf")) else None
+        enriched["priceFactors"] = global_lppl_price_factors(
+            bars,
+            benchmark_bars=benchmark_bars,
+            as_of=as_of,
+            is_benchmark=symbol == GLOBAL_LPPL_US_BENCHMARK_SYMBOL,
+        )
+        enriched_rows.append(enriched)
+    return enriched_rows
+
+
+def global_lppl_price_factors(
+    bars: list[MarketDailyBar],
+    *,
+    benchmark_bars: list[MarketDailyBar],
+    as_of: date | None,
+    is_benchmark: bool = False,
+) -> dict[str, Any]:
+    target = as_of or (bars[-1].date if bars else None)
+    if target is None or len(bars) < 30:
+        return {"available": False, "reason": "价格样本不足,暂不能计算技术因子。"}
+    return_1m = trailing_return(bars, target, 21)
+    return_3m = trailing_return(bars, target, 63)
+    return_6m = trailing_return(bars, target, 126)
+    ma200_gap = moving_average_gap(bars, target, 200)
+    realized_vol = annualized_parkinson_vol(bars, target, 21)
+    drawdown_252 = drawdown_from_recent_high(bars, target, 252)
+    benchmark_3m = trailing_return(benchmark_bars, target, 63) if benchmark_bars else None
+    relative_strength_3m = (
+        None if return_3m is None or benchmark_3m is None or is_benchmark else return_3m - benchmark_3m
+    )
+    state, state_cn = global_lppl_market_state(ma200_gap, return_3m, drawdown_252)
+    return {
+        "available": True,
+        "asOf": target.isoformat(),
+        "return1m": pct_metric(return_1m),
+        "return3m": pct_metric(return_3m),
+        "return6m": pct_metric(return_6m),
+        "ma200Gap": pct_metric(ma200_gap),
+        "realizedVol": pct_metric(realized_vol),
+        "drawdownFromHigh": pct_metric(drawdown_252),
+        "relativeStrength3m": pct_metric(relative_strength_3m),
+        "isBenchmark": is_benchmark,
+        "marketState": state,
+        "marketStateCn": state_cn,
+    }
+
+
+def global_lppl_market_state(
+    ma200_gap: float | None,
+    return_3m: float | None,
+    drawdown_252: float | None,
+) -> tuple[str, str]:
+    below_trend = ma200_gap is not None and ma200_gap < 0
+    deep_drawdown = drawdown_252 is not None and drawdown_252 <= -0.10
+    above_trend = ma200_gap is not None and ma200_gap > 0
+    positive_momentum = return_3m is not None and return_3m > 0
+    shallow_drawdown = drawdown_252 is None or drawdown_252 > -0.08
+    if below_trend and deep_drawdown:
+        return "stressed", "承压"
+    if above_trend and positive_momentum and shallow_drawdown:
+        return "constructive", "偏强"
+    return "neutral", "中性"
+
+
+REGIONAL_FACTOR_VALIDATION_MIN_WEEKS = 60
+
+
+def attach_global_lppl_factor_validation(
+    index_rows: list[dict[str, Any]],
+    bars_by_symbol: dict[str, list[MarketDailyBar]],
+    per_index_history: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Validate each region's own factors (LPPL score, 3M momentum, relative strength vs
+    US, realized vol) against that region's OWN forward returns via the shared walk-forward
+    harness. Upgrades the region price-factors from descriptive to OOS-evaluated, and tells
+    you which factor actually has predictive power for each region's equity."""
+    benchmark_bars = bars_by_symbol.get(GLOBAL_LPPL_US_BENCHMARK_SYMBOL, [])
+    enriched_rows: list[dict[str, Any]] = []
+    for row in index_rows:
+        enriched = dict(row)
+        symbol = str(row.get("symbol") or "").upper()
+        bars = bars_by_symbol.get(symbol, [])
+        history = per_index_history.get(symbol, {}) if isinstance(per_index_history, dict) else {}
+        enriched["factorValidation"] = build_index_factor_validation(
+            symbol,
+            bars,
+            benchmark_bars,
+            history,
+            is_benchmark=symbol == GLOBAL_LPPL_US_BENCHMARK_SYMBOL,
+        )
+        enriched_rows.append(enriched)
+    return enriched_rows
+
+
+def build_index_factor_validation(
+    symbol: str,
+    bars: list[MarketDailyBar],
+    benchmark_bars: list[MarketDailyBar],
+    lppl_history: dict[str, Any],
+    *,
+    is_benchmark: bool = False,
+) -> dict[str, Any]:
+    clean = normalize_market_bars({symbol: bars}).get(symbol, [])
+    if len(clean) < GLOBAL_LPPL_MIN_OBSERVATIONS:
+        return {"available": False, "reason": "该地区ETF样本不足,暂不能验证因子。", "factors": []}
+    bench_clean = normalize_market_bars({GLOBAL_LPPL_US_BENCHMARK_SYMBOL: benchmark_bars}).get(GLOBAL_LPPL_US_BENCHMARK_SYMBOL, [])
+    price_points = [SeriesPoint(date=bar.date, value=bar.close) for bar in clean]
+    prices_sorted = SortedSeries(price_points)
+    week_dates = weekly_dates(price_points, years=5)
+    if len(week_dates) < REGIONAL_FACTOR_VALIDATION_MIN_WEEKS:
+        return {"available": False, "reason": "该地区周度样本不足,暂不能验证因子。", "factors": []}
+
+    lppl_points: list[SeriesPoint] = []
+    for point in (lppl_history.get("points", []) if isinstance(lppl_history, dict) else []):
+        if not isinstance(point, dict):
+            continue
+        try:
+            point_date = date.fromisoformat(str(point.get("date")))
+        except (TypeError, ValueError):
+            continue
+        score = optional_float(point.get("score"))
+        if score is not None:
+            lppl_points.append(SeriesPoint(date=point_date, value=score))
+    lppl_sorted = SortedSeries(lppl_points)
+
+    momentum_pts: list[SeriesPoint] = []
+    vol_pts: list[SeriesPoint] = []
+    relative_pts: list[SeriesPoint] = []
+    lppl_series_pts: list[SeriesPoint] = []
+    for target in week_dates:
+        momentum = trailing_return(clean, target, 63)
+        if momentum is not None:
+            momentum_pts.append(SeriesPoint(date=target, value=momentum * 100))
+        realized_vol = annualized_parkinson_vol(clean, target, 21)
+        if realized_vol is not None:
+            vol_pts.append(SeriesPoint(date=target, value=realized_vol * 100))
+        lppl_value = lppl_sorted.value_at_or_before(target)
+        if lppl_value is not None:
+            lppl_series_pts.append(SeriesPoint(date=target, value=lppl_value))
+        if not is_benchmark and bench_clean:
+            benchmark_momentum = trailing_return(bench_clean, target, 63)
+            if momentum is not None and benchmark_momentum is not None:
+                relative_pts.append(SeriesPoint(date=target, value=(momentum - benchmark_momentum) * 100))
+
+    factor_specs = [
+        ("lpplScore", "LPPL Score", "LPPL泡沫评分", lppl_series_pts, "higher_risk"),
+        ("momentum3m", "3M Momentum", "3M动量", momentum_pts, "higher_better"),
+        ("realizedVol", "Realized Vol", "已实现波动", vol_pts, "higher_risk"),
+    ]
+    if not is_benchmark:
+        factor_specs.append(("relativeStrength3m", "Relative Strength vs US", "相对美国强弱", relative_pts, "higher_better"))
+
+    rows: list[dict[str, Any]] = []
+    for factor_id, label, label_cn, points, direction in factor_specs:
+        row = signal_validation_metric_row(
+            row_id=factor_id,
+            label=label,
+            label_cn=label_cn,
+            module=symbol,
+            signal_points=points,
+            price_points=price_points,
+            prices_sorted=prices_sorted,
+            direction=direction,
+        )
+        if row is not None:
+            rows.append(row)
+    if not rows:
+        return {"available": False, "reason": "因子周度样本不足,暂不能验证。", "factors": []}
+    best = max(rows, key=lambda item: abs(optional_float(item.get("oosIc3m")) or 0.0))
+    composite = build_region_composite_signal(
+        factor_specs,
+        price_points=price_points,
+        prices_sorted=prices_sorted,
+        best_single_oos_ic3m=optional_float(best.get("oosIc3m")),
+        module=symbol,
+    )
+    return {
+        "available": True,
+        "method": (
+            "Per-region walk-forward validation: each factor's weekly series is scored against this "
+            "region's OWN forward returns (65/35 calibration/OOS split, 91D drawdown definition). "
+            "Higher OOS IC and lift>1 mean the factor genuinely leads this region's equity."
+        ),
+        "observationCount": len(week_dates),
+        "bestFactor": str(best.get("id") or ""),
+        "bestFactorOosIc3m": best.get("oosIc3m"),
+        "composite": composite,
+        "factors": rows,
+    }
+
+
+def build_region_composite_signal(
+    factor_specs: list[tuple[str, str, str, list[SeriesPoint], str]],
+    *,
+    price_points: list[SeriesPoint],
+    prices_sorted: SortedSeries,
+    best_single_oos_ic3m: float | None,
+    module: str,
+) -> dict[str, Any]:
+    """Evidence-weighted multi-factor composite per region: each factor is oriented to
+    'higher = more drawdown risk', z-scored on the CALIBRATION slice, and weighted by its
+    calibration-slice predictive strength (so the OOS evaluation of the composite stays
+    honest). Validates whether combining beats the best single factor for that region."""
+    series_by_id: dict[str, dict[date, float]] = {}
+    direction_by_id: dict[str, str] = {}
+    label_by_id: dict[str, str] = {}
+    for factor_id, _label, label_cn, points, direction in factor_specs:
+        series_by_id[factor_id] = {point.date: point.value for point in points}
+        direction_by_id[factor_id] = direction
+        label_by_id[factor_id] = label_cn
+    # Composite is defined only where every factor has a reading (dense, comparable).
+    common_dates = sorted(set.intersection(*[set(series.keys()) for series in series_by_id.values()])) if series_by_id else []
+    if len(common_dates) < MIN_SIGNAL_VALIDATION_POINTS:
+        return {"available": False, "reason": "因子重叠样本不足,暂不能合成综合信号。"}
+    split_index = max(1, int(len(common_dates) * SIGNAL_VALIDATION_OOS_SPLIT))
+    calibration_dates = common_dates[:split_index]
+
+    forward_by_date = {target: prices_sorted.forward_return_pct(target, days=91) for target in common_dates}
+    weights: dict[str, float] = {}
+    stats: dict[str, tuple[float, float]] = {}
+    factor_weight_rows: list[dict[str, Any]] = []
+    for factor_id, series in series_by_id.items():
+        calibration_values = [series[target] for target in calibration_dates]
+        mean = sum(calibration_values) / len(calibration_values)
+        variance = sum((value - mean) ** 2 for value in calibration_values) / len(calibration_values)
+        std = math.sqrt(variance)
+        if std <= 1e-9:
+            continue
+        stats[factor_id] = (mean, std)
+        sign = 1.0 if direction_by_id[factor_id] == "higher_risk" else -1.0
+        # Calibration oriented-to-risk IC: positive => higher reading led LOWER forward return.
+        risk_z_cal = [sign * (series[target] - mean) / std for target in calibration_dates]
+        forward_cal = [forward_by_date[target] for target in calibration_dates]
+        raw_ic = spearman_ic(risk_z_cal, forward_cal)
+        risk_ic = -raw_ic if raw_ic is not None else None
+        weight = max(0.0, risk_ic) if risk_ic is not None else 0.0
+        weights[factor_id] = weight
+        factor_weight_rows.append(
+            {"id": factor_id, "labelCn": label_by_id[factor_id], "calibrationRiskIc": round(risk_ic, 3) if risk_ic is not None else None, "weight": round(weight, 3)}
+        )
+    weight_total = sum(weights.values())
+    if weight_total <= 1e-9:
+        return {"available": False, "reason": "校准段无因子对该地区呈现风险预测力,暂不合成综合信号。"}
+    for row in factor_weight_rows:
+        row["weight"] = round((weights.get(row["id"], 0.0)) / weight_total, 3)
+
+    composite_points: list[SeriesPoint] = []
+    for target in common_dates:
+        total = 0.0
+        for factor_id, weight in weights.items():
+            if weight <= 0:
+                continue
+            mean, std = stats[factor_id]
+            sign = 1.0 if direction_by_id[factor_id] == "higher_risk" else -1.0
+            total += weight * sign * (series_by_id[factor_id][target] - mean) / std
+        composite_points.append(SeriesPoint(date=target, value=total / weight_total))
+
+    metric = signal_validation_metric_row(
+        row_id="regionComposite",
+        label="Evidence-weighted composite",
+        label_cn="证据加权综合信号",
+        module=module,
+        signal_points=composite_points,
+        price_points=price_points,
+        prices_sorted=prices_sorted,
+        direction="higher_risk",
+    )
+    if metric is None:
+        return {"available": False, "reason": "综合信号样本不足,暂不能验证。"}
+    composite_oos = optional_float(metric.get("oosIc3m"))
+    improvement = None
+    beats_best = None
+    if composite_oos is not None and best_single_oos_ic3m is not None:
+        improvement = round(abs(composite_oos) - abs(best_single_oos_ic3m), 3)
+        beats_best = abs(composite_oos) > abs(best_single_oos_ic3m)
+    return {
+        "available": True,
+        "method": (
+            "因子定向到'高=高回撤风险'后按校准段定向IC加权(z-score标准化), 仅用校准段定权以保持OOS诚实; "
+            "综合信号再经同一走出样本框架验证, 并与最强单因子对比。"
+        ),
+        "oosIc3m": metric.get("oosIc3m"),
+        "ic3m": metric.get("ic3m"),
+        "hitRateOos": metric.get("hitRateOos"),
+        "baseRate": metric.get("baseRate"),
+        "lift": metric.get("lift"),
+        "leadTimeDays": metric.get("leadTimeDays"),
+        "classification": metric.get("classification"),
+        "currentValue": round(composite_points[-1].value, 3),
+        "alertThreshold": metric.get("alertThreshold"),
+        "breachCountTotal": metric.get("alertCountTotal"),
+        "breachHitRateTotal": metric.get("hitRateTotal"),
+        "breachEvents": metric.get("breachEvents", []),
+        "weights": sorted(factor_weight_rows, key=lambda item: item["weight"], reverse=True),
+        "beatsBestSingleFactor": beats_best,
+        "oosIc3mImprovement": improvement,
+    }
+
+
 def global_lppl_ensemble_multiplier(row: dict[str, Any]) -> float:
     ensemble = row.get("fitEnsemble") if isinstance(row.get("fitEnsemble"), dict) else {}
     if not ensemble or ensemble.get("available") is not True:
@@ -4554,7 +5689,7 @@ def build_global_lppl_single_index_validation(
     multiplier, role, role_cn = global_lppl_validation_weight(test_15d)
     precision = optional_float(test_15d.get("precision"))
     recall = optional_float(test_15d.get("recall"))
-    return {
+    payload = {
         "symbol": symbol,
         "sourceSymbol": str(index_row.get("sourceSymbol") or symbol),
         "sampleSize": len(observations),
@@ -4572,6 +5707,39 @@ def build_global_lppl_single_index_validation(
         "validationRole": role,
         "validationRoleCn": role_cn,
         "summary": global_lppl_validation_summary(symbol, test_15d, multiplier, role_cn),
+    }
+    payload.update(global_lppl_oos_validation_fields(observations, drawdown_threshold_pct))
+    return payload
+
+
+def global_lppl_oos_validation_fields(
+    observations: list[dict[str, Any]],
+    drawdown_threshold_pct: float,
+) -> dict[str, Any]:
+    """Out-of-sample audit: the recommended threshold is chosen on the first 65%
+    of the replay and then evaluated only on the untouched last 35%."""
+    split_index = max(1, min(len(observations) - 1, int(len(observations) * SIGNAL_VALIDATION_OOS_SPLIT)))
+    calibration_obs = observations[:split_index]
+    evaluation_obs = observations[split_index:]
+    if len(calibration_obs) < 20 or len(evaluation_obs) < 10:
+        return {"oosAvailable": False}
+    oos_grid = [
+        equity_backtest_threshold_test(candidate_threshold, calibration_obs, drawdown_threshold_pct, horizon=15)
+        for candidate_threshold in (55, 60, 65, 70, 75, 80, 85, 90)
+    ]
+    oos_recommended = global_lppl_recommended_threshold(oos_grid, len(calibration_obs))
+    oos_threshold = int(oos_recommended.get("threshold") or GLOBAL_LPPL_ALERT_THRESHOLD)
+    oos_test = equity_backtest_threshold_test(oos_threshold, evaluation_obs, drawdown_threshold_pct, horizon=15)
+    oos_precision = optional_float(oos_test.get("precision"))
+    oos_recall = optional_float(oos_test.get("recall"))
+    return {
+        "oosAvailable": True,
+        "oosThreshold": oos_threshold,
+        "oosSampleSize": len(evaluation_obs),
+        "oosAlertDays": int(oos_test.get("alertDays") or 0),
+        "precision15dOos": round(oos_precision, 1) if oos_precision is not None else None,
+        "recall15dOos": round(oos_recall, 1) if oos_recall is not None else None,
+        "baseRate15dOos": oos_test.get("baseRate"),
     }
 
 
@@ -5402,14 +6570,18 @@ def equity_turnover_component(bars_by_symbol: dict[str, list[MarketDailyBar]], t
     if close_loc >= 0.70 and (spy_63 or 0) >= 0.08:
         thin_breakout_strength = max(0.0, min(1.0, (48.0 - volume_pct) / 6.0))
     thin_breakout = thin_breakout_strength > 0
-    distribution = volume_pct >= 75 and (close_loc <= 0.40 or (day_ret is not None and day_ret < 0))
-    score = 50.0
+    distribution_strength = 0.0
+    if close_loc <= 0.40 or (day_ret is not None and day_ret < 0):
+        distribution_strength = max(0.0, min(1.0, (volume_pct - 70.0) / 10.0))
+    distribution = distribution_strength > 0
     if thin_breakout:
         score = 25.0 + 53.0 * thin_breakout_strength
-    if distribution:
-        score = max(score, 84.0)
-    if not thin_breakout and not distribution:
+    else:
         score = max(25.0, risk_linear(0.5 - close_loc, 0.0, 0.35))
+    if distribution:
+        # Ramp from the neutral reading toward 84 as volume percentile climbs 70→80,
+        # so a one-percentile move no longer flips the component by 30+ points.
+        score = max(score, score + (84.0 - score) * distribution_strength)
     drivers = []
     if thin_breakout:
         drivers.append(equity_driver("thinBreakout", "缩量冲高承接偏弱", f"SPY volume p{volume_pct:.0f}, close location {close_loc:.2f}", score))
@@ -5422,7 +6594,7 @@ def equity_turnover_component(bars_by_symbol: dict[str, list[MarketDailyBar]], t
         score,
         f"SPY成交量历史分位 p{volume_pct:.0f}; 收盘位置 {close_loc:.2f}",
         drivers=drivers,
-        metrics={"volumePercentile": round(volume_pct, 1), "closeLocation": round(close_loc, 3), "spyDayReturn": pct_metric(day_ret), "thinBreakoutStrength": round(thin_breakout_strength, 3)},
+        metrics={"volumePercentile": round(volume_pct, 1), "closeLocation": round(close_loc, 3), "spyDayReturn": pct_metric(day_ret), "thinBreakoutStrength": round(thin_breakout_strength, 3), "distributionStrength": round(distribution_strength, 3)},
     )
 
 
@@ -6229,36 +7401,45 @@ def equity_convexity_score_floor(components: list[dict[str, Any]]) -> float:
     return 0.0
 
 
-def equity_short_term_risk_allocation(score: float) -> dict[str, str]:
+def equity_short_term_risk_allocation(score: float) -> dict[str, Any]:
+    base = {"horizon": "1-10d", "horizonCn": "1-10个交易日"}
     if score >= 75:
         return {
+            **base,
             "regime": "Strong Alert",
             "regimeCn": "强告警",
             "stance": "短线降风险",
             "equityExposure": "高Beta/AI拥挤仓位降到低配",
+            "exposureBandPct": [50, 80],
             "hedgeAction": "收盘前优先减仓或买入1-2周保护性对冲",
         }
     if score >= 60:
         return {
+            **base,
             "regime": "Caution",
             "regimeCn": "警戒",
             "stance": "控制追涨",
             "equityExposure": "权益仓位降到中性以下",
+            "exposureBandPct": [70, 90],
             "hedgeAction": "减少半导体/高Beta集中敞口",
         }
     if score >= 40:
         return {
+            **base,
             "regime": "Watch",
             "regimeCn": "观察",
             "stance": "不追高",
             "equityExposure": "维持中性",
+            "exposureBandPct": [85, 100],
             "hedgeAction": "等待确认",
         }
     return {
+        **base,
         "regime": "Normal",
         "regimeCn": "正常",
         "stance": "风险可承受",
         "equityExposure": "维持计划仓位",
+        "exposureBandPct": [100, 100],
         "hedgeAction": "无需额外对冲",
     }
 
@@ -7436,7 +8617,7 @@ def spy_early_warning_snapshot(macro_liquidity: dict[str, Any], macro_liquidity_
         "baseScore": round(base_score, 1),
         "regime": allocation["regime"],
         "regimeCn": allocation["regimeCn"],
-        "method": "Equity-specific 0-100 warning index from existing macro Conditions Score components plus 3M score deterioration and calibrated nonlinear risk amplifiers; higher means greater SPY/SPX drawdown risk.",
+        "method": "Equity-specific 0-100 warning index from existing macro Conditions Score components plus 3M score deterioration and calibrated nonlinear risk amplifiers; higher means greater SPY/SPX drawdown risk. Sleeve weights are evidence-informed (2026-06-13): credit/vol stress down-weighted as coincident, Fed liquidity & funding stress up-weighted as leading — see each sleeve's weightBasis; weights are quasi-in-sample (the OOS slice motivated them) and need revalidation on fresh data.",
         "asOf": str(current_signal.get("date") or macro_liquidity_equity.get("asOf") if isinstance(macro_liquidity_equity, dict) else ""),
         "summary": summary,
         "allocation": allocation,
@@ -7544,6 +8725,7 @@ def build_spy_early_warning_trend(
                 "stance": str(allocation.get("stance") or ""),
                 "amplifiers": snapshot.get("amplifiers") if isinstance(snapshot.get("amplifiers"), list) else [],
                 "dampeners": snapshot.get("dampeners") if isinstance(snapshot.get("dampeners"), list) else [],
+                "rulesVersion": SPY_WARNING_RULES_VERSION,
             }
         )
     points = [point for point in points if optional_float(point.get("score")) is not None]
@@ -7562,7 +8744,8 @@ def build_spy_early_warning_trend(
     score_3m_change = round(latest_score - prior_score, 1) if latest_score is not None and prior_score is not None else None
     return {
         "available": True,
-        "summary": "SPY Early Warning月度回放,使用同一组宏观分项与3M评分变化生成0-100预警分数。",
+        "summary": "SPY Early Warning月度回放,使用同一组宏观分项与3M评分变化生成0-100预警分数。注意: 回放对全部历史统一应用当前规则版本,并非时点规则。",
+        "rulesVersion": SPY_WARNING_RULES_VERSION,
         "date": latest["date"],
         "score": latest_score,
         "score3mChange": score_3m_change,
@@ -7614,12 +8797,16 @@ def spy_components_from_bhadial_score_row(score_row: dict[str, Any]) -> list[dic
 def spy_warning_signal_for_history_row(row: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
     conditions_score = optional_float(row.get("liquidityScore"))
     score_change = optional_float(row.get("score3mChange"))
-    change_rows = [item for item in rows if optional_float(item.get("score3mChange")) is not None]
+    row_date = str(row.get("date") or "")
+    # Point-in-time guard: bucket ranks may only use observations available on the
+    # replay date, otherwise the replay leaks the future score distribution.
+    visible_rows = [item for item in rows if str(item.get("date") or "") <= row_date] if row_date else list(rows)
+    change_rows = [item for item in visible_rows if optional_float(item.get("score3mChange")) is not None]
     return {
-        "date": str(row.get("date") or ""),
+        "date": row_date,
         "conditionsScore": conditions_score,
         "score3mChange": score_change,
-        "levelBucket": bucket_label_by_rank(rows, "liquidityScore", conditions_score, ["低评分", "中位评分", "高评分"]),
+        "levelBucket": bucket_label_by_rank(visible_rows, "liquidityScore", conditions_score, ["低评分", "中位评分", "高评分"]),
         "changeBucket": bucket_label_by_rank(change_rows, "score3mChange", score_change, ["评分下行", "变化不大", "评分上行"]),
         "expectedForward3m": None,
         "expectedDrawdown3m": None,
@@ -7654,17 +8841,23 @@ def spy_warning_amplifiers(macro_liquidity: dict[str, Any], current_signal: dict
                 "detail": f"Conditions Score {conditions_score:.1f}, 3M变化 {format_signed_number(score_change, digits=1)}",
             }
         )
-    if conditions_score is not None and conditions_score <= 42 and (score_change is None or score_change <= 1):
+    if (
+        SPY_WARNING_FRAGILE_LOW_SCORE_BOOST > 0
+        and conditions_score is not None
+        and conditions_score <= 42
+        and (score_change is None or score_change <= 1)
+    ):
         amplifiers.append(
             {
                 "key": "fragileLowScore",
                 "label": "低分脆弱区",
-                "scoreBoost": 8.0,
+                "scoreBoost": SPY_WARNING_FRAGILE_LOW_SCORE_BOOST,
                 "detail": f"Conditions Score {conditions_score:.1f},缺少明显改善",
             }
         )
     if (
-        conditions_score is not None
+        SPY_WARNING_LOW_SCORE_STALL_BOOST > 0
+        and conditions_score is not None
         and conditions_score <= 42
         and score_change is not None
         and 0 <= score_change <= 0.5
@@ -7683,17 +8876,24 @@ def spy_warning_amplifiers(macro_liquidity: dict[str, Any], current_signal: dict
                 ),
             }
         )
-    if trailing_3m is not None and trailing_3m >= 5 and score_change is not None and score_change <= -2:
+    if (
+        SPY_WARNING_RALLY_FRAGILITY_BOOST > 0
+        and trailing_3m is not None
+        and trailing_3m >= 5
+        and score_change is not None
+        and score_change <= -2
+    ):
         amplifiers.append(
             {
                 "key": "rallyFragility",
                 "label": "上涨后宏观转弱",
-                "scoreBoost": 6.0,
+                "scoreBoost": SPY_WARNING_RALLY_FRAGILITY_BOOST,
                 "detail": f"SPX 3M {format_signed_number(trailing_3m, digits=1)}%,评分变化 {format_signed_number(score_change, digits=1)}",
             }
         )
     if (
-        trailing_3m is not None
+        SPY_WARNING_LATE_RALLY_ROLLOVER_BOOST > 0
+        and trailing_3m is not None
         and trailing_3m >= 9
         and conditions_score is not None
         and conditions_score > 42
@@ -7835,6 +9035,7 @@ def build_spy_component_sleeve(spec: dict[str, Any], component_by_id: dict[str, 
         "available": bool(rows),
         "score": round(score, 1),
         "weight": float(spec["weight"]),
+        "weightBasis": str(spec.get("weightBasis") or ""),
         "detail": f"{len(rows)}/{len(spec['componentIds'])} factors",
         "drivers": top_drivers,
     }
@@ -7863,39 +9064,48 @@ def spy_warning_drivers(sleeves: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda item: (item["sleeveScore"], item["riskScore"]), reverse=True)[:6]
 
 
-def spy_warning_allocation(score: float) -> dict[str, str]:
+def spy_warning_allocation(score: float) -> dict[str, Any]:
+    base = {"horizon": "1-3M", "horizonCn": "1-3个月"}
     if score >= 75:
         return {
+            **base,
             "regime": "De-risk",
             "regimeCn": "减仓预警",
             "stance": "减仓/保护",
             "equityExposure": "权益降至常规仓位的25-50%",
+            "exposureBandPct": [25, 50],
             "hedgeAction": "优先保护性对冲或降低高Beta暴露",
             "tone": "restrictive",
         }
     if score >= 60:
         return {
+            **base,
             "regime": "Caution",
             "regimeCn": "谨慎",
             "stance": "降权/对冲",
             "equityExposure": "权益维持常规仓位的50-75%",
+            "exposureBandPct": [50, 75],
             "hedgeAction": "新增仓位放慢,回撤保护优先",
             "tone": "restrictive",
         }
     if score >= 40:
         return {
+            **base,
             "regime": "Neutral",
             "regimeCn": "中性",
             "stance": "持有/控仓",
             "equityExposure": "维持核心仓位,避免追高",
+            "exposureBandPct": [75, 100],
             "hedgeAction": "等待信用/波动或评分转弱确认",
             "tone": "neutral",
         }
     return {
+        **base,
         "regime": "Constructive",
         "regimeCn": "建设性",
         "stance": "正常/逢低加",
         "equityExposure": "维持常规或略高权益仓位",
+        "exposureBandPct": [90, 110],
         "hedgeAction": "保护需求较低,以再平衡为主",
         "tone": "supportive",
     }
@@ -9214,7 +10424,7 @@ def build_ideas(
     confidence_fields = investment_view_confidence_fields(conclusion_audit)
     equity_impact = investment_view_equity_impact(macro_liquidity_equity)
     return [
-        {**idea, **confidence_fields, "equityImpact": equity_impact}
+        {**idea, "horizon": "3-6M", "horizonCn": "3-6个月", **confidence_fields, "equityImpact": equity_impact}
         for idea in [
         duration_idea,
         curve_idea,
@@ -9418,3 +10628,1024 @@ def apply_content_overrides(dashboard: dict[str, Any], overrides: dict[str, Any]
 
 def rounded(value: float) -> float:
     return round(value, 2)
+
+
+SIGNAL_VALIDATION_MIN_WEEKS = 60
+SIGNAL_VALIDATION_DRAWDOWN_PCT = -5.0
+SIGNAL_VALIDATION_DRAWDOWN_DAYS = 91
+SIGNAL_VALIDATION_EQUITY_DRAWDOWN_PCT = -2.0
+SIGNAL_VALIDATION_EQUITY_DRAWDOWN_DAYS = 10
+SIGNAL_VALIDATION_OOS_SPLIT = 0.65
+
+
+class BhadialWeeklyReplay:
+    """Point-in-time weekly factor replay over pre-sorted score series.
+
+    Mirrors bhadial_factor_score_at / bhadial_conditions_score_at semantics
+    (including the Funding EMA(5) smoothing) but uses bisect lookups and
+    memoized month-end module scores so a 5Y weekly replay stays fast."""
+
+    def __init__(self, series: dict[str, list[SeriesPoint]]):
+        self.sorted_series: dict[str, SortedSeries] = {
+            key: SortedSeries(series.get(key) or []) for key in BHADIAL_CONDITION_SERIES_KEYS
+        }
+        self._factor_cache: dict[tuple[str, date], tuple[float, bool]] = {}
+        self._module_raw_cache: dict[tuple[str, date], tuple[float, int]] = {}
+        self._month_ends_cache: dict[str, list[date]] = {}
+
+    def factor_score_at(self, spec: dict[str, Any], target: date) -> tuple[float, bool]:
+        cache_key = (str(spec["id"]), target)
+        cached = self._factor_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        sorted_points = self.sorted_series.get(str(spec["scoreKey"]))
+        current = sorted_points.value_at_or_before(target) if sorted_points is not None else None
+        if current is None:
+            row = (50.0, False)
+        else:
+            method = str(spec["method"])
+            direction = str(spec["direction"])
+            if method == "risk_signal":
+                bounded = max(0.0, min(1.0, current))
+                score = (1 - bounded) * 100 if direction == "lower_better" else bounded * 100
+            elif method == "shock_only" and current <= 0:
+                score = 50.0
+            else:
+                score = score_from_percentile(sorted_points.percentile_at(target), direction)
+            row = (max(0.0, min(100.0, score)), True)
+        self._factor_cache[cache_key] = row
+        return row
+
+    def module_raw_score_at(self, module: dict[str, Any], target: date) -> tuple[float, int]:
+        cache_key = (str(module["name"]), target)
+        cached = self._module_raw_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        total = 0.0
+        total_weight = 0.0
+        observed = 0
+        for spec in module["factors"]:
+            score, was_observed = self.factor_score_at(spec, target)
+            weight = float(spec["weight"])
+            total += score * weight
+            total_weight += weight
+            if was_observed:
+                observed += 1
+        row = (total / max(total_weight, 1e-9), observed)
+        self._module_raw_cache[cache_key] = row
+        return row
+
+    def module_month_ends(self, module: dict[str, Any]) -> list[date]:
+        key = str(module["name"])
+        cached = self._month_ends_cache.get(key)
+        if cached is not None:
+            return cached
+        month_ends: dict[tuple[int, int], date] = {}
+        for spec in module["factors"]:
+            sorted_points = self.sorted_series.get(str(spec["scoreKey"]))
+            if sorted_points is None:
+                continue
+            for point_date in sorted_points.dates:
+                month_key = (point_date.year, point_date.month)
+                existing = month_ends.get(month_key)
+                if existing is None or point_date > existing:
+                    month_ends[month_key] = point_date
+        result = [month_ends[month_key] for month_key in sorted(month_ends)]
+        self._month_ends_cache[key] = result
+        return result
+
+    def module_ema_score_at(self, module: dict[str, Any], target: date, *, span: int = 5) -> float | None:
+        start = window_start(target, years=5)
+        point_dates = [point_date for point_date in self.module_month_ends(module) if start <= point_date <= target]
+        if target not in point_dates:
+            point_dates.append(target)
+        alpha = 2 / (span + 1)
+        ema: float | None = None
+        for point_date in sorted(point_dates):
+            score, _ = self.module_raw_score_at(module, point_date)
+            ema = score if ema is None else alpha * score + (1 - alpha) * ema
+        return ema
+
+    def composite_at(self, target: date, *, include_components: bool = False) -> dict[str, Any]:
+        composite_total = 0.0
+        weight_total = 0.0
+        observed_total = 0
+        components: list[dict[str, Any]] = []
+        for module in BHADIAL_CONDITION_MODULES:
+            module_score, observed = self.module_raw_score_at(module, target)
+            if module.get("smooth") == "ema5":
+                ema = self.module_ema_score_at(module, target, span=5)
+                if ema is not None:
+                    module_score = ema
+            module_weight = bhadial_module_weight(str(module["name"]))
+            composite_total += module_score * module_weight
+            weight_total += module_weight
+            observed_total += observed
+            if include_components:
+                for spec in module["factors"]:
+                    score, _ = self.factor_score_at(spec, target)
+                    components.append(
+                        {
+                            "id": str(spec["id"]),
+                            "module": str(module["name"]),
+                            "moduleCn": str(module["nameCn"]),
+                            "remoteName": str(spec["remoteName"]),
+                            "name": str(spec["name"]),
+                            "score": round(score, 1),
+                            "value": "",
+                            "source": str(spec["source"]),
+                        }
+                    )
+        return {
+            "score": composite_total / max(weight_total, 1e-9),
+            "observedFactorCount": observed_total,
+            "components": components,
+        }
+
+
+def trailing_return_values(prices: SortedSeries, targets: list[date], *, days: int) -> list[float | None]:
+    values: list[float | None] = []
+    for target in targets:
+        current = prices.value_at_or_before(target)
+        past = prices.value_at_or_before(target - timedelta(days=days))
+        if current is None or past is None or past == 0:
+            values.append(None)
+        else:
+            values.append((current / past - 1) * 100)
+    return values
+
+
+def signal_validation_metric_row(
+    *,
+    row_id: str,
+    label: str,
+    label_cn: str,
+    module: str,
+    signal_points: list[SeriesPoint],
+    price_points: list[SeriesPoint],
+    prices_sorted: SortedSeries,
+    direction: str,
+    drawdown_threshold_pct: float = SIGNAL_VALIDATION_DRAWDOWN_PCT,
+    drawdown_horizon_days: int = SIGNAL_VALIDATION_DRAWDOWN_DAYS,
+) -> dict[str, Any] | None:
+    if len(signal_points) < MIN_SIGNAL_VALIDATION_POINTS:
+        return None
+    evaluation = evaluate_signal(
+        signal_points,
+        price_points,
+        horizons=(7, 30, 91),
+        oos_split=SIGNAL_VALIDATION_OOS_SPLIT,
+        direction=direction,
+        drawdown_threshold_pct=drawdown_threshold_pct,
+        drawdown_horizon_days=drawdown_horizon_days,
+    )
+    if not evaluation.get("available"):
+        return None
+    horizons = {item["days"]: item for item in evaluation["horizons"]}
+    targets = [point.date for point in signal_points]
+    signal_values: list[float | None] = [point.value for point in signal_points]
+    contemporaneous = spearman_ic(signal_values, trailing_return_values(prices_sorted, targets, days=30))
+    trailing = spearman_ic(signal_values, trailing_return_values(prices_sorted, targets, days=91))
+    forward_candidates = [
+        horizons.get(30, {}).get("icOos"),
+        horizons.get(91, {}).get("icOos"),
+    ]
+    forward_candidates = [value for value in forward_candidates if value is not None]
+    if not forward_candidates:
+        forward_candidates = [
+            value
+            for value in (horizons.get(30, {}).get("ic"), horizons.get(91, {}).get("ic"))
+            if value is not None
+        ]
+    forward_ic = max(forward_candidates, key=abs) if forward_candidates else None
+    alert = evaluation.get("alert", {})
+    return {
+        "id": row_id,
+        "label": label,
+        "labelCn": label_cn,
+        "module": module,
+        "direction": direction,
+        "observationCount": evaluation["observationCount"],
+        "ic1w": horizons.get(7, {}).get("ic"),
+        "ic1m": horizons.get(30, {}).get("ic"),
+        "ic3m": horizons.get(91, {}).get("ic"),
+        "oosIc1m": horizons.get(30, {}).get("icOos"),
+        "oosIc3m": horizons.get(91, {}).get("icOos"),
+        "ci3m": horizons.get(91, {}).get("ci"),
+        "hitRateOos": alert.get("oosHitRate"),
+        "baseRate": alert.get("baseRate"),
+        "lift": alert.get("lift"),
+        "leadTimeDays": alert.get("leadTimeDays"),
+        "falseAlarmDays": alert.get("falseAlarmDays"),
+        "oosAlertCount": alert.get("oosAlertCount"),
+        "alertThreshold": alert.get("thresholdValue"),
+        "thresholdPercentile": alert.get("thresholdPercentile"),
+        "alertCountTotal": alert.get("alertCountTotal"),
+        "hitRateTotal": alert.get("hitRateTotal"),
+        "baseRateTotal": alert.get("baseRateTotal"),
+        "breachEvents": alert.get("breachEvents", []),
+        "classification": classify_lead_lag(
+            forward_ic=forward_ic,
+            contemporaneous_corr=contemporaneous,
+            trailing_ic=trailing,
+        ),
+        "clusterId": None,
+    }
+
+
+MIN_SIGNAL_VALIDATION_POINTS = 40
+
+
+def unavailable_signal_validation(reason: str) -> dict[str, Any]:
+    return {
+        "available": False,
+        "reason": reason,
+        "factors": [],
+        "composites": [],
+        "clusters": [],
+        "effectiveWeights": [],
+    }
+
+
+def build_signal_validation(
+    indicators: dict[str, Any],
+    *,
+    equity_short_term_risk: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    series = indicators.get("percentile_series") if isinstance(indicators.get("percentile_series"), dict) else {}
+    sp500_points = clean_points(series.get("sp500", []))
+    week_targets = weekly_dates(sp500_points, years=5)
+    if len(week_targets) < SIGNAL_VALIDATION_MIN_WEEKS:
+        return unavailable_signal_validation("S&P 500周度样本不足,暂不能执行走出样本验证。")
+    prices_sorted = SortedSeries(sp500_points)
+    replay = BhadialWeeklyReplay(series)
+
+    factor_series: dict[str, list[SeriesPoint]] = {}
+    factor_rows: list[dict[str, Any]] = []
+    for module in BHADIAL_CONDITION_MODULES:
+        for spec in module["factors"]:
+            points = []
+            for target in week_targets:
+                score, observed = replay.factor_score_at(spec, target)
+                if observed:
+                    points.append(SeriesPoint(date=target, value=score))
+            factor_series[str(spec["id"])] = points
+            row = signal_validation_metric_row(
+                row_id=str(spec["id"]),
+                label=str(spec["remoteName"]),
+                label_cn=str(spec["name"]),
+                module=str(module["name"]),
+                signal_points=points,
+                price_points=sp500_points,
+                prices_sorted=prices_sorted,
+                direction="higher_better",
+            )
+            if row is not None:
+                factor_rows.append(row)
+
+    clusters = redundancy_clusters(
+        {factor_id: points for factor_id, points in factor_series.items() if len(points) >= MIN_SIGNAL_VALIDATION_POINTS}
+    )
+    cluster_rows = [
+        {"id": f"c{index + 1}", "factorIds": members}
+        for index, members in enumerate(clusters)
+    ]
+    cluster_lookup = {member: row["id"] for row in cluster_rows for member in row["factorIds"]}
+    for row in factor_rows:
+        row["clusterId"] = cluster_lookup.get(row["id"])
+
+    composite_points: list[SeriesPoint] = []
+    weekly_components: dict[date, list[dict[str, Any]]] = {}
+    for target in week_targets:
+        composite = replay.composite_at(target, include_components=True)
+        if int(composite.get("observedFactorCount", 0)) < 5:
+            continue
+        composite_points.append(SeriesPoint(date=target, value=float(composite["score"])))
+        weekly_components[target] = composite["components"]
+
+    change_points: list[SeriesPoint] = [
+        SeriesPoint(date=current.date, value=current.value - composite_points[index - 13].value)
+        for index, current in enumerate(composite_points)
+        if index >= 13
+    ]
+
+    sleeve_series: dict[str, list[SeriesPoint]] = {str(spec["key"]): [] for spec in SPY_WARNING_COMPONENT_SLEEVES}
+    spy_warning_points: list[SeriesPoint] = []
+    rule_fires: dict[str, list[dict[str, Any]]] = {}
+    rule_meta: dict[str, dict[str, Any]] = {}
+    composite_by_date = {point.date: point.value for point in composite_points}
+    change_by_date = {point.date: point.value for point in change_points}
+    for point in composite_points:
+        components = weekly_components.get(point.date, [])
+        component_by_id = {str(item.get("id")): item for item in components}
+        for spec in SPY_WARNING_COMPONENT_SLEEVES:
+            sleeve = build_spy_component_sleeve(spec, component_by_id)
+            if sleeve.get("available"):
+                sleeve_series[str(spec["key"])].append(SeriesPoint(date=point.date, value=float(sleeve["score"])))
+        score_change = change_by_date.get(point.date)
+        trailing_values = trailing_return_values(prices_sorted, [point.date], days=91)
+        signal = {
+            "date": point.date.isoformat(),
+            "conditionsScore": composite_by_date.get(point.date),
+            "score3mChange": score_change,
+            "levelBucket": "",
+            "changeBucket": "",
+            "expectedForward3m": None,
+            "expectedDrawdown3m": None,
+            "sp500Trailing3m": trailing_values[0],
+            "hitRate": None,
+            "confidence": "replay",
+        }
+        snapshot = spy_early_warning_snapshot(
+            {"score": round(point.value, 1), "components": components},
+            {"asOf": point.date.isoformat(), "currentSignal": signal},
+        )
+        score = optional_float(snapshot.get("score")) if snapshot.get("available") else None
+        if score is not None:
+            spy_warning_points.append(SeriesPoint(date=point.date, value=score))
+            amplifier_items = snapshot.get("amplifiers") if isinstance(snapshot.get("amplifiers"), list) else []
+            dampener_items = snapshot.get("dampeners") if isinstance(snapshot.get("dampeners"), list) else []
+            for kind, items in (("amplifier", amplifier_items), ("dampener", dampener_items)):
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    key = str(item.get("key") or "")
+                    if not key:
+                        continue
+                    effect = optional_float(item.get("scoreBoost"))
+                    if effect is None:
+                        effect = optional_float(item.get("scoreOffset"))
+                    rule_meta.setdefault(
+                        key,
+                        {"label": str(item.get("label") or key), "kind": kind, "scoreEffect": effect or 0.0},
+                    )
+                    rule_fires.setdefault(key, []).append(
+                        {"date": point.date, "trailing3m": trailing_values[0]}
+                    )
+
+    amplifier_audit = build_spy_warning_rule_audit(
+        rule_fires,
+        rule_meta,
+        [item.date for item in spy_warning_points],
+        prices_sorted,
+    )
+
+    composite_specs: list[dict[str, Any]] = [
+        {
+            "id": "bhadialComposite",
+            "label": "Conditions Score (weekly)",
+            "labelCn": "宏观环境评分(周度)",
+            "points": composite_points,
+            "direction": "higher_better",
+        },
+        {
+            "id": "bhadialChange13w",
+            "label": "Conditions Score 13W change",
+            "labelCn": "宏观评分13周变化",
+            "points": change_points,
+            "direction": "higher_better",
+        },
+        {
+            "id": "spyEarlyWarning",
+            "label": "SPY Early Warning (weekly replay)",
+            "labelCn": "SPY预警(周度回放)",
+            "points": spy_warning_points,
+            "direction": "higher_risk",
+        },
+    ]
+    sleeve_labels = {str(spec["key"]): str(spec["label"]) for spec in SPY_WARNING_COMPONENT_SLEEVES}
+    for sleeve_key, points in sleeve_series.items():
+        composite_specs.append(
+            {
+                "id": f"sleeve:{sleeve_key}",
+                "label": sleeve_key,
+                "labelCn": sleeve_labels.get(sleeve_key, sleeve_key),
+                "points": points,
+                "direction": "higher_risk",
+            }
+        )
+
+    composite_rows: list[dict[str, Any]] = []
+    for spec in composite_specs:
+        row = signal_validation_metric_row(
+            row_id=str(spec["id"]),
+            label=str(spec["label"]),
+            label_cn=str(spec["labelCn"]),
+            module="composite",
+            signal_points=spec["points"],
+            price_points=sp500_points,
+            prices_sorted=prices_sorted,
+            direction=str(spec["direction"]),
+        )
+        if row is not None:
+            composite_rows.append(row)
+
+    equity_row = build_equity_signal_validation_row(equity_short_term_risk)
+    if equity_row is not None:
+        composite_rows.append(equity_row)
+
+    weights = effective_weights(BHADIAL_CONDITION_MODULES, BHADIAL_MODULE_WEIGHTS, clusters)
+
+    predictive_lens = build_bhadial_predictive_lens(
+        replay,
+        week_targets,
+        factor_series,
+        weights,
+        prices_sorted,
+    )
+    if predictive_lens.get("available"):
+        predictive_row = signal_validation_metric_row(
+            row_id="bhadialPredictive",
+            label="Predictive lens (leading factors)",
+            label_cn="预测镜头(领先因子)",
+            module="composite",
+            signal_points=predictive_lens["points"],
+            price_points=sp500_points,
+            prices_sorted=prices_sorted,
+            direction="higher_better",
+        )
+        if predictive_row is not None:
+            composite_rows.append(predictive_row)
+    predictive_payload = {key: value for key, value in predictive_lens.items() if key != "points"}
+    return {
+        "available": True,
+        "asOf": week_targets[-1].isoformat(),
+        "method": (
+            "Weekly point-in-time replay of all condition factors and composite overlays against forward "
+            "S&P 500 returns; thresholds and ICs are split into calibration (first 65%) and out-of-sample "
+            "(last 35%) slices; alert hit rates are compared with the unconditional base rate."
+        ),
+        "weeklyObservationCount": len(week_targets),
+        "oosSplitPct": round(SIGNAL_VALIDATION_OOS_SPLIT * 100),
+        "drawdownRule": f"{SIGNAL_VALIDATION_DRAWDOWN_DAYS}D内最大回撤≤{SIGNAL_VALIDATION_DRAWDOWN_PCT:.0f}%",
+        "factors": factor_rows,
+        "composites": composite_rows,
+        "clusters": cluster_rows,
+        "effectiveWeights": weights,
+        "predictiveLens": predictive_payload,
+        "amplifierAudit": amplifier_audit,
+    }
+
+
+def build_bhadial_predictive_lens(
+    replay: "BhadialWeeklyReplay",
+    week_targets: list[date],
+    factor_series: dict[str, list[SeriesPoint]],
+    weight_rows: list[dict[str, Any]],
+    prices_sorted: SortedSeries,
+    *,
+    min_factors: int = 3,
+    min_calibration_ic: float = 0.10,
+) -> dict[str, Any]:
+    """Predictive-lens composite: factors are selected by their CALIBRATION-slice
+    forward IC only (never the OOS slice, so the lens's OOS metrics stay honest),
+    weighted by redundancy-adjusted effective weights, and replayed with each
+    factor's publicationLagDays applied so only truly-available data enters."""
+    spec_by_id = {
+        str(spec["id"]): spec
+        for module in BHADIAL_CONDITION_MODULES
+        for spec in module["factors"]
+    }
+    selected: list[dict[str, Any]] = []
+    for factor_id in sorted(factor_series):
+        points = factor_series[factor_id]
+        if len(points) < MIN_SIGNAL_VALIDATION_POINTS:
+            continue
+        split_index = max(1, int(len(points) * SIGNAL_VALIDATION_OOS_SPLIT))
+        calibration = points[:split_index]
+        signal_values: list[float | None] = [point.value for point in calibration]
+        ic_1m = spearman_ic(signal_values, [prices_sorted.forward_return_pct(point.date, days=30) for point in calibration])
+        ic_3m = spearman_ic(signal_values, [prices_sorted.forward_return_pct(point.date, days=91) for point in calibration])
+        best_ic = max((value for value in (ic_1m, ic_3m) if value is not None), default=None)
+        if best_ic is None or best_ic < min_calibration_ic:
+            continue
+        selected.append({"id": factor_id, "calibrationIc": round(best_ic, 3)})
+    if len(selected) < min_factors:
+        return {
+            "available": False,
+            "reason": f"校准段达标的领先因子不足{min_factors}个,预测镜头暂不发布。",
+            "selectedFactors": selected,
+            "points": [],
+        }
+    weight_by_id = {str(row["id"]): float(row["effectiveWeight"]) for row in weight_rows}
+    points: list[SeriesPoint] = []
+    for target in week_targets:
+        total = 0.0
+        weight_total = 0.0
+        for item in selected:
+            spec = spec_by_id.get(item["id"])
+            if spec is None:
+                continue
+            lag = int(spec.get("publicationLagDays") or 1)
+            score, observed = replay.factor_score_at(spec, target - timedelta(days=lag))
+            if not observed:
+                continue
+            weight = weight_by_id.get(item["id"], 0.0)
+            total += score * weight
+            weight_total += weight
+        if weight_total > 0:
+            points.append(SeriesPoint(date=target, value=total / weight_total))
+    for item in selected:
+        item["effectiveWeight"] = weight_by_id.get(item["id"], 0.0)
+    latest_score = round(points[-1].value, 1) if points else None
+    return {
+        "available": bool(points),
+        "method": (
+            "Leading factors chosen on the calibration slice only (forward IC >= "
+            f"{min_calibration_ic:.2f}), weighted by redundancy-adjusted effective weights, "
+            "replayed with per-factor publication lags."
+        ),
+        "selectedFactors": selected,
+        "latestScore": latest_score,
+        "points": points,
+    }
+
+
+def build_spy_warning_rule_audit(
+    rule_fires: dict[str, list[dict[str, Any]]],
+    rule_meta: dict[str, dict[str, Any]],
+    week_dates_avail: list[date],
+    prices_sorted: SortedSeries,
+) -> dict[str, Any]:
+    if len(week_dates_avail) < SIGNAL_VALIDATION_MIN_WEEKS:
+        return {"available": False, "reason": "周度回放样本不足,暂不能审计放大器规则。", "rules": []}
+    split_index = max(1, min(len(week_dates_avail) - 1, int(len(week_dates_avail) * SIGNAL_VALIDATION_OOS_SPLIT)))
+    oos_start = week_dates_avail[split_index]
+
+    def drawdown_event(target: date) -> bool | None:
+        drawdown = prices_sorted.forward_max_drawdown_pct(target, days=SIGNAL_VALIDATION_DRAWDOWN_DAYS)
+        if drawdown is None:
+            return None
+        return drawdown <= SIGNAL_VALIDATION_DRAWDOWN_PCT
+
+    oos_scored = [(target, drawdown_event(target)) for target in week_dates_avail[split_index:]]
+    oos_scored = [(target, event) for target, event in oos_scored if event is not None]
+    base_rate = (sum(1 for _, event in oos_scored if event) / len(oos_scored)) if oos_scored else None
+    base_forward_values = [
+        value
+        for value in (prices_sorted.forward_return_pct(target, days=91) for target, _ in oos_scored)
+        if value is not None
+    ]
+    base_forward = sum(base_forward_values) / len(base_forward_values) if base_forward_values else None
+
+    rules: list[dict[str, Any]] = []
+    for key in sorted(rule_meta):
+        meta = rule_meta[key]
+        fires = rule_fires.get(key, [])
+        fire_dates = [fire["date"] for fire in fires]
+        oos_fire_dates = [target for target in fire_dates if target >= oos_start]
+        scored = [(target, drawdown_event(target)) for target in oos_fire_dates]
+        scored = [(target, event) for target, event in scored if event is not None]
+        hit_rate = (sum(1 for _, event in scored if event) / len(scored)) if scored else None
+        lift = (hit_rate / base_rate) if hit_rate is not None and base_rate else None
+        forward_values = [
+            value
+            for value in (prices_sorted.forward_return_pct(target, days=91) for target in fire_dates)
+            if value is not None
+        ]
+        forward_after_fire = sum(forward_values) / len(forward_values) if forward_values else None
+        trailing_values = [optional_float(fire.get("trailing3m")) for fire in fires]
+        trailing_values = [value for value in trailing_values if value is not None]
+        trailing_at_fire = sum(trailing_values) / len(trailing_values) if trailing_values else None
+        lead_times = []
+        for target, event in scored:
+            if not event:
+                continue
+            trough = prices_sorted.forward_trough_date(target, days=SIGNAL_VALIDATION_DRAWDOWN_DAYS)
+            if trough is not None:
+                lead_times.append((trough - target).days)
+        lead_time = sum(lead_times) / len(lead_times) if lead_times else None
+        rules.append(
+            {
+                "key": key,
+                "label": meta["label"],
+                "kind": meta["kind"],
+                "scoreEffect": meta["scoreEffect"],
+                "fireCount": len(fire_dates),
+                "oosFireCount": len(scored),
+                "oosHitRate": round(hit_rate, 3) if hit_rate is not None else None,
+                "baseRate": round(base_rate, 3) if base_rate is not None else None,
+                "lift": round(lift, 2) if lift is not None else None,
+                "avgForward3mAfterFire": round(forward_after_fire, 2) if forward_after_fire is not None else None,
+                "avgTrailing3mAtFire": round(trailing_at_fire, 2) if trailing_at_fire is not None else None,
+                "leadTimeDays": round(lead_time, 1) if lead_time is not None else None,
+                "verdict": spy_warning_rule_verdict(meta["kind"], len(scored), lift),
+            }
+        )
+    return {
+        "available": True,
+        "method": (
+            "Weekly point-in-time replay; each rule's post-fire OOS drawdown frequency is compared with the "
+            "unconditional base rate. Amplifiers should fire BEFORE drawdowns (lift>1); a dampener is justified "
+            "only when drawdowns after it fires are rarer than base rate (lift<1)."
+        ),
+        "oosStartDate": oos_start.isoformat(),
+        "oosSampleSize": len(oos_scored),
+        "baseRate": round(base_rate, 3) if base_rate is not None else None,
+        "baseForward3m": round(base_forward, 2) if base_forward is not None else None,
+        "drawdownRule": f"{SIGNAL_VALIDATION_DRAWDOWN_DAYS}D内最大回撤≤{SIGNAL_VALIDATION_DRAWDOWN_PCT:.0f}%",
+        "rules": rules,
+    }
+
+
+def spy_warning_rule_verdict(kind: str, oos_fire_count: int, lift: float | None) -> str:
+    if oos_fire_count < 3 or lift is None:
+        return "insufficient"
+    if kind == "dampener":
+        if lift <= 0.85:
+            return "justified"
+        if lift >= 1.0:
+            return "counterproductive"
+        return "neutral"
+    if lift >= 1.15:
+        return "additive"
+    if lift <= 0.85:
+        return "counterproductive"
+    return "neutral"
+
+
+def build_equity_signal_validation_row(equity_short_term_risk: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(equity_short_term_risk, dict):
+        return None
+    trend = equity_short_term_risk.get("trend")
+    if not isinstance(trend, dict) or not trend.get("available"):
+        return None
+    signal_points: list[SeriesPoint] = []
+    price_points: list[SeriesPoint] = []
+    for row in trend.get("points", []):
+        if not isinstance(row, dict):
+            continue
+        try:
+            target = date.fromisoformat(str(row.get("date") or ""))
+        except ValueError:
+            continue
+        score = optional_float(row.get("score"))
+        close = optional_float(row.get("spyClose"))
+        if score is None or close is None or close <= 0:
+            continue
+        signal_points.append(SeriesPoint(date=target, value=score))
+        price_points.append(SeriesPoint(date=target, value=close))
+    if len(signal_points) < MIN_SIGNAL_VALIDATION_POINTS:
+        return None
+    return signal_validation_metric_row(
+        row_id="equityShortTermRisk",
+        label="Equity Short-Term Risk (daily)",
+        label_cn="股票短周期风险(日度)",
+        module="composite",
+        signal_points=signal_points,
+        price_points=price_points,
+        prices_sorted=SortedSeries(price_points),
+        direction="higher_risk",
+        drawdown_threshold_pct=SIGNAL_VALIDATION_EQUITY_DRAWDOWN_PCT,
+        drawdown_horizon_days=SIGNAL_VALIDATION_EQUITY_DRAWDOWN_DAYS,
+    )
+
+
+PORTFOLIO_OVERVIEW_LPPL_RISK_BAND = [60, 85]
+PORTFOLIO_OVERVIEW_LPPL_WATCH_BAND = [85, 100]
+
+
+def portfolio_overview_evidence(row: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(row, dict):
+        return {"available": False, "note": "证据不足: 该层尚无走出样本验证。"}
+    return {
+        "available": True,
+        "oosHitRate": optional_float(row.get("hitRateOos")),
+        "baseRate": optional_float(row.get("baseRate")),
+        "lift": optional_float(row.get("lift")),
+        "leadTimeDays": optional_float(row.get("leadTimeDays")),
+        "sampleSize": row.get("observationCount"),
+        "classification": str(row.get("classification") or ""),
+    }
+
+
+def portfolio_overview_layer(
+    *,
+    layer: str,
+    label: str,
+    label_cn: str,
+    horizon: str,
+    horizon_cn: str,
+    score: float | None,
+    regime: str,
+    regime_cn: str,
+    stance: str,
+    exposure_band: list[Any] | None,
+    evidence: dict[str, Any],
+    note: str = "",
+) -> dict[str, Any]:
+    band: list[float] | None = None
+    if isinstance(exposure_band, (list, tuple)) and len(exposure_band) == 2:
+        low = optional_float(exposure_band[0])
+        high = optional_float(exposure_band[1])
+        if low is not None and high is not None:
+            band = [low, high]
+    return {
+        "layer": layer,
+        "label": label,
+        "labelCn": label_cn,
+        "horizon": horizon,
+        "horizonCn": horizon_cn,
+        "score": round(score, 1) if score is not None else None,
+        "regime": regime,
+        "regimeCn": regime_cn,
+        "stance": stance,
+        "exposureBandPct": band,
+        "evidence": evidence,
+        "note": note,
+    }
+
+
+def global_lppl_overview_state(global_lppl_risk: dict[str, Any] | None) -> dict[str, Any]:
+    rows = global_lppl_risk.get("indices") if isinstance(global_lppl_risk, dict) else []
+    rows = [row for row in rows if isinstance(row, dict) and row.get("available")] if isinstance(rows, list) else []
+    risk_rows = [row for row in rows if str(row.get("status")) == "risk"]
+    watch_rows = [row for row in rows if str(row.get("status")) == "watch"]
+    if risk_rows:
+        band = list(PORTFOLIO_OVERVIEW_LPPL_RISK_BAND)
+        regime, regime_cn = "Risk", "泡沫风险"
+        stance = "界定下行(领式/保护性认沽),不盲目追高风险指数"
+    elif watch_rows:
+        band = list(PORTFOLIO_OVERVIEW_LPPL_WATCH_BAND)
+        regime, regime_cn = "Watch", "观察"
+        stance = "维持仓位,跟踪临界窗口收敛"
+    else:
+        band = [100, 100]
+        regime, regime_cn = "Quiet", "低风险"
+        stance = "无泡沫形态约束"
+    alert_symbols = [str(row.get("symbol") or "") for row in risk_rows]
+    days = [optional_float(row.get("daysToCritical")) for row in risk_rows + watch_rows]
+    days = [value for value in days if value is not None]
+    scores = [optional_float(row.get("score")) for row in rows]
+    scores = [value for value in scores if value is not None]
+    return {
+        "band": band,
+        "regime": regime,
+        "regimeCn": regime_cn,
+        "stance": stance,
+        "alertSymbols": alert_symbols,
+        "minDaysToCritical": min(days) if days else None,
+        "maxScore": max(scores) if scores else None,
+        "observedIndexCount": len(rows),
+    }
+
+
+def global_lppl_overview_evidence(global_lppl_risk: dict[str, Any] | None) -> dict[str, Any]:
+    validation = global_lppl_risk.get("indexValidation") if isinstance(global_lppl_risk, dict) else {}
+    rows = validation.get("rows") if isinstance(validation, dict) else []
+    spy_row = next((row for row in rows if isinstance(row, dict) and str(row.get("symbol")) == "SPY"), None)
+    if not isinstance(spy_row, dict) or not spy_row.get("oosAvailable"):
+        return {"available": False, "note": "证据不足: LPPL单指数OOS验证不可用。"}
+    hit = optional_float(spy_row.get("precision15dOos"))
+    base = optional_float(spy_row.get("baseRate15dOos"))
+    hit = hit / 100 if hit is not None else None
+    base = base / 100 if base is not None else None
+    return {
+        "available": True,
+        "oosHitRate": round(hit, 3) if hit is not None else None,
+        "baseRate": round(base, 3) if base is not None else None,
+        "lift": round(hit / base, 2) if hit is not None and base else None,
+        "leadTimeDays": optional_float(spy_row.get("avgDrawdownLeadDaysWhenHit")),
+        "sampleSize": spy_row.get("oosSampleSize"),
+        "classification": "",
+    }
+
+
+def portfolio_overview_us_internal_tilt(regional_monitor: dict[str, Any] | None) -> dict[str, Any]:
+    """Surface the US-internal broad(SPY)-vs-tech(QQQ) tilt in the headline overview, so the
+    US equity band is paired with a within-US sleeve lean."""
+    if not isinstance(regional_monitor, dict) or not regional_monitor.get("available"):
+        return {"available": False}
+    regions = regional_monitor.get("regions", []) if isinstance(regional_monitor.get("regions"), list) else []
+    us = next((r for r in regions if isinstance(r, dict) and r.get("key") == "us"), None)
+    internal = us.get("internalRotation") if isinstance(us, dict) and isinstance(us.get("internalRotation"), dict) else {}
+    if not internal.get("available"):
+        return {"available": False}
+    return {
+        "available": True,
+        "tilt": internal.get("tilt"),
+        "tiltCn": internal.get("tiltCn"),
+        "rationale": internal.get("rationale"),
+    }
+
+
+def portfolio_overview_regional_tilt(regional_monitor: dict[str, Any] | None) -> dict[str, Any]:
+    """Surface the global regional rotation + active validated-factor breaches as a separate
+    dimension in the headline overview (distinct axis from the US equity exposure band)."""
+    if not isinstance(regional_monitor, dict) or not regional_monitor.get("available"):
+        return {"available": False}
+    rotation = regional_monitor.get("rotation", {}) if isinstance(regional_monitor.get("rotation"), dict) else {}
+    regions = regional_monitor.get("regions", []) if isinstance(regional_monitor.get("regions"), list) else []
+    name_by_key = {str(r.get("key")): str(r.get("nameCn") or r.get("name") or r.get("key")) for r in regions if isinstance(r, dict)}
+    breached = [
+        {"key": str(r.get("key")), "nameCn": name_by_key.get(str(r.get("key")), str(r.get("key"))),
+         "factorLabelCn": str(r["factorAlert"].get("factorLabelCn") or ""),
+         "source": str(r["factorAlert"].get("source") or "factor"),
+         "current": r["factorAlert"].get("current"), "threshold": r["factorAlert"].get("threshold"),
+         "trackRecord": str(r["factorAlert"].get("trackRecord") or "")}
+        for r in regions
+        if isinstance(r, dict) and isinstance(r.get("factorAlert"), dict)
+        and r["factorAlert"].get("available") and r["factorAlert"].get("state") == "breached"
+    ]
+    composite_breaches = [b for b in breached if b["source"] == "composite"]
+    favor = [name_by_key.get(k, k) for k in rotation.get("favorRegions", [])]
+    reduce_regions = [name_by_key.get(k, k) for k in rotation.get("reduceRegions", [])]
+    parts: list[str] = []
+    if favor:
+        parts.append("增持 " + "、".join(favor))
+    if reduce_regions:
+        parts.append("减持 " + "、".join(reduce_regions))
+    if not parts:
+        parts.append("各地区维持中性")
+    if breached:
+        parts.append(f"{len(breached)}个地区信号突破验证阈值(" + "、".join(b["nameCn"] for b in breached) + ")")
+    if composite_breaches:
+        parts.append(f"其中{len(composite_breaches)}个由已验证综合信号驱动(" + "、".join(b["nameCn"] for b in composite_breaches) + ")")
+    return {
+        "available": True,
+        "horizon": "1-3M",
+        "horizonCn": "1-3个月(地区轮动)",
+        "favorRegions": rotation.get("favorRegions", []),
+        "reduceRegions": rotation.get("reduceRegions", []),
+        "breachedRegions": breached,
+        "compositeBreachCount": len(composite_breaches),
+        "summary": "; ".join(parts) + "。",
+    }
+
+
+def build_portfolio_overview(
+    *,
+    spy_early_warning: dict[str, Any] | None,
+    equity_short_term_risk: dict[str, Any] | None,
+    global_lppl_risk: dict[str, Any] | None,
+    macro_liquidity: dict[str, Any] | None,
+    signal_validation: dict[str, Any] | None,
+    regional_monitor: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    evidence_by_id: dict[str, dict[str, Any]] = {}
+    if isinstance(signal_validation, dict) and signal_validation.get("available"):
+        evidence_by_id = {
+            str(row.get("id")): row
+            for row in signal_validation.get("composites", [])
+            if isinstance(row, dict)
+        }
+
+    rows: list[dict[str, Any]] = []
+
+    est = equity_short_term_risk if isinstance(equity_short_term_risk, dict) else {}
+    est_alloc = est.get("allocation") if isinstance(est.get("allocation"), dict) else {}
+    est_score = optional_float(est.get("score"))
+    if est_score is not None:
+        rows.append(
+            portfolio_overview_layer(
+                layer="equityShortTermRisk",
+                label="Equity Short-Term Risk",
+                label_cn="短周期股票风险",
+                horizon=str(est_alloc.get("horizon") or "1-10d"),
+                horizon_cn=str(est_alloc.get("horizonCn") or "1-10个交易日"),
+                score=est_score,
+                regime=str(est_alloc.get("regime") or ""),
+                regime_cn=str(est_alloc.get("regimeCn") or ""),
+                stance=str(est_alloc.get("hedgeAction") or est_alloc.get("stance") or ""),
+                exposure_band=est_alloc.get("exposureBandPct"),
+                evidence=portfolio_overview_evidence(evidence_by_id.get("equityShortTermRisk")),
+            )
+        )
+
+    sew = spy_early_warning if isinstance(spy_early_warning, dict) else {}
+    sew_alloc = sew.get("allocation") if isinstance(sew.get("allocation"), dict) else {}
+    sew_score = optional_float(sew.get("score"))
+    if sew_score is not None:
+        rows.append(
+            portfolio_overview_layer(
+                layer="spyEarlyWarning",
+                label="SPY Early Warning",
+                label_cn="SPY宏观预警",
+                horizon=str(sew_alloc.get("horizon") or "1-3M"),
+                horizon_cn=str(sew_alloc.get("horizonCn") or "1-3个月"),
+                score=sew_score,
+                regime=str(sew.get("regime") or ""),
+                regime_cn=str(sew.get("regimeCn") or ""),
+                stance=str(sew_alloc.get("hedgeAction") or sew_alloc.get("stance") or ""),
+                exposure_band=sew_alloc.get("exposureBandPct"),
+                evidence=portfolio_overview_evidence(evidence_by_id.get("spyEarlyWarning")),
+            )
+        )
+
+    lppl_state = global_lppl_overview_state(global_lppl_risk)
+    if lppl_state["observedIndexCount"] > 0:
+        lppl_note = ""
+        if lppl_state["alertSymbols"]:
+            lppl_note = "告警指数: " + ", ".join(lppl_state["alertSymbols"])
+            if lppl_state["minDaysToCritical"] is not None:
+                lppl_note += f"; 最近临界窗口≈{lppl_state['minDaysToCritical']:.0f}天"
+        rows.append(
+            portfolio_overview_layer(
+                layer="globalLppl",
+                label="Global LPPL Bubble Monitor",
+                label_cn="全球LPPL泡沫监测",
+                horizon="tc-window",
+                horizon_cn="临界窗口",
+                score=lppl_state["maxScore"],
+                regime=lppl_state["regime"],
+                regime_cn=lppl_state["regimeCn"],
+                stance=lppl_state["stance"],
+                exposure_band=lppl_state["band"],
+                evidence=global_lppl_overview_evidence(global_lppl_risk),
+                note=lppl_note,
+            )
+        )
+
+    macro = macro_liquidity if isinstance(macro_liquidity, dict) else {}
+    macro_score = optional_float(macro.get("score"))
+    if macro_score is not None:
+        rows.append(
+            portfolio_overview_layer(
+                layer="bhadialComposite",
+                label="Macro Conditions (nowcast)",
+                label_cn="宏观环境评分",
+                horizon="3-6M",
+                horizon_cn="3-6个月",
+                score=macro_score,
+                regime=str(macro.get("regime") or ""),
+                regime_cn=str(macro.get("regimeCn") or macro.get("regime") or ""),
+                stance="背景层: 影响久期/曲线观点,不直接给权益仓位",
+                exposure_band=None,
+                evidence=portfolio_overview_evidence(evidence_by_id.get("bhadialComposite")),
+            )
+        )
+
+    scored_rows = [row for row in rows if row.get("score") is not None]
+    if len(scored_rows) < 2:
+        return {
+            "available": False,
+            "summary": "组合总览需要至少两层可用信号。",
+            "layers": rows,
+            "conflicts": [],
+            "suggestedEquityExposureBand": None,
+        }
+
+    bands = [row["exposureBandPct"] for row in rows if row.get("exposureBandPct")]
+    suggested_band = None
+    binding_layer = None
+    if bands:
+        low = min(band[0] for band in bands)
+        high = min(band[1] for band in bands)
+        suggested_band = [round(max(0.0, low), 0), round(max(low, min(high, 110.0)), 0)]
+        for row in rows:
+            band = row.get("exposureBandPct")
+            if band and band[1] == high:
+                binding_layer = str(row.get("labelCn") or row.get("layer"))
+                break
+
+    conflicts: list[dict[str, Any]] = []
+    lppl_alerting = bool(lppl_state["alertSymbols"]) if lppl_state["observedIndexCount"] > 0 else False
+    if sew_score is not None and est_score is not None:
+        if sew_score < 60 and est_score >= 75:
+            conflicts.append(
+                {
+                    "layers": ["spyEarlyWarning", "equityShortTermRisk"],
+                    "description": f"宏观预警温和({sew_score:.0f})但短周期强告警({est_score:.0f})",
+                    "resolution": "维持核心仓位,但为未来1-2周加战术性保护(对冲或减高Beta),不必战略性减仓。",
+                }
+            )
+        if sew_score >= 60 and est_score < 40:
+            conflicts.append(
+                {
+                    "layers": ["spyEarlyWarning", "equityShortTermRisk"],
+                    "description": f"宏观预警偏高({sew_score:.0f})但短周期无压力({est_score:.0f})",
+                    "resolution": "利用市场平静期分批降低风险敞口,而非等待回撤后被动卖出。",
+                }
+            )
+    if lppl_alerting and sew_score is not None and sew_score < 40:
+        conflicts.append(
+            {
+                "layers": ["globalLppl", "spyEarlyWarning"],
+                "description": "泡沫形态告警与建设性宏观并存",
+                "resolution": "保留上行参与,用期权界定下行(领式或保护性认沽),避免直接清仓错过泡沫后段。",
+            }
+        )
+
+    if suggested_band:
+        band_text = f"建议权益仓位区间{suggested_band[0]:.0f}-{suggested_band[1]:.0f}%(常规仓位=100%)"
+        if binding_layer:
+            band_text += f", 当前约束层: {binding_layer}"
+    else:
+        band_text = "暂无可合成的仓位区间"
+    conflict_text = f"; 检测到{len(conflicts)}个跨层冲突,见冲突说明" if conflicts else "; 三个时间层无显著冲突"
+    return {
+        "available": True,
+        "asOf": str(sew.get("asOf") or est.get("asOf") or ""),
+        "method": (
+            "Combines the 1-10d tactical, 1-3M macro-warning, and LPPL tc-window layers; the suggested band "
+            "takes the most conservative layer (element-wise minimum). Evidence columns come from the weekly "
+            "walk-forward signalValidation harness; layers without OOS validation are marked 证据不足."
+        ),
+        "summary": band_text + conflict_text + "。每层命中率均为走出样本(OOS)统计,与无条件基准率对照。",
+        "layers": rows,
+        "conflicts": conflicts,
+        "suggestedEquityExposureBand": suggested_band,
+        "bindingLayer": binding_layer,
+        "regionalTilt": portfolio_overview_regional_tilt(regional_monitor),
+        "usInternalTilt": portfolio_overview_us_internal_tilt(regional_monitor),
+    }

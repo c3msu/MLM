@@ -103,6 +103,91 @@ def validate_dashboard(dashboard: dict[str, Any]) -> list[str]:
     return issues
 
 
+def validate_dashboard_warnings(dashboard: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    if not has_signal_validation_contract(dashboard.get("signalValidation")):
+        warnings.append("signal validation contract incomplete (warn-only)")
+    if not has_portfolio_overview_contract(dashboard.get("portfolioOverview")):
+        warnings.append("portfolio overview contract incomplete (warn-only)")
+    if not has_regional_monitor_contract(dashboard.get("regionalMonitor")):
+        warnings.append("regional monitor contract incomplete (warn-only)")
+    return warnings
+
+
+def has_regional_monitor_contract(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    for key in ("available", "regions", "regionOrder"):
+        if key not in payload:
+            return False
+    if not isinstance(payload.get("regions"), list):
+        return False
+    if payload.get("available"):
+        regions = payload["regions"]
+        if not regions:
+            return False
+        keys = {str(region.get("key")) for region in regions if isinstance(region, dict)}
+        # US must be a single merged region (SPY+QQQ), not split into proxies.
+        us = next((region for region in regions if isinstance(region, dict) and region.get("key") == "us"), None)
+        if us is None or len(us.get("indices") or []) < 2:
+            return False
+        sample = regions[0]
+        for field in ("key", "name", "nameCn", "indices", "aggregate"):
+            if field not in sample:
+                return False
+        agg = sample.get("aggregate")
+        if not isinstance(agg, dict) or "status" not in agg or "availableCount" not in agg:
+            return False
+        # Cross-region rotation + per-region allocation stance.
+        rotation = payload.get("rotation")
+        if not isinstance(rotation, dict) or "available" not in rotation:
+            return False
+        alloc = sample.get("allocation")
+        if not isinstance(alloc, dict) or alloc.get("stance") not in {"overweight", "neutral", "underweight"}:
+            return False
+    return True
+
+
+def has_portfolio_overview_contract(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    for key in ("available", "layers", "conflicts", "suggestedEquityExposureBand"):
+        if key not in payload:
+            return False
+    if not isinstance(payload.get("layers"), list):
+        return False
+    if payload.get("available"):
+        if len(payload["layers"]) < 2:
+            return False
+        sample = payload["layers"][0]
+        if not isinstance(sample, dict):
+            return False
+        for field in ("layer", "horizon", "score", "regimeCn", "evidence"):
+            if field not in sample:
+                return False
+    return True
+
+
+def has_signal_validation_contract(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    for key in ("available", "factors", "composites", "clusters", "effectiveWeights"):
+        if key not in payload:
+            return False
+    if not isinstance(payload.get("factors"), list) or not isinstance(payload.get("composites"), list):
+        return False
+    if payload.get("available"):
+        if not payload["factors"]:
+            return False
+        sample = payload["factors"][0]
+        if not isinstance(sample, dict):
+            return False
+        for field in ("id", "module", "oosIc3m", "baseRate", "lift", "classification"):
+            if field not in sample:
+                return False
+    return True
+
+
 def validate_health_payload(payload: dict[str, Any]) -> list[str]:
     issues: list[str] = []
     freshness = payload.get("equityRiskFreshness")
@@ -752,11 +837,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.url:
         health = load_health(args.url, timeout=args.timeout)
         issues.extend(validate_health_payload(health))
+    warnings = validate_dashboard_warnings(dashboard)
     if issues:
         print("SMOKE FAILED")
         for issue in issues:
             print(f"- {issue}")
+        for warning in warnings:
+            print(f"~ {warning}")
         return 2
+    for warning in warnings:
+        print(f"SMOKE WARN - {warning}")
     print(
         "SMOKE OK "
         f"asOf={dashboard.get('asOf')} "
