@@ -367,7 +367,7 @@ class PredictiveLensTests(unittest.TestCase):
             "sp500": price_points,
             # Three genuinely leading factors (driver-correlated for the full sample).
             "net_liquidity": [SeriesPoint(date=dates[i], value=driver[i] * 100 + 500) for i in range(count)],
-            "bank_reserves": [SeriesPoint(date=dates[i], value=driver[i] * 80 + 3000) for i in range(count)],
+            "hy_credit_preference": [SeriesPoint(date=dates[i], value=driver[i] * 0.8 + 30) for i in range(count)],
             "nfci": [SeriesPoint(date=dates[i], value=-driver[i] * 0.4 - 0.3) for i in range(count)],
             # OOS-only factor: random during calibration, predictive only afterwards —
             # calibration-only selection must EXCLUDE it.
@@ -395,7 +395,7 @@ class PredictiveLensTests(unittest.TestCase):
         self.assertTrue(lens["available"])
         selected_ids = {item["id"] for item in lens["selectedFactors"]}
         self.assertIn("fed_net_liquidity", selected_ids)
-        self.assertIn("bank_reserves", selected_ids)
+        self.assertIn("hy_credit", selected_ids)
         self.assertIn("nfci", selected_ids)
         self.assertNotIn("vix", selected_ids)
         self.assertIsNotNone(lens["latestScore"])

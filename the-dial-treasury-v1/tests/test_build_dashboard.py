@@ -818,13 +818,15 @@ class DashboardBuilderTests(unittest.TestCase):
         component_names = {component["name"] for component in dashboard["macroLiquidity"]["components"]}
         self.assertIn("13周净流动性动量", component_names)
         self.assertIn("TGA偏离度", component_names)
-        self.assertIn("ON RRP缓冲风险", component_names)
+        self.assertIn("SOFR-IORB走廊摩擦", component_names)
         self.assertIn("金融条件指数(NFCI)", component_names)
+        # 去冗余簇c1: ON RRP缓冲风险已不计入综合分(RRP已含于净流动性)
+        self.assertNotIn("ON RRP缓冲风险", component_names)
         self.assertEqual(dashboard["meta"]["bhadialCompatibility"]["sourceUrl"], "https://bhadial.com/")
         self.assertEqual(dashboard["meta"]["bhadialCompatibility"]["moduleCount"], 7)
         coverage = dashboard["meta"]["bhadialCompatibility"]["coverage"]
         self.assertEqual(coverage["totalFactors"], 47)
-        self.assertEqual(coverage["scorecardFactorCount"], 30)
+        self.assertEqual(coverage["scorecardFactorCount"], 22)
         self.assertEqual(len(coverage["modules"]), 7)
         self.assertEqual(coverage["coveredFactors"], coverage["totalFactors"])
         self.assertEqual(coverage["missingFactors"], 0)
@@ -906,6 +908,11 @@ class DashboardBuilderTests(unittest.TestCase):
             "DFF": TimeSeries("DFF", [SeriesPoint(date(2021 + i, 5, 1), 3.50) for i in range(6)]),
             "VIXCLS": TimeSeries("VIXCLS", [SeriesPoint(date(2021 + i, 5, 1), 28.0 - i) for i in range(6)]),
             "BAMLH0A0HYM2": TimeSeries("BAMLH0A0HYM2", [SeriesPoint(date(2021 + i, 5, 1), 5.5 - i * 0.2) for i in range(6)]),
+            # 2026-06-16 去冗余后 bank_reserves/onrrp 不再计分,补充存活因子数据序列以维持 >=5 observed 覆盖率门槛
+            "NFCI": TimeSeries("NFCI", [SeriesPoint(date(2021 + i, 5, 1), -0.40 + i * 0.05) for i in range(6)]),
+            "T10YIE": TimeSeries("T10YIE", [SeriesPoint(date(2021 + i, 5, 1), 2.10 + i * 0.04) for i in range(6)]),
+            "DFII5": TimeSeries("DFII5", [SeriesPoint(date(2021 + i, 5, 1), 1.10 + i * 0.10) for i in range(6)]),
+            "DFII10": TimeSeries("DFII10", [SeriesPoint(date(2021 + i, 5, 1), 1.40 + i * 0.09) for i in range(6)]),
         }
 
         dashboard = build_dashboard_from_inputs(
@@ -921,7 +928,7 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(macro_liquidity["sourceUrl"], "https://bhadial.com/dashboard")
         self.assertEqual(macro_liquidity["moduleCount"], 7)
         self.assertEqual(macro_liquidity["totalFactorCount"], 47)
-        self.assertEqual(macro_liquidity["scoredFactorCount"], 30)
+        self.assertEqual(macro_liquidity["scoredFactorCount"], 22)
         self.assertIn("Bhadial Conditions Score", macro_liquidity["method"])
         self.assertIn("module weights", macro_liquidity["method"])
         self.assertIn("EMA(5)", macro_liquidity["method"])
@@ -933,13 +940,17 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertIn("rawScore", funding_module)
         self.assertIn("ema5Score", funding_module)
         self.assertAlmostEqual(sum(module["weight"] for module in macro_liquidity["modules"]), 1.0, places=3)
-        self.assertGreaterEqual(len(macro_liquidity["components"]), 30)
+        self.assertGreaterEqual(len(macro_liquidity["components"]), 22)
         component_names = {item["name"] for item in macro_liquidity["components"]}
-        self.assertIn("银行准备金", component_names)
+        self.assertIn("13周净流动性动量", component_names)
         self.assertIn("净流动性", component_names)
         self.assertIn("TGA偏离度", component_names)
-        self.assertIn("SOFR-OBFR回购摩擦", component_names)
+        self.assertIn("SOFR-IORB走廊摩擦", component_names)
         self.assertIn("10年盈亏平衡通胀", component_names)
+        # 去冗余: 这些因子已不计入综合分(仍作原始指标展示)
+        self.assertNotIn("银行准备金", component_names)
+        self.assertNotIn("SOFR-OBFR回购摩擦", component_names)
+        self.assertNotIn("银行股相对S&P500", component_names)
         self.assertTrue(macro_liquidity["drivers"])
         self.assertTrue(all("score" in item and "weight" in item for item in macro_liquidity["components"]))
         self.assertIn(macro_liquidity["constraint"]["name"], component_names)

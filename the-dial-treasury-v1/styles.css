@@ -5056,6 +5056,31 @@ body.modal-open {
   gap: 12px;
 }
 
+/* 2026-06-16 精简: 重型诊断(各指数LPPL网格/因子OOS验证/历史曲线/跨地区分散度)折叠进 <details>,
+   默认仅显示精简essentials(地区标签/泡沫聚合/价格因子条/告警/配置/轮动)。 */
+.region-advanced {
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  background: var(--panel-2);
+}
+
+.region-advanced-summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 9px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--neutral);
+  user-select: none;
+}
+
+.region-advanced-summary::-webkit-details-marker { display: none; }
+.region-advanced-summary::before { content: "▸ "; color: var(--faint); }
+.region-advanced[open] > .region-advanced-summary::before { content: "▾ "; }
+.region-advanced-summary:hover { color: var(--ink); }
+.region-advanced[open] > .region-advanced-summary { border-bottom: 1px solid var(--line-soft); }
+.region-advanced > div:not(:empty) { margin: 12px; }
+
 .regional-monitor-tabs {
   display: flex;
   flex-wrap: wrap;

@@ -90,8 +90,8 @@ BHADIAL_MODULE_NAMES = ["Liquidity", "Funding", "Treasury", "Rates", "Credit", "
 BHADIAL_FACTOR_COVERAGE: list[dict[str, Any]] = [
     {
         "module": "Liquidity",
-        "scored": 5,
-        "display": 3,
+        "scored": 3,
+        "display": 5,
         "factors": [
             {"name": "Fed Net Liquidity", "status": "derived", "local": "净流动性", "source": "WALCL - WTREGEN - RRPONTSYD"},
             {"name": "Bank Reserves", "status": "public", "local": "银行准备金", "source": "FRED WRESBAL"},
@@ -105,8 +105,8 @@ BHADIAL_FACTOR_COVERAGE: list[dict[str, Any]] = [
     },
     {
         "module": "Funding",
-        "scored": 6,
-        "display": 6,
+        "scored": 3,
+        "display": 9,
         "factors": [
             {"name": "Collateral/Repo Friction", "status": "derived", "local": "SOFR-OBFR回购摩擦", "source": "FRED SOFR - OBFR"},
             {"name": "Corridor Friction 1", "status": "derived", "local": "SOFR-IORB走廊摩擦", "source": "FRED SOFR - IORB"},
@@ -151,8 +151,8 @@ BHADIAL_FACTOR_COVERAGE: list[dict[str, Any]] = [
     },
     {
         "module": "Credit",
-        "scored": 4,
-        "display": 0,
+        "scored": 2,
+        "display": 2,
         "factors": [
             {"name": "NFCI", "status": "public", "local": "金融条件指数(NFCI)", "source": "FRED NFCI"},
             {"name": "HY Credit", "status": "proxy", "local": "HY信用偏好(HY/UST)", "source": "FRED ICE HY TR / DGS10 price proxy"},
@@ -162,8 +162,8 @@ BHADIAL_FACTOR_COVERAGE: list[dict[str, Any]] = [
     },
     {
         "module": "Risk",
-        "scored": 4,
-        "display": 1,
+        "scored": 3,
+        "display": 2,
         "factors": [
             {"name": "VIX", "status": "public", "local": "VIX", "source": "FRED VIXCLS"},
             {"name": "VIX Term Structure", "status": "derived", "local": "VIX期限结构", "source": "FRED VIXCLS / VXVCLS"},
@@ -201,25 +201,26 @@ BHADIAL_CONDITION_MODULES: list[dict[str, Any]] = [
     {
         "name": "Liquidity",
         "nameCn": "流动性",
+        # 2026-06-16 去冗余簇c1: 删 bank_reserves(与净流动性近substitute, OOS IC 0.26≈净流动性0.22)
+        # 与 onrrp_near_zero_risk(滞后, 且RRP已含于净流动性公式内); 权重并入 fed_net_liquidity(0.30→0.60)。
+        # bank_reserves/onrrp 原始值仍在指标表展示, 仅不再计入综合分。
         "factors": [
-            {"id": "fed_net_liquidity", "publicationLagDays": 2, "remoteName": "Fed Net Liquidity", "name": "净流动性", "weight": 0.30, "scoreKey": "net_liquidity", "direction": "higher_better", "method": "level_percentile", "valueKey": "net_liquidity_trillions", "format": "usd_t", "source": "FRED WALCL - WTREGEN - RRPONTSYD"},
-            {"id": "bank_reserves", "publicationLagDays": 2, "remoteName": "Bank Reserves", "name": "银行准备金", "weight": 0.20, "scoreKey": "bank_reserves", "direction": "higher_better", "method": "level_percentile", "valueKey": "bank_reserves_trillions", "format": "usd_t", "source": "FRED WRESBAL"},
+            {"id": "fed_net_liquidity", "publicationLagDays": 2, "remoteName": "Fed Net Liquidity", "name": "净流动性", "weight": 0.60, "scoreKey": "net_liquidity", "direction": "higher_better", "method": "level_percentile", "valueKey": "net_liquidity_trillions", "format": "usd_t", "source": "FRED WALCL - WTREGEN - RRPONTSYD"},
             {"id": "delta_net_liq_13w", "publicationLagDays": 2, "remoteName": "Net Liquidity Momentum (13W)", "name": "13周净流动性动量", "weight": 0.25, "scoreKey": "net_liquidity_13w_momentum", "direction": "higher_better", "method": "level_percentile", "valueKey": "net_liquidity_13w_change_trillions", "format": "signed_usd_t", "source": "Net liquidity 13W change"},
             {"id": "tga_dev_signed", "publicationLagDays": 2, "remoteName": "TGA Deviation", "name": "TGA偏离度", "weight": 0.15, "scoreKey": "tga_deviation", "direction": "lower_better", "method": "level_percentile", "valueKey": "tga_deviation_trillions", "format": "signed_usd_t", "source": "FRED WTREGEN - 52W median"},
-            {"id": "onrrp_near_zero_risk", "remoteName": "ON RRP Buffer Risk", "name": "ON RRP缓冲风险", "weight": 0.10, "scoreKey": "onrrp_buffer_risk", "direction": "lower_better", "method": "risk_signal", "valueKey": "onrrp_buffer_risk", "format": "risk", "source": "FRED RRPONTSYD bounded risk"},
         ],
     },
     {
         "name": "Funding",
         "nameCn": "融资",
         "smooth": "ema5",
+        # 2026-06-16 去冗余簇c2(3个SOFR走廊摩擦互为近substitute): 保留最规范的 SOFR-IORB 走廊
+        # (corridor_friction_1, OOS IC 0.37), 删 corridor_friction_2 与 collateral_friction 并并入其权重(→0.66);
+        # 另删 effr_iorb(簇c1成员, 分类none/无前瞻, 读数11与同模块其余~95严重背离=噪声), 其权重按比例归一。
         "factors": [
-            {"id": "collateral_friction", "remoteName": "Collateral/Repo Friction", "name": "SOFR-OBFR回购摩擦", "weight": 0.18, "scoreKey": "collateral_repo_friction_deviation", "displayKey": "collateral_repo_friction", "direction": "lower_better", "method": "deviation", "valueKey": "sofr_obfr_spread_bp", "format": "signed_bp", "source": "FRED SOFR - OBFR"},
-            {"id": "corridor_friction_1", "remoteName": "Corridor Friction 1", "name": "SOFR-IORB走廊摩擦", "weight": 0.22, "scoreKey": "corridor_sofr_iorb_deviation", "displayKey": "corridor_sofr_iorb", "direction": "lower_better", "method": "deviation", "valueKey": "sofr_iorb_spread_bp", "format": "signed_bp", "source": "FRED SOFR - IORB"},
-            {"id": "corridor_friction_2", "remoteName": "Corridor Friction 2", "name": "SOFR-ON RRP走廊摩擦", "weight": 0.18, "scoreKey": "corridor_sofr_rrp_deviation", "displayKey": "corridor_sofr_rrp", "direction": "lower_better", "method": "deviation", "valueKey": "sofr_rrp_award_spread_bp", "format": "signed_bp", "source": "FRED SOFR - RRPONTSYAWARD"},
-            {"id": "effr_iorb", "remoteName": "EFFR-IORB Spread", "name": "EFFR-IORB利差", "weight": 0.12, "scoreKey": "effr_iorb_spread", "direction": "lower_better", "method": "level_percentile", "valueKey": "effr_iorb_spread_bp", "format": "signed_bp", "source": "FRED DFF - IORB"},
-            {"id": "cp_tbill_spread", "remoteName": "CP-TBill Spread", "name": "商票-TBill利差", "weight": 0.20, "scoreKey": "cp_tbill_spread", "direction": "lower_better", "method": "level_percentile", "valueKey": "cp_tbill_spread_bp", "format": "signed_bp", "source": "FRED DCPF3M - DTB3"},
-            {"id": "fragmentation_21d", "remoteName": "Funding Fragmentation (21D)", "name": "资金分裂度(21D)", "weight": 0.10, "scoreKey": "funding_fragmentation", "direction": "lower_better", "method": "shock_only", "valueKey": "funding_fragmentation_21d", "format": "number", "source": "SOFR corridor dispersion EMA(21)"},
+            {"id": "corridor_friction_1", "remoteName": "Corridor Friction 1", "name": "SOFR-IORB走廊摩擦", "weight": 0.66, "scoreKey": "corridor_sofr_iorb_deviation", "displayKey": "corridor_sofr_iorb", "direction": "lower_better", "method": "deviation", "valueKey": "sofr_iorb_spread_bp", "format": "signed_bp", "source": "FRED SOFR - IORB"},
+            {"id": "cp_tbill_spread", "remoteName": "CP-TBill Spread", "name": "商票-TBill利差", "weight": 0.23, "scoreKey": "cp_tbill_spread", "direction": "lower_better", "method": "level_percentile", "valueKey": "cp_tbill_spread_bp", "format": "signed_bp", "source": "FRED DCPF3M - DTB3"},
+            {"id": "fragmentation_21d", "remoteName": "Funding Fragmentation (21D)", "name": "资金分裂度(21D)", "weight": 0.11, "scoreKey": "funding_fragmentation", "direction": "lower_better", "method": "shock_only", "valueKey": "funding_fragmentation_21d", "format": "number", "source": "SOFR corridor dispersion EMA(21)"},
         ],
     },
     {
@@ -234,6 +235,9 @@ BHADIAL_CONDITION_MODULES: list[dict[str, Any]] = [
     {
         "name": "Rates",
         "nameCn": "利率",
+        # 2026-06-16 簇c4(real_rate_level 与 real_curve, corr>0.8)经评审【保留两者】: 二者分别为真实利率
+        # "水平"与"曲线斜率",属不同经济概念,>0.8相关为本轮加息周期的体制性巧合而非结构冗余;且 real_curve
+        # 是最强领先利率因子(OOS IC 0.53),强行合并会丢弃斜率前瞻信息。故仅去c1/c2/c3真substitute簇。
         "factors": [
             {"id": "real_rate_level", "remoteName": "Real Rate Level", "name": "真实利率水平", "weight": 0.50, "scoreKey": "real_rate_level", "direction": "lower_better", "method": "level_percentile", "valueKey": "real_rate_level", "format": "percent", "source": "60% DFII5 + 40% DFII10"},
             {"id": "real_curve", "remoteName": "Real Curve (10Y-5Y)", "name": "真实曲线(10Y-5Y)", "weight": 0.15, "scoreKey": "real_curve", "direction": "higher_better", "method": "level_percentile", "valueKey": "real_curve_10y5y_bp", "format": "signed_bp", "source": "FRED DFII10 - DFII5"},
@@ -243,21 +247,23 @@ BHADIAL_CONDITION_MODULES: list[dict[str, Any]] = [
     {
         "name": "Credit",
         "nameCn": "信用",
+        # 2026-06-16 去冗余簇c3: HY与IG信用偏好近substitute(且共用DGS10价格代理), 保留更具周期敏感性的
+        # HY(hy_credit)并并入IG权重(0.25→0.50); 另删 kre_spy(银行股相对强弱, lift=0/滞后, 读数25=噪声),
+        # nfci 权重补足至0.50。kre_spy/ig 原始值仍在指标表展示, 仅不计入综合分。
         "factors": [
-            {"id": "nfci", "publicationLagDays": 7, "remoteName": "NFCI", "name": "金融条件指数(NFCI)", "weight": 0.40, "scoreKey": "nfci", "direction": "lower_better", "method": "level_percentile", "valueKey": "nfci", "format": "signed_number", "source": "FRED NFCI"},
-            {"id": "hy_credit", "remoteName": "HY Credit", "name": "HY信用偏好(HY/UST)", "weight": 0.25, "scoreKey": "hy_credit_preference", "direction": "higher_better", "method": "level_percentile", "valueKey": "hy_credit_preference", "format": "number", "source": "FRED HY total-return / DGS10 price proxy"},
-            {"id": "ig_credit", "remoteName": "IG Credit", "name": "IG信用偏好(IG/UST)", "weight": 0.15, "scoreKey": "ig_credit_preference", "direction": "higher_better", "method": "level_percentile", "valueKey": "ig_credit_preference", "format": "number", "source": "FRED IG total-return / DGS10 price proxy"},
-            {"id": "kre_spy", "remoteName": "Regional Banks vs SPY", "name": "银行股相对S&P500", "weight": 0.20, "scoreKey": "regional_bank_vs_market", "direction": "higher_better", "method": "level_percentile", "valueKey": "regional_bank_vs_market", "format": "number", "source": "FRED NASDAQBANK / SP500 proxy"},
+            {"id": "nfci", "publicationLagDays": 7, "remoteName": "NFCI", "name": "金融条件指数(NFCI)", "weight": 0.50, "scoreKey": "nfci", "direction": "lower_better", "method": "level_percentile", "valueKey": "nfci", "format": "signed_number", "source": "FRED NFCI"},
+            {"id": "hy_credit", "remoteName": "HY Credit", "name": "HY信用偏好(HY/UST)", "weight": 0.50, "scoreKey": "hy_credit_preference", "direction": "higher_better", "method": "level_percentile", "valueKey": "hy_credit_preference", "format": "number", "source": "FRED HY total-return / DGS10 price proxy"},
         ],
     },
     {
         "name": "Risk",
         "nameCn": "风险",
+        # 2026-06-16 删 high_beta_pref(高Beta偏好, 滞后/lift微, 读数99在回撤前易高估风险偏好而掩盖VIX抬升);
+        # 权重按比例并入其余三项(vix 0.30→0.375, vix_term 0.25→0.3125, risk_vs_safe 0.25→0.3125)。
         "factors": [
-            {"id": "vix", "remoteName": "VIX", "name": "VIX", "weight": 0.30, "scoreKey": "vix", "direction": "lower_better", "method": "level_percentile", "valueKey": "vix", "format": "number", "source": "FRED VIXCLS"},
-            {"id": "vix_term_structure", "remoteName": "VIX Term Structure", "name": "VIX期限结构", "weight": 0.25, "scoreKey": "vix_term_structure", "direction": "lower_better", "method": "level_percentile", "valueKey": "vix_term_structure", "format": "number", "source": "FRED VIXCLS / VXVCLS"},
-            {"id": "risk_vs_safe", "remoteName": "Risk vs Safe", "name": "风险资产/美债代理", "weight": 0.25, "scoreKey": "risk_vs_safe", "direction": "higher_better", "method": "level_percentile", "valueKey": "risk_vs_safe", "format": "number", "source": "FRED SP500 / DGS10 price proxy"},
-            {"id": "high_beta_pref", "remoteName": "High-Beta Preference", "name": "高Beta偏好(NDX/US500)", "weight": 0.20, "scoreKey": "high_beta_preference", "direction": "higher_better", "method": "level_percentile", "valueKey": "high_beta_preference", "format": "number", "source": "FRED NASDAQXNDX / NASDAQNQUS500LCT"},
+            {"id": "vix", "remoteName": "VIX", "name": "VIX", "weight": 0.375, "scoreKey": "vix", "direction": "lower_better", "method": "level_percentile", "valueKey": "vix", "format": "number", "source": "FRED VIXCLS"},
+            {"id": "vix_term_structure", "remoteName": "VIX Term Structure", "name": "VIX期限结构", "weight": 0.3125, "scoreKey": "vix_term_structure", "direction": "lower_better", "method": "level_percentile", "valueKey": "vix_term_structure", "format": "number", "source": "FRED VIXCLS / VXVCLS"},
+            {"id": "risk_vs_safe", "remoteName": "Risk vs Safe", "name": "风险资产/美债代理", "weight": 0.3125, "scoreKey": "risk_vs_safe", "direction": "higher_better", "method": "level_percentile", "valueKey": "risk_vs_safe", "format": "number", "source": "FRED SP500 / DGS10 price proxy"},
         ],
     },
     {
@@ -279,6 +285,13 @@ BHADIAL_CONDITION_SERIES_KEYS = sorted(
         for factor in module["factors"]
     }
 )
+# 实际计入综合分的因子本地名(唯一真相): 去冗余后=22。覆盖率面板的 inScorecard 据此判定,
+# 被剔除的因子仍作为原始指标展示(display)但 inScorecard=False。
+BHADIAL_SCORED_LOCAL_NAMES = {
+    str(factor["name"])
+    for module in BHADIAL_CONDITION_MODULES
+    for factor in module["factors"]
+}
 
 FRED_SERIES = [
     "DFII5",
@@ -351,6 +364,10 @@ EQUITY_RISK_SYMBOLS: dict[str, str] = {
 }
 EQUITY_RISK_CORE_SYMBOLS = {"SPY", "QQQ", "SMH", "XLK", "TLT", "RSP", "IWM"}
 EQUITY_RISK_HOT_STOCKS = ["NVDA", "AVGO", "AMD", "TSLA", "META", "MSFT", "AAPL", "AMZN", "GOOGL"]
+# 2026-06-16 评审结论: 这三项(optionOI=0/audit-only, eventRisk 0.01, macroOverlay 0.03)并非"冗余/噪声",
+# 而是OOS校准时就刻意保留的低权重"上下文"项, 且高风险regime边界(score>=75)是在含这些项的标度上经OOS审计
+# 锚定的。实测将其归零会把4个"无催化确认"的良性情景推过75(误报回归), 故【保留原权重】, 不在本次精简中动它们;
+# 真正的去噪在宏观综合分(去冗余簇c1/c2/c3 + effr_iorb/kre_spy/high_beta噪声)。如需移除须重跑equity OOS校准。
 EQUITY_RISK_COMPONENT_WEIGHTS: dict[str, float] = {
     "volTargetPressure": 0.22,
     "qqqTltRotation": 0.14,
@@ -2917,7 +2934,7 @@ def build_macro_liquidity_score(ind: dict[str, Any]) -> dict[str, Any]:
         "score": score,
         "regime": macro_liquidity_regime(score),
         "bias": "supportive" if score >= 55 else "restrictive" if score <= 45 else "neutral",
-        "method": "Bhadial Conditions Score-compatible 30-factor, 7-module 5Y historical percentile composite; module weights follow the public factor-coverage/overlap method; Funding uses EMA(5).",
+        "method": "Bhadial Conditions Score-compatible 22-factor (redundancy-deduplicated from 30; 2026-06-16), 7-module 5Y historical percentile composite; module weights follow the public factor-coverage/overlap method; Funding uses EMA(5).",
         "sourceUrl": BHADIAL_SCORE_SOURCE_URL,
         "moduleCount": len(BHADIAL_CONDITION_MODULES),
         "totalFactorCount": sum(int(module["scored"]) + int(module["display"]) for module in BHADIAL_FACTOR_COVERAGE),
@@ -3376,7 +3393,7 @@ def build_macro_liquidity_equity_lead(ind: dict[str, Any]) -> dict[str, Any]:
     return {
         "available": True,
         "title": "宏观环境评分 vs S&P 500 · 5Y Lead Study",
-        "method": "Monthly 5Y sample; macro conditions replay the same Bhadial-compatible 30-factor, 7-module composite and compare it with FRED S&P 500 price-index forward returns.",
+        "method": "Monthly 5Y sample; macro conditions replay the same Bhadial-compatible 22-factor, 7-module composite and compare it with FRED S&P 500 price-index forward returns.",
         "asOf": latest_spx.date.isoformat(),
         "observationCount": len(rows),
         "correlations": {
@@ -3443,14 +3460,14 @@ SPY_WARNING_COMPONENT_SLEEVES: list[dict[str, Any]] = [
         "label": "流动性压力",
         "weight": 0.16,
         "weightBasis": "领先(OOS IC 3M +0.38): Fed净流动性/准备金领先股市数周; 2026-06-13上调0.10→0.16",
-        "componentIds": ["fed_net_liquidity", "bank_reserves", "delta_net_liq_13w", "tga_dev_signed", "onrrp_near_zero_risk"],
+        "componentIds": ["fed_net_liquidity", "delta_net_liq_13w", "tga_dev_signed"],
     },
     {
         "key": "fundingStress",
         "label": "融资压力",
         "weight": 0.14,
         "weightBasis": "最强领先(OOS IC 3M +0.41, lift 1.11): 融资市场先于股市收紧; 2026-06-13上调0.10→0.14",
-        "componentIds": ["collateral_friction", "corridor_friction_1", "corridor_friction_2", "effr_iorb", "cp_tbill_spread", "fragmentation_21d"],
+        "componentIds": ["corridor_friction_1", "cp_tbill_spread", "fragmentation_21d"],
     },
     {
         "key": "ratesCurveStress",
@@ -3464,7 +3481,7 @@ SPY_WARNING_COMPONENT_SLEEVES: list[dict[str, Any]] = [
         "label": "信用/波动压力",
         "weight": 0.15,
         "weightBasis": "同步-滞后(OOS IC 3M -0.55, 反向): VIX/OAS在回撤中后飙升而非之前; 2026-06-13下调0.25→0.15",
-        "componentIds": ["nfci", "hy_credit", "ig_credit", "kre_spy", "vix", "vix_term_structure", "risk_vs_safe", "high_beta_pref"],
+        "componentIds": ["nfci", "hy_credit", "vix", "vix_term_structure", "risk_vs_safe"],
     },
     {
         "key": "externalShock",

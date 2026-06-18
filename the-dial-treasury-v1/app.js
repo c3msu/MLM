@@ -52,9 +52,9 @@ const DEFAULT_DATA = {
     bias: "restrictive",
     sourceUrl: "https://bhadial.com/dashboard",
     moduleCount: 7,
-    scoredFactorCount: 30,
-    method: "Bhadial Conditions Score-compatible 30-factor, 7-module 5Y historical percentile composite; Funding uses EMA(5).",
-    summary: "偏紧: 等待 data/dashboard.json 后显示实时 30 因子模块评分。",
+    scoredFactorCount: 22,
+    method: "Bhadial Conditions Score-compatible 22-factor, 7-module 5Y historical percentile composite; Funding uses EMA(5).",
+    summary: "偏紧: 等待 data/dashboard.json 后显示实时 22 因子模块评分。",
     constraint: { name: "净流动性", value: "$5.93T", contribution: -8.14, direction: "restrictive" },
     offset: { name: "SOFR-EFFR压力", value: "-11bp", contribution: 5.88, direction: "supportive" },
     balance: [
