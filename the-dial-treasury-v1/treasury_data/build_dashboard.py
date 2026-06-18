@@ -139,8 +139,8 @@ BHADIAL_FACTOR_COVERAGE: list[dict[str, Any]] = [
     },
     {
         "module": "Rates",
-        "scored": 3,
-        "display": 2,
+        "scored": 2,
+        "display": 3,
         "factors": [
             {"name": "Real Rate Level", "status": "derived", "local": "真实利率水平", "source": "60% DFII5 + 40% DFII10"},
             {"name": "Real Curve (10Y-5Y)", "status": "derived", "local": "真实曲线(10Y-5Y)", "source": "FRED DFII10 - DFII5"},
@@ -235,12 +235,12 @@ BHADIAL_CONDITION_MODULES: list[dict[str, Any]] = [
     {
         "name": "Rates",
         "nameCn": "利率",
-        # 2026-06-16 簇c4(real_rate_level 与 real_curve, corr>0.8)经评审【保留两者】: 二者分别为真实利率
-        # "水平"与"曲线斜率",属不同经济概念,>0.8相关为本轮加息周期的体制性巧合而非结构冗余;且 real_curve
-        # 是最强领先利率因子(OOS IC 0.53),强行合并会丢弃斜率前瞻信息。故仅去c1/c2/c3真substitute簇。
+        # 2026-06-18 去冗余簇c4: 仅留 real_curve(真实曲线斜率, 最强领先利率因子 OOS IC 0.53),
+        # 删 real_rate_level(真实利率水平, OOS IC 0.25/1M -0.05 较弱)并并入其权重(0.15→0.65)。
+        # 取舍: 牺牲真实利率"水平"的nowcast描述力, 换取最强前瞻斜率信号(符合系统前瞻预测性目标);
+        # real_rate_level 原始值仍在指标表展示, 仅不计入综合分。
         "factors": [
-            {"id": "real_rate_level", "remoteName": "Real Rate Level", "name": "真实利率水平", "weight": 0.50, "scoreKey": "real_rate_level", "direction": "lower_better", "method": "level_percentile", "valueKey": "real_rate_level", "format": "percent", "source": "60% DFII5 + 40% DFII10"},
-            {"id": "real_curve", "remoteName": "Real Curve (10Y-5Y)", "name": "真实曲线(10Y-5Y)", "weight": 0.15, "scoreKey": "real_curve", "direction": "higher_better", "method": "level_percentile", "valueKey": "real_curve_10y5y_bp", "format": "signed_bp", "source": "FRED DFII10 - DFII5"},
+            {"id": "real_curve", "remoteName": "Real Curve (10Y-5Y)", "name": "真实曲线(10Y-5Y)", "weight": 0.65, "scoreKey": "real_curve", "direction": "higher_better", "method": "level_percentile", "valueKey": "real_curve_10y5y_bp", "format": "signed_bp", "source": "FRED DFII10 - DFII5"},
             {"id": "t10yie", "remoteName": "10Y Breakeven", "name": "10年盈亏平衡通胀", "weight": 0.35, "scoreKey": "breakeven_target_distance", "direction": "lower_better", "method": "target_distance", "target": BHADIAL_BREAKEVEN_TARGET, "valueKey": "breakeven_10y", "format": "percent", "source": "FRED T10YIE vs 2.3% anchor"},
         ],
     },
@@ -2934,7 +2934,7 @@ def build_macro_liquidity_score(ind: dict[str, Any]) -> dict[str, Any]:
         "score": score,
         "regime": macro_liquidity_regime(score),
         "bias": "supportive" if score >= 55 else "restrictive" if score <= 45 else "neutral",
-        "method": "Bhadial Conditions Score-compatible 22-factor (redundancy-deduplicated from 30; 2026-06-16), 7-module 5Y historical percentile composite; module weights follow the public factor-coverage/overlap method; Funding uses EMA(5).",
+        "method": "Bhadial Conditions Score-compatible 21-factor (redundancy-deduplicated from 30; 2026-06), 7-module 5Y historical percentile composite; module weights follow the public factor-coverage/overlap method; Funding uses EMA(5).",
         "sourceUrl": BHADIAL_SCORE_SOURCE_URL,
         "moduleCount": len(BHADIAL_CONDITION_MODULES),
         "totalFactorCount": sum(int(module["scored"]) + int(module["display"]) for module in BHADIAL_FACTOR_COVERAGE),
@@ -3393,7 +3393,7 @@ def build_macro_liquidity_equity_lead(ind: dict[str, Any]) -> dict[str, Any]:
     return {
         "available": True,
         "title": "宏观环境评分 vs S&P 500 · 5Y Lead Study",
-        "method": "Monthly 5Y sample; macro conditions replay the same Bhadial-compatible 22-factor, 7-module composite and compare it with FRED S&P 500 price-index forward returns.",
+        "method": "Monthly 5Y sample; macro conditions replay the same Bhadial-compatible 21-factor, 7-module composite and compare it with FRED S&P 500 price-index forward returns.",
         "asOf": latest_spx.date.isoformat(),
         "observationCount": len(rows),
         "correlations": {
@@ -3474,7 +3474,7 @@ SPY_WARNING_COMPONENT_SLEEVES: list[dict[str, Any]] = [
         "label": "利率/曲线压力",
         "weight": 0.20,
         "weightBasis": "3M维度领先(OOS IC 3M +0.39); 权重维持0.20",
-        "componentIds": ["dgs30_dgs10", "dgs10_vol_21d", "curve_curvature_abs", "real_rate_level", "real_curve", "t10yie"],
+        "componentIds": ["dgs30_dgs10", "dgs10_vol_21d", "curve_curvature_abs", "real_curve", "t10yie"],
     },
     {
         "key": "creditVolStress",
@@ -11133,10 +11133,15 @@ def build_bhadial_predictive_lens(
         signal_values: list[float | None] = [point.value for point in calibration]
         ic_1m = spearman_ic(signal_values, [prices_sorted.forward_return_pct(point.date, days=30) for point in calibration])
         ic_3m = spearman_ic(signal_values, [prices_sorted.forward_return_pct(point.date, days=91) for point in calibration])
-        best_ic = max((value for value in (ic_1m, ic_3m) if value is not None), default=None)
-        if best_ic is None or best_ic < min_calibration_ic:
+        # 2026-06-18: 要求 1M 与 3M 校准段 IC 同时达标(取 min,而非之前的 max 取优)。
+        # 旧逻辑只需单一horizon偶然相关即入选,导致选入同步/滞后因子(VIX/油气冲击),
+        # 样本外 IC 反转至 -0.49。改为多horizon一致性筛选以降低过拟合。
+        if ic_1m is None or ic_3m is None:
             continue
-        selected.append({"id": factor_id, "calibrationIc": round(best_ic, 3)})
+        consistent_ic = min(ic_1m, ic_3m)
+        if consistent_ic < min_calibration_ic:
+            continue
+        selected.append({"id": factor_id, "calibrationIc": round(consistent_ic, 3)})
     if len(selected) < min_factors:
         return {
             "available": False,
@@ -11168,9 +11173,9 @@ def build_bhadial_predictive_lens(
     return {
         "available": bool(points),
         "method": (
-            "Leading factors chosen on the calibration slice only (forward IC >= "
-            f"{min_calibration_ic:.2f}), weighted by redundancy-adjusted effective weights, "
-            "replayed with per-factor publication lags."
+            "Leading factors chosen on the calibration slice only, requiring BOTH 1M and 3M "
+            f"forward IC >= {min_calibration_ic:.2f} (multi-horizon consistency, not best-of), "
+            "weighted by redundancy-adjusted effective weights, replayed with per-factor publication lags."
         ),
         "selectedFactors": selected,
         "latestScore": latest_score,

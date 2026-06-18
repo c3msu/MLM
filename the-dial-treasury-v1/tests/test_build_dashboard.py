@@ -391,7 +391,7 @@ class DashboardBuilderTests(unittest.TestCase):
                 {"id": "bank_reserves", "module": "Liquidity", "name": "银行准备金", "score": 17.0, "value": "$3.07T"},
                 {"id": "cp_tbill_spread", "module": "Funding", "name": "商票-TBill利差", "score": 28.0, "value": "+15bp"},
                 {"id": "dgs30_dgs10", "module": "Treasury", "name": "30Y-10Y期限溢价", "score": 5.0, "value": "52bp"},
-                {"id": "real_rate_level", "module": "Rates", "name": "真实利率水平", "score": 29.0, "value": "1.79%"},
+                {"id": "real_curve", "module": "Rates", "name": "真实曲线(10Y-5Y)", "score": 29.0, "value": "-12bp"},
                 {"id": "nfci", "module": "Credit", "name": "金融条件指数(NFCI)", "score": 74.0, "value": "-0.51"},
                 {"id": "vix", "module": "Risk", "name": "VIX", "score": 77.0, "value": "15.32"},
                 {"id": "dxy", "module": "External", "name": "美元广义指数", "score": 74.0, "value": "118.88"},
@@ -826,7 +826,7 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(dashboard["meta"]["bhadialCompatibility"]["moduleCount"], 7)
         coverage = dashboard["meta"]["bhadialCompatibility"]["coverage"]
         self.assertEqual(coverage["totalFactors"], 47)
-        self.assertEqual(coverage["scorecardFactorCount"], 22)
+        self.assertEqual(coverage["scorecardFactorCount"], 21)
         self.assertEqual(len(coverage["modules"]), 7)
         self.assertEqual(coverage["coveredFactors"], coverage["totalFactors"])
         self.assertEqual(coverage["missingFactors"], 0)
@@ -928,7 +928,7 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(macro_liquidity["sourceUrl"], "https://bhadial.com/dashboard")
         self.assertEqual(macro_liquidity["moduleCount"], 7)
         self.assertEqual(macro_liquidity["totalFactorCount"], 47)
-        self.assertEqual(macro_liquidity["scoredFactorCount"], 22)
+        self.assertEqual(macro_liquidity["scoredFactorCount"], 21)
         self.assertIn("Bhadial Conditions Score", macro_liquidity["method"])
         self.assertIn("module weights", macro_liquidity["method"])
         self.assertIn("EMA(5)", macro_liquidity["method"])
@@ -940,17 +940,19 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertIn("rawScore", funding_module)
         self.assertIn("ema5Score", funding_module)
         self.assertAlmostEqual(sum(module["weight"] for module in macro_liquidity["modules"]), 1.0, places=3)
-        self.assertGreaterEqual(len(macro_liquidity["components"]), 22)
+        self.assertGreaterEqual(len(macro_liquidity["components"]), 21)
         component_names = {item["name"] for item in macro_liquidity["components"]}
         self.assertIn("13周净流动性动量", component_names)
         self.assertIn("净流动性", component_names)
         self.assertIn("TGA偏离度", component_names)
         self.assertIn("SOFR-IORB走廊摩擦", component_names)
         self.assertIn("10年盈亏平衡通胀", component_names)
+        self.assertIn("真实曲线(10Y-5Y)", component_names)
         # 去冗余: 这些因子已不计入综合分(仍作原始指标展示)
         self.assertNotIn("银行准备金", component_names)
         self.assertNotIn("SOFR-OBFR回购摩擦", component_names)
         self.assertNotIn("银行股相对S&P500", component_names)
+        self.assertNotIn("真实利率水平", component_names)
         self.assertTrue(macro_liquidity["drivers"])
         self.assertTrue(all("score" in item and "weight" in item for item in macro_liquidity["components"]))
         self.assertIn(macro_liquidity["constraint"]["name"], component_names)

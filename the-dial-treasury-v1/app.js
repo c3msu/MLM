@@ -52,9 +52,9 @@ const DEFAULT_DATA = {
     bias: "restrictive",
     sourceUrl: "https://bhadial.com/dashboard",
     moduleCount: 7,
-    scoredFactorCount: 22,
-    method: "Bhadial Conditions Score-compatible 22-factor, 7-module 5Y historical percentile composite; Funding uses EMA(5).",
-    summary: "偏紧: 等待 data/dashboard.json 后显示实时 22 因子模块评分。",
+    scoredFactorCount: 21,
+    method: "Bhadial Conditions Score-compatible 21-factor, 7-module 5Y historical percentile composite; Funding uses EMA(5).",
+    summary: "偏紧: 等待 data/dashboard.json 后显示实时 21 因子模块评分。",
     constraint: { name: "净流动性", value: "$5.93T", contribution: -8.14, direction: "restrictive" },
     offset: { name: "SOFR-EFFR压力", value: "-11bp", contribution: 5.88, direction: "supportive" },
     balance: [
@@ -1963,8 +1963,13 @@ function renderSignalValidation() {
   if (compositesNode) {
     const lens = panel.predictiveLens && typeof panel.predictiveLens === "object" ? panel.predictiveLens : {};
     const lensFactors = Array.isArray(lens.selectedFactors) ? lens.selectedFactors : [];
+    // 诚实门控: 预测镜头若样本外 IC 非正(bhadialPredictive 复合行),标注"未验证·仅供诊断",不展示为可用信号
+    const lensComposite = composites.find((row) => row && row.id === "bhadialPredictive");
+    const lensOos = lensComposite ? Number(lensComposite.oosIc3m) : NaN;
+    const lensValidated = Number.isFinite(lensOos) && lensOos > 0;
+    const lensFactorsHtml = lensFactors.map((item) => `${escapeHtml(item.id || "")}(校准IC ${escapeHtml(String(item.calibrationIc ?? "--"))})`).join(" · ");
     const lensHtml = lens.available
-      ? `<div class="sv-lens">预测镜头(领先因子) 最新 <strong>${escapeHtml(String(lens.latestScore ?? "--"))}</strong> · 成分: ${lensFactors.map((item) => `${escapeHtml(item.id || "")}(校准IC ${escapeHtml(String(item.calibrationIc ?? "--"))})`).join(" · ")}</div>`
+      ? `<div class="sv-lens${lensValidated ? "" : " muted"}">预测镜头(领先因子) 最新 <strong>${escapeHtml(String(lens.latestScore ?? "--"))}</strong> · 成分: ${lensFactorsHtml}${lensValidated ? "" : ` · ⚠ 样本外未验证(OOS IC ${Number.isFinite(lensOos) ? lensOos.toFixed(2) : "--"})·仅供诊断,不作为信号`}</div>`
       : (lens.reason ? `<div class="sv-lens muted">${escapeHtml(lens.reason)}</div>` : "");
     compositesNode.innerHTML = composites.length ? `
       <h4 class="sv-heading">复合信号 · Composites</h4>
