@@ -4862,6 +4862,24 @@ body.modal-open {
   text-overflow: ellipsis;
 }
 
+/* 2026-06-18 样本外自助置信区间 + 稳健性: CI 跨0(weak)的因子整行淡化,提示"勿当真实预测力" */
+.sv-oos-cell { white-space: nowrap; }
+.sv-ci {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  line-height: 1.2;
+  margin-top: 1px;
+}
+.sv-ci.robust { color: var(--bull); }
+.sv-ci.weak { color: var(--faint); }
+.sv-table tbody tr.sv-row-weak td:not(.sv-oos-cell) { opacity: 0.62; }
+
+/* 2026-06-19 regime条件验证: ⇅ 标记预测方向跨涨/跌市是否一致(子样本探索性) */
+.sv-regime { font-size: 9.5px; cursor: help; white-space: nowrap; }
+.sv-regime.flip { color: var(--bear); font-weight: 600; }
+.sv-regime.ok { color: var(--bull); }
+.sv-regime.muted { color: var(--faint); }
+
 .sv-badge {
   display: inline-block;
   border-radius: 999px;

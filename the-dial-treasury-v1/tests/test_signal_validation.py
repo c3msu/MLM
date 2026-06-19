@@ -138,6 +138,68 @@ class EvaluateSignalTests(unittest.TestCase):
         self.assertGreater(alert["lift"], 1.5)
         self.assertIsNotNone(alert["leadTimeDays"])
 
+    def test_oos_ci_excludes_zero_and_marks_robust_for_predictive_signal(self) -> None:
+        # A genuinely predictive signal should yield an OOS-aligned bootstrap CI that
+        # excludes zero -> robustOos True (statistically distinguishable from no-skill).
+        signal_points, price_points = self.build_predictive_fixture()
+        result = evaluate_signal(
+            signal_points,
+            price_points,
+            horizons=(7,),
+            direction="higher_risk",
+            drawdown_threshold_pct=-2.0,
+            drawdown_horizon_days=7,
+            bootstrap_horizon_days=7,
+        )
+        horizon = result["horizons"][0]
+        self.assertIn("ciOos", horizon)
+        ci_low, ci_high = horizon["ciOos"]
+        self.assertIsNotNone(ci_low)
+        self.assertIsNotNone(ci_high)
+        self.assertLessEqual(ci_low, ci_high)
+        self.assertGreater(ci_low, 0)  # CI entirely above zero (oriented so positive = predictive)
+        self.assertTrue(horizon["robustOos"])
+
+    def test_oos_ci_straddles_zero_and_not_robust_for_random_walk(self) -> None:
+        import random
+
+        rng = random.Random(11)
+        prices = [100.0]
+        for _ in range(399):
+            prices.append(prices[-1] * (1 + rng.uniform(-0.01, 0.01)))
+        price_points = daily_points(prices)
+        signal_points = [SeriesPoint(date=point.date, value=rng.uniform(0, 100)) for point in price_points]
+        result = evaluate_signal(signal_points, price_points, horizons=(7,), direction="higher_risk", bootstrap_horizon_days=7)
+        horizon = result["horizons"][0]
+        ci_low, ci_high = horizon["ciOos"]
+        self.assertLessEqual(ci_low, 0.0)
+        self.assertGreaterEqual(ci_high, 0.0)  # interval straddles zero
+        self.assertFalse(horizon.get("robustOos", False))
+
+    def test_regime_split_reports_up_and_down_market_ic(self) -> None:
+        signal_points, price_points = self.build_predictive_fixture()
+        result = evaluate_signal(
+            signal_points,
+            price_points,
+            horizons=(7,),
+            direction="higher_risk",
+            drawdown_threshold_pct=-2.0,
+            drawdown_horizon_days=7,
+            bootstrap_horizon_days=7,
+        )
+        regime = result["horizons"][0].get("regimeSplit")
+        self.assertIsNotNone(regime)
+        self.assertIn("upMarket", regime)
+        self.assertIn("downMarket", regime)
+        for bucket in ("upMarket", "downMarket"):
+            self.assertIn("n", regime[bucket])
+        # The fixture spans both up- and down-trend weeks, so at least one regime yields an IC.
+        self.assertTrue(regime["upMarket"]["ic"] is not None or regime["downMarket"]["ic"] is not None)
+        # When both regimes have an IC, signConsistent reflects whether their signs agree.
+        if regime["upMarket"]["ic"] is not None and regime["downMarket"]["ic"] is not None:
+            expected = (regime["upMarket"]["ic"] > 0) == (regime["downMarket"]["ic"] > 0)
+            self.assertEqual(regime["signConsistent"], expected)
+
     def test_random_walk_signal_shows_no_skill(self) -> None:
         import random
 

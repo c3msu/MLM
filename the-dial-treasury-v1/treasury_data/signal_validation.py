@@ -225,6 +225,73 @@ def oriented_ic(raw_ic: float | None, direction: str) -> float | None:
     return -raw_ic if direction == "higher_risk" else raw_ic
 
 
+def oriented_interval(interval: tuple[float, float], direction: str) -> list[float | None]:
+    """Orient a raw (low, high) IC interval to the convention where positive = predictive,
+    swapping the bounds when the orientation negates (higher_risk)."""
+    if direction == "higher_risk":
+        low, high = oriented_ic(interval[1], direction), oriented_ic(interval[0], direction)
+    else:
+        low, high = interval
+    return [round_optional(low), round_optional(high)]
+
+
+REGIME_TRAIL_DAYS = 63  # ~3M trailing SPX return defines the up/down-market regime
+
+
+def regime_conditional_split(
+    observations: list[dict[str, Any]],
+    forward_key: str,
+    prices: "SortedSeries",
+    *,
+    direction: str,
+    block_len: int,
+    trail_days: int = REGIME_TRAIL_DAYS,
+) -> dict[str, Any] | None:
+    """Split observations by market-trend regime (sign of the trailing `trail_days` SPX
+    return at each signal date, exogenous to the macro factors) and compute the oriented
+    forward IC + block-bootstrap CI within each regime. Sub-samples are small so the CIs
+    are wide — exploratory. The point: surface whether a factor's predictive DIRECTION holds
+    across up- and down-markets or is regime-specific (a sign flip between regimes is a
+    robustness red flag even when the pooled IC looks strong)."""
+    up_pairs: list[tuple[float, float]] = []
+    down_pairs: list[tuple[float, float]] = []
+    for row in observations:
+        signal_value = row.get("signal")
+        forward_value = row.get(forward_key)
+        if signal_value is None or forward_value is None:
+            continue
+        if not (math.isfinite(signal_value) and math.isfinite(forward_value)):
+            continue
+        signal_date = row["date"]
+        now = prices.value_at_or_before(signal_date)
+        past = prices.value_at_or_before(signal_date - timedelta(days=trail_days))
+        if now is None or past is None or past == 0:
+            continue
+        bucket = up_pairs if (now / past - 1) >= 0 else down_pairs
+        bucket.append((signal_value, forward_value))
+
+    def regime_block(pairs: list[tuple[float, float]]) -> dict[str, Any]:
+        n = len(pairs)
+        if n < MIN_IC_OBSERVATIONS:
+            return {"ic": None, "ci": None, "n": n}
+        ic = oriented_ic(spearman_ic([pair[0] for pair in pairs], [pair[1] for pair in pairs]), direction)
+        ci = None
+        if n >= 12:
+            raw = block_bootstrap_ci(pairs, block_len=max(1, min(block_len, n // 2)))
+            if raw is not None:
+                ci = oriented_interval(raw, direction)
+        return {"ic": round_optional(ic), "ci": ci, "n": n}
+
+    up = regime_block(up_pairs)
+    down = regime_block(down_pairs)
+    if up["ic"] is None and down["ic"] is None:
+        return None
+    sign_consistent: bool | None = None
+    if up["ic"] is not None and down["ic"] is not None:
+        sign_consistent = (up["ic"] > 0) == (down["ic"] > 0)
+    return {"upMarket": up, "downMarket": down, "signConsistent": sign_consistent}
+
+
 def percentile_threshold(values: list[float], percentile: float) -> float | None:
     finite = sorted(value for value in values if math.isfinite(value))
     if not finite:
@@ -280,13 +347,28 @@ def evaluate_signal(
             "icOos": round_optional(oriented_ic(raw_oos, direction)),
         }
         if horizon == bootstrap_horizon_days:
-            pairs = finite_pairs([row["signal"] for row in observations], [row[key] for row in observations])
             spacing = typical_spacing_days(signal.dates)
             block_len = max(1, int(round(horizon / max(spacing, 1.0))))
+            pairs = finite_pairs([row["signal"] for row in observations], [row[key] for row in observations])
             interval = block_bootstrap_ci(pairs, block_len=block_len)
             if interval is not None:
-                low, high = (oriented_ic(interval[1], direction), oriented_ic(interval[0], direction)) if direction == "higher_risk" else interval
-                horizon_row["ci"] = [round_optional(low), round_optional(high)]
+                horizon_row["ci"] = oriented_interval(interval, direction)
+            # OOS-aligned CI: bootstrap ONLY the out-of-sample slice so the interval
+            # qualifies the headline icOos rather than the full-sample IC. robustOos is
+            # True only when this OOS CI excludes zero (the IC is statistically
+            # distinguishable from no-skill on held-out data — guards against reading a
+            # noisy single-slice point estimate as real predictive power).
+            oos_pairs = finite_pairs([row["signal"] for row in evaluation], [row[key] for row in evaluation])
+            oos_interval = block_bootstrap_ci(oos_pairs, block_len=block_len)
+            if oos_interval is not None:
+                ci_oos = oriented_interval(oos_interval, direction)
+                horizon_row["ciOos"] = ci_oos
+                low, high = ci_oos
+                if low is not None and high is not None:
+                    horizon_row["robustOos"] = bool(low > 0 or high < 0)
+            regime = regime_conditional_split(observations, key, prices, direction=direction, block_len=block_len)
+            if regime is not None:
+                horizon_row["regimeSplit"] = regime
         horizon_rows.append(horizon_row)
 
     alert = evaluate_alert_rule(

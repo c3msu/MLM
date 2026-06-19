@@ -386,12 +386,16 @@ class DashboardBuilderTests(unittest.TestCase):
     def test_build_spy_early_warning_stays_neutral_when_low_score_environment_is_improving(self):
         macro_liquidity = {
             "score": 42.2,
+            # 2026-06-19 robust-driven warning leads with liquidity/funding/rates sleeves, so a
+            # genuinely benign+improving scenario must read benign on THOSE (high factor scores =
+            # low stress). VIX/NFCI calm no longer dampens the aggregate (creditVol excluded), so
+            # external shock stays elevated only as a low-weight context sleeve.
             "components": [
-                {"id": "fed_net_liquidity", "module": "Liquidity", "name": "净流动性", "score": 12.0, "value": "$5.87T"},
-                {"id": "bank_reserves", "module": "Liquidity", "name": "银行准备金", "score": 17.0, "value": "$3.07T"},
-                {"id": "cp_tbill_spread", "module": "Funding", "name": "商票-TBill利差", "score": 28.0, "value": "+15bp"},
-                {"id": "dgs30_dgs10", "module": "Treasury", "name": "30Y-10Y期限溢价", "score": 5.0, "value": "52bp"},
-                {"id": "real_curve", "module": "Rates", "name": "真实曲线(10Y-5Y)", "score": 29.0, "value": "-12bp"},
+                {"id": "fed_net_liquidity", "module": "Liquidity", "name": "净流动性", "score": 66.0, "value": "$6.10T"},
+                {"id": "bank_reserves", "module": "Liquidity", "name": "银行准备金", "score": 62.0, "value": "$3.20T"},
+                {"id": "cp_tbill_spread", "module": "Funding", "name": "商票-TBill利差", "score": 62.0, "value": "+8bp"},
+                {"id": "dgs30_dgs10", "module": "Treasury", "name": "30Y-10Y期限溢价", "score": 60.0, "value": "62bp"},
+                {"id": "real_curve", "module": "Rates", "name": "真实曲线(10Y-5Y)", "score": 64.0, "value": "+6bp"},
                 {"id": "nfci", "module": "Credit", "name": "金融条件指数(NFCI)", "score": 74.0, "value": "-0.51"},
                 {"id": "vix", "module": "Risk", "name": "VIX", "score": 77.0, "value": "15.32"},
                 {"id": "dxy", "module": "External", "name": "美元广义指数", "score": 74.0, "value": "118.88"},

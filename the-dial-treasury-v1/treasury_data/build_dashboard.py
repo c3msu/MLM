@@ -3444,16 +3444,20 @@ def unavailable_macro_liquidity_equity(reason: str) -> dict[str, Any]:
     }
 
 
-# Component-sleeve weights re-balanced 2026-06-13 within an unchanged 0.75 total
-# (the macroLevel 0.10 + macroDeterioration 0.20 sleeves are unchanged). The move is
-# theory-anchored: credit/volatility stress (VIX, OAS, NFCI) is a contemporaneous-to-
-# lagging risk gauge that spikes during/after drawdowns, whereas Fed liquidity and
-# funding-market stress lead equities by weeks. The 2026-06-12 weekly walk-forward audit
-# (262 weeks) MOTIVATED the direction: creditVolStress OOS IC 3M was -0.546 (inverted),
-# fundingStress +0.407 (lift 1.11) and liquidityStress +0.376 were the cleanest leaders.
-# CAVEAT: because the OOS slice informed these weights they are now quasi-in-sample for
-# the SPY warning composite — revalidate on fresh data, do not cite the post-reweight OOS
-# improvement as independent confirmation. Changes are bounded (no sign flip, no zeroing).
+# 2026-06-19 ROBUST-driven restructure (supersedes the bounded 2026-06-13 reweight). The
+# OOS-aligned bootstrap CIs (signalValidation `robust`/`oosCi3m`) now distinguish reliable
+# signals from single-slice noise: fundingStress (OOS CI [0.24,0.56]) and ratesCurveStress
+# (CI [0.13,0.55]) are ROBUSTLY leading; creditVolStress is ROBUSTLY ANTI-predictive
+# (CI [-0.78,-0.20]) — i.e. VIX/OAS/NFCI are coincident-contrarian, structurally wrong as a
+# FORWARD early-warning input. So creditVolStress is removed from the forward aggregate
+# (weight 0; still computed + displayed as a coincident "current stress" context sleeve),
+# the freed weight goes to the two robust leaders, and macroDeterioration (derived from the
+# validated-LAGGING Conditions-Score 3M change, bhadialComposite robust=False) is demoted
+# 0.20->0.10. Rationale is structural (direction + robustness verdict + established market
+# behaviour), NOT a fit to maximise the aggregate's OOS metric.
+# CAVEAT (unchanged discipline): these weights remain quasi-in-sample for the SPY warning
+# composite — revalidate on fresh data; do NOT cite any post-restructure OOS improvement of
+# the AGGREGATE as independent confirmation (that would be circular/by-construction).
 SPY_WARNING_COMPONENT_SLEEVES: list[dict[str, Any]] = [
     {
         "key": "liquidityStress",
@@ -3465,22 +3469,22 @@ SPY_WARNING_COMPONENT_SLEEVES: list[dict[str, Any]] = [
     {
         "key": "fundingStress",
         "label": "融资压力",
-        "weight": 0.14,
-        "weightBasis": "最强领先(OOS IC 3M +0.41, lift 1.11): 融资市场先于股市收紧; 2026-06-13上调0.10→0.14",
+        "weight": 0.24,
+        "weightBasis": "稳健领先(OOS CI[0.24,0.56]排除0, lift 1.62, 提前90日): 融资市场先于股市收紧; 2026-06-19上调0.14→0.24",
         "componentIds": ["corridor_friction_1", "cp_tbill_spread", "fragmentation_21d"],
     },
     {
         "key": "ratesCurveStress",
         "label": "利率/曲线压力",
-        "weight": 0.20,
-        "weightBasis": "3M维度领先(OOS IC 3M +0.39); 权重维持0.20",
+        "weight": 0.30,
+        "weightBasis": "稳健领先(OOS CI[0.13,0.55]排除0): 真实曲线/期限溢价领先股市; 2026-06-19上调0.20→0.30",
         "componentIds": ["dgs30_dgs10", "dgs10_vol_21d", "curve_curvature_abs", "real_curve", "t10yie"],
     },
     {
         "key": "creditVolStress",
-        "label": "信用/波动压力",
-        "weight": 0.15,
-        "weightBasis": "同步-滞后(OOS IC 3M -0.55, 反向): VIX/OAS在回撤中后飙升而非之前; 2026-06-13下调0.25→0.15",
+        "label": "信用/波动压力(同步上下文)",
+        "weight": 0.0,
+        "weightBasis": "稳健反向(OOS CI[-0.78,-0.20]整体<0): VIX/OAS/NFCI是同步-反指(回撤中后才飙升),结构上不适合做前瞻预警→2026-06-19从前瞻聚合剔除(权重0),仅作\"当前压力\"上下文展示",
         "componentIds": ["nfci", "hy_credit", "vix", "vix_term_structure", "risk_vs_safe"],
     },
     {
@@ -8608,7 +8612,11 @@ def spy_early_warning_snapshot(macro_liquidity: dict[str, Any], macro_liquidity_
     current_signal = macro_liquidity_equity.get("currentSignal", {}) if isinstance(macro_liquidity_equity, dict) else {}
     sleeves: list[dict[str, Any]] = [
         build_macro_level_sleeve(macro_liquidity, weight=0.10),
-        build_macro_deterioration_sleeve(current_signal, weight=0.20),
+        # 2026-06-19 demoted 0.20->0.15: derived from the Conditions-Score 3M change, which is
+        # validated-LAGGING (bhadialChange13w robust=False) — down-weighted as a forward driver,
+        # but only mildly: the severeDeterioration amplifier still preserves the extreme-case
+        # De-risk response, so a -10+ score crash with corroboration still flags max risk.
+        build_macro_deterioration_sleeve(current_signal, weight=0.15),
     ]
     for spec in SPY_WARNING_COMPONENT_SLEEVES:
         sleeves.append(build_spy_component_sleeve(spec, component_by_id))
@@ -8634,7 +8642,7 @@ def spy_early_warning_snapshot(macro_liquidity: dict[str, Any], macro_liquidity_
         "baseScore": round(base_score, 1),
         "regime": allocation["regime"],
         "regimeCn": allocation["regimeCn"],
-        "method": "Equity-specific 0-100 warning index from existing macro Conditions Score components plus 3M score deterioration and calibrated nonlinear risk amplifiers; higher means greater SPY/SPX drawdown risk. Sleeve weights are evidence-informed (2026-06-13): credit/vol stress down-weighted as coincident, Fed liquidity & funding stress up-weighted as leading — see each sleeve's weightBasis; weights are quasi-in-sample (the OOS slice motivated them) and need revalidation on fresh data.",
+        "method": "Equity-specific 0-100 warning index from existing macro Conditions Score components plus 3M score deterioration and calibrated nonlinear risk amplifiers; higher means greater SPY/SPX drawdown risk. Sleeve weights restructured 2026-06-19 on OOS-aligned bootstrap robustness: creditVolStress is robustly anti-predictive/coincident (OOS CI entirely <0) so it is EXCLUDED from the forward aggregate (weight 0, shown as current-stress context); the robustly-leading fundingStress & ratesCurveStress carry the freed weight; macroDeterioration (lagging-derived) demoted — see each sleeve's weightBasis. Weights remain quasi-in-sample (the OOS slice motivated them); revalidate on fresh data and do not cite the aggregate's post-restructure OOS as independent confirmation.",
         "asOf": str(current_signal.get("date") or macro_liquidity_equity.get("asOf") if isinstance(macro_liquidity_equity, dict) else ""),
         "summary": summary,
         "allocation": allocation,
@@ -10849,6 +10857,9 @@ def signal_validation_metric_row(
         "oosIc1m": horizons.get(30, {}).get("icOos"),
         "oosIc3m": horizons.get(91, {}).get("icOos"),
         "ci3m": horizons.get(91, {}).get("ci"),
+        "oosCi3m": horizons.get(91, {}).get("ciOos"),
+        "robust": horizons.get(91, {}).get("robustOos"),
+        "regimeSplit": horizons.get(91, {}).get("regimeSplit"),
         "hitRateOos": alert.get("oosHitRate"),
         "baseRate": alert.get("baseRate"),
         "lift": alert.get("lift"),

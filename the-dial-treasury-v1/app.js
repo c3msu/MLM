@@ -1913,22 +1913,50 @@ function formatSignalDays(value) {
   return Number.isFinite(numeric) ? `${numeric.toFixed(0)}d` : "--";
 }
 
+function formatOosCi(ci, robust) {
+  if (!Array.isArray(ci) || ci.length < 2 || ci[0] == null || ci[1] == null) return "";
+  const lo = Number(ci[0]).toFixed(2);
+  const hi = Number(ci[1]).toFixed(2);
+  const mark = robust ? "✓" : "≈0";
+  const cls = robust ? "sv-ci robust" : "sv-ci weak";
+  const title = robust
+    ? "样本外90%自助CI排除0,该IC统计显著"
+    : "样本外90%自助CI跨越0,未达统计显著——勿当作真实预测力";
+  return `<div class="${cls}" title="${title}">[${lo}, ${hi}] ${mark}</div>`;
+}
+
+function formatRegimeFlag(rs) {
+  if (!rs || typeof rs !== "object") return "";
+  const up = rs.upMarket || {};
+  const down = rs.downMarket || {};
+  const fmtIc = (v) => (v == null ? "—" : Number(v).toFixed(2));
+  const detail = `涨市 IC ${fmtIc(up.ic)}(n=${up.n ?? 0}) · 跌市 IC ${fmtIc(down.ic)}(n=${down.n ?? 0}) — 子样本小,探索性`;
+  if (rs.signConsistent === false) {
+    return ` <span class="sv-regime flip" title="预测方向在涨/跌市之间反转(稳健性红旗): ${detail}">⇅✗</span>`;
+  }
+  if (rs.signConsistent === true) {
+    return ` <span class="sv-regime ok" title="预测方向跨涨/跌市一致: ${detail}">⇅✓</span>`;
+  }
+  return ` <span class="sv-regime muted" title="某一regime样本不足以判定: ${detail}">⇅?</span>`;
+}
+
 function signalValidationRowHtml(row, { showModule = false, showCluster = false } = {}) {
   const name = `${escapeHtml(row.labelCn || row.label || row.id || "--")}`;
   const moduleCell = showModule ? `<td>${escapeHtml(row.module || "--")}</td>` : "";
   const clusterCell = showCluster ? `<td>${row.clusterId ? escapeHtml(row.clusterId) : "--"}</td>` : "";
   const hitText = `${formatSignalRate(row.hitRateOos)} / ${formatSignalRate(row.baseRate)}`;
+  const oosCell = `${formatSignalIc(row.oosIc3m)}${formatOosCi(row.oosCi3m, row.robust)}`;
   return `
-    <tr>
+    <tr class="${row.robust === false ? "sv-row-weak" : ""}">
       <td class="sv-name" title="${escapeHtml(row.label || "")}">${name}</td>
       ${moduleCell}
       <td>${formatSignalIc(row.ic3m)}</td>
       <td>${formatSignalIc(row.oosIc1m)}</td>
-      <td>${formatSignalIc(row.oosIc3m)}</td>
+      <td class="sv-oos-cell">${oosCell}</td>
       <td>${hitText}</td>
       <td>${formatSignalLift(row.lift)}</td>
       <td>${formatSignalDays(row.leadTimeDays)}</td>
-      <td>${signalValidationBadge(row.classification)}</td>
+      <td>${signalValidationBadge(row.classification)}${formatRegimeFlag(row.regimeSplit)}</td>
       ${clusterCell}
     </tr>
   `;
@@ -1957,8 +1985,11 @@ function renderSignalValidation() {
   const factors = Array.isArray(panel.factors) ? panel.factors : [];
   const leadingCount = factors.filter((row) => row.classification === "leading").length;
   const coincidentCount = factors.filter((row) => row.classification === "coincident").length;
+  const robustCount = factors.filter((row) => row.robust === true).length;
+  const robustLeadingCount = factors.filter((row) => row.robust === true && row.classification === "leading").length;
+  const regimeFlipCount = factors.filter((row) => row.regimeSplit && row.regimeSplit.signConsistent === false).length;
   if (read) {
-    read.textContent = `IC为信号与SPX远期收益的秩相关(已按方向校正,正值=有预测力); 命中率与基准率均在走出样本段计算。当前${factors.length}个因子中${leadingCount}个领先、${coincidentCount}个同步。`;
+    read.textContent = `IC为信号与SPX远期收益的秩相关(已按方向校正,正值=有预测力); 命中率与基准率均在走出样本段计算。[]内为样本外90%自助置信区间——跨0(标记≈0)表示该IC未达统计显著,不应当作真实预测力。⇅标记为跨涨/跌市方向一致性(子样本小,探索性),${regimeFlipCount}个因子方向在两种市态间反转(慎用)。当前${factors.length}个因子中${leadingCount}个领先、${coincidentCount}个同步; 仅${robustCount}个样本外CI排除0(其中${robustLeadingCount}个稳健领先)。`;
   }
   if (compositesNode) {
     const lens = panel.predictiveLens && typeof panel.predictiveLens === "object" ? panel.predictiveLens : {};
