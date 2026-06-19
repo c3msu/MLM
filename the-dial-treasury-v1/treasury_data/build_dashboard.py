@@ -2399,14 +2399,6 @@ def bhadial_factor_score_at(series: dict[str, list[SeriesPoint]], spec: dict[str
     return {"score": max(0.0, min(100.0, score)), "percentile": percentile, "observed": observed}
 
 
-def score_from_percentile(percentile: int | None, direction: str) -> float:
-    if percentile is None:
-        return 50.0
-    if direction == "lower_better":
-        return float(100 - percentile)
-    return float(percentile)
-
-
 def bhadial_module_ema_score_at(series: dict[str, list[SeriesPoint]], module: dict[str, Any], target: date, *, span: int) -> float | None:
     keys = [str(spec["scoreKey"]) for spec in module["factors"]]
     month_ends = monthly_score_dates(series, keys, target)
@@ -2421,16 +2413,6 @@ def bhadial_module_ema_score_at(series: dict[str, list[SeriesPoint]], module: di
         score = float(raw["rawScore"])
         ema = score if ema is None else alpha * score + (1 - alpha) * ema
     return ema
-
-
-def monthly_score_dates(series: dict[str, list[SeriesPoint]], keys: list[str], target: date, *, years: int = 5) -> list[date]:
-    start = window_start(target, years=years)
-    month_ends: dict[tuple[int, int], date] = {}
-    for key in keys:
-        for point in clean_points(series.get(key, [])):
-            if start <= point.date <= target:
-                month_ends[(point.date.year, point.date.month)] = max(month_ends.get((point.date.year, point.date.month), point.date), point.date)
-    return [month_ends[key] for key in sorted(month_ends)]
 
 
 def format_bhadial_factor_value(value: Any, fmt: str) -> str:
@@ -8424,60 +8406,11 @@ def spy_warning_backtest_payload(macro_liquidity_equity: dict[str, Any] | None) 
     }
 
 
-def clean_points(points: list[SeriesPoint]) -> list[SeriesPoint]:
-    return sorted((point for point in points if math.isfinite(point.value)), key=lambda item: item.date)
-
-
-def monthly_last_points(points: list[SeriesPoint], *, start: date) -> list[SeriesPoint]:
-    by_month: dict[tuple[int, int], SeriesPoint] = {}
-    for point in clean_points(points):
-        if point.date < start:
-            continue
-        by_month[(point.date.year, point.date.month)] = point
-    return [by_month[key] for key in sorted(by_month)]
-
-
 def macro_liquidity_score_at(series: dict[str, list[SeriesPoint]], target: date) -> dict[str, Any] | None:
     row = bhadial_conditions_score_at(series, target)
     if row is None or row.get("observedFactorCount", 0) < 5:
         return None
     return {"score": row["score"], "coverage": row["observedFactorCount"]}
-
-
-def historical_percentile_at(points: list[SeriesPoint], target: date, *, years: int = 5) -> int | None:
-    ordered = clean_points(points)
-    current = point_at_or_before(ordered, target)
-    if current is None:
-        return None
-    start = window_start(target, years=years)
-    values = [point.value for point in ordered if start <= point.date <= current.date]
-    return historical_percentile(current.value, values)
-
-
-def point_at_or_before(points: list[SeriesPoint], target: date) -> SeriesPoint | None:
-    for point in reversed(points):
-        if point.date <= target:
-            return point
-    return None
-
-
-def point_at_or_after(points: list[SeriesPoint], target: date, *, tolerance_days: int = 10) -> SeriesPoint | None:
-    limit = target + timedelta(days=tolerance_days)
-    for point in points:
-        if target <= point.date <= limit:
-            return point
-        if point.date > limit:
-            break
-    return None
-
-
-def forward_return_pct(points: list[SeriesPoint], start: date, *, days: int) -> float | None:
-    ordered = clean_points(points)
-    current = point_at_or_before(ordered, start)
-    future = point_at_or_after(ordered, start + timedelta(days=days))
-    if current is None or future is None or current.value == 0:
-        return None
-    return (future.value / current.value - 1) * 100
 
 
 def forward_max_drawdown_pct(points: list[SeriesPoint], start: date, *, days: int) -> float | None:

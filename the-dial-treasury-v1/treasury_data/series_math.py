@@ -340,3 +340,74 @@ def latest_value(fred: dict[str, TimeSeries], series_id: str, default: float = 0
     if not series:
         return default
     return series.latest.value
+
+
+# --- Point-list series helpers + scoring math (2026-06-19 Phase 1: pushed down from
+# build_dashboard so the scoring domains depend on this leaf layer, not the monolith) ---
+
+
+def score_from_percentile(percentile: int | None, direction: str) -> float:
+    if percentile is None:
+        return 50.0
+    if direction == "lower_better":
+        return float(100 - percentile)
+    return float(percentile)
+
+
+def monthly_score_dates(series: dict[str, list[SeriesPoint]], keys: list[str], target: date, *, years: int = 5) -> list[date]:
+    start = window_start(target, years=years)
+    month_ends: dict[tuple[int, int], date] = {}
+    for key in keys:
+        for point in clean_points(series.get(key, [])):
+            if start <= point.date <= target:
+                month_ends[(point.date.year, point.date.month)] = max(month_ends.get((point.date.year, point.date.month), point.date), point.date)
+    return [month_ends[key] for key in sorted(month_ends)]
+
+
+def clean_points(points: list[SeriesPoint]) -> list[SeriesPoint]:
+    return sorted((point for point in points if math.isfinite(point.value)), key=lambda item: item.date)
+
+
+def monthly_last_points(points: list[SeriesPoint], *, start: date) -> list[SeriesPoint]:
+    by_month: dict[tuple[int, int], SeriesPoint] = {}
+    for point in clean_points(points):
+        if point.date < start:
+            continue
+        by_month[(point.date.year, point.date.month)] = point
+    return [by_month[key] for key in sorted(by_month)]
+
+
+def historical_percentile_at(points: list[SeriesPoint], target: date, *, years: int = 5) -> int | None:
+    ordered = clean_points(points)
+    current = point_at_or_before(ordered, target)
+    if current is None:
+        return None
+    start = window_start(target, years=years)
+    values = [point.value for point in ordered if start <= point.date <= current.date]
+    return historical_percentile(current.value, values)
+
+
+def point_at_or_before(points: list[SeriesPoint], target: date) -> SeriesPoint | None:
+    for point in reversed(points):
+        if point.date <= target:
+            return point
+    return None
+
+
+def point_at_or_after(points: list[SeriesPoint], target: date, *, tolerance_days: int = 10) -> SeriesPoint | None:
+    limit = target + timedelta(days=tolerance_days)
+    for point in points:
+        if target <= point.date <= limit:
+            return point
+        if point.date > limit:
+            break
+    return None
+
+
+def forward_return_pct(points: list[SeriesPoint], start: date, *, days: int) -> float | None:
+    ordered = clean_points(points)
+    current = point_at_or_before(ordered, start)
+    future = point_at_or_after(ordered, start + timedelta(days=days))
+    if current is None or future is None or current.value == 0:
+        return None
+    return (future.value / current.value - 1) * 100
