@@ -411,3 +411,15 @@ def forward_return_pct(points: list[SeriesPoint], start: date, *, days: int) -> 
     if current is None or future is None or current.value == 0:
         return None
     return (future.value / current.value - 1) * 100
+
+
+def forward_max_drawdown_pct(points: list[SeriesPoint], start: date, *, days: int) -> float | None:
+    ordered = clean_points(points)
+    current = point_at_or_before(ordered, start)
+    if current is None or current.value == 0:
+        return None
+    end = start + timedelta(days=days)
+    future_values = [point.value for point in ordered if current.date < point.date <= end]
+    if not future_values:
+        return None
+    return min(0.0, (min(future_values) / current.value - 1) * 100)

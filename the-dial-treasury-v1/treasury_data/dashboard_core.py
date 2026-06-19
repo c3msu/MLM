@@ -38,3 +38,28 @@ def format_signed_number(value: float | None, *, digits: int = 2) -> str:
     if value is None:
         return "--"
     return f"{value:+.{digits}f}"
+
+
+def bucket_label_by_rank(rows: list[dict[str, Any]], key: str, value: float | None, labels: list[str]) -> str:
+    if value is None or not rows:
+        return labels[1]
+    values = [optional_float(row.get(key)) for row in rows]
+    values = sorted(item for item in values if item is not None)
+    if not values:
+        return labels[1]
+    rank = sum(1 for item in values if item <= value) / len(values)
+    if rank <= 1 / 3:
+        return labels[0]
+    if rank <= 2 / 3:
+        return labels[1]
+    return labels[2]
+
+
+# Shared signal-validation config scalars (2026-06-19 Phase 1: moved down from the monolith;
+# used by the spy-warning backtest, signal validation, regional, and equity layers).
+SIGNAL_VALIDATION_MIN_WEEKS = 60
+SIGNAL_VALIDATION_DRAWDOWN_PCT = -5.0
+SIGNAL_VALIDATION_DRAWDOWN_DAYS = 91
+SIGNAL_VALIDATION_EQUITY_DRAWDOWN_PCT = -2.0
+SIGNAL_VALIDATION_EQUITY_DRAWDOWN_DAYS = 10
+SIGNAL_VALIDATION_OOS_SPLIT = 0.65
