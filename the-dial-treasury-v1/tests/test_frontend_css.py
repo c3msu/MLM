@@ -6,6 +6,24 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _frontend_js():
+    """Concatenate every local <script> the page loads, in index.html order, so feature-
+    presence assertions are robust to the Phase 3 split of app.js into per-domain files
+    (a function is "present" if it ships in the loaded bundle, regardless of which file)."""
+    html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
+    parts = []
+    for src in re.findall(r'<script src="([^"?]+)(?:\?[^"]*)?">', html):
+        if src.startswith("http"):
+            continue
+        path = PROJECT_ROOT / src
+        if path.exists():
+            parts.append(path.read_text(encoding="utf-8"))
+    return "\n".join(parts)
+
+
+FRONTEND_JS = _frontend_js()
+
+
 class FrontendCssTests(unittest.TestCase):
     def test_market_badge_text_span_is_not_sized_like_dot(self):
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
@@ -26,7 +44,7 @@ class FrontendCssTests(unittest.TestCase):
             self.assertIn(f'id="{element_id}"', html)
 
     def test_static_fallback_contains_percentile_history(self):
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
 
         self.assertIn("percentiles:", app_js)
         self.assertIn("trends:", app_js)
@@ -40,7 +58,7 @@ class FrontendCssTests(unittest.TestCase):
 
     def test_header_export_downloads_current_html_document(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
 
         self.assertIn('id="exportState"', html)
         self.assertIn('title="导出当前页面HTML"', html)
@@ -59,7 +77,7 @@ class FrontendCssTests(unittest.TestCase):
 
     def test_percentile_chart_has_expand_modal_controls(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
 
         for element_id in (
             "expandPercentileChart",
@@ -86,7 +104,7 @@ class FrontendCssTests(unittest.TestCase):
 
     def test_percentile_modal_has_readability_modes(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
         self.assertIn('id="percentileModalControls"', html)
@@ -98,7 +116,7 @@ class FrontendCssTests(unittest.TestCase):
 
     def test_percentile_history_chart_has_focus_and_hover_interactions(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
         self.assertIn('id="percentileTrendTooltip"', html)
@@ -114,7 +132,7 @@ class FrontendCssTests(unittest.TestCase):
 
     def test_macro_liquidity_composite_panel_is_mounted(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
         for element_id in (
@@ -157,7 +175,7 @@ class FrontendCssTests(unittest.TestCase):
 
     def test_macro_liquidity_trend_chart_compares_sp500_and_expands(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
         for element_id in (
@@ -180,7 +198,7 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn(".macro-trend-modal-chart", css)
 
     def test_macro_liquidity_trend_chart_includes_spy_early_warning_overlay(self):
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
         self.assertIn("spyWarningTrendPanel", app_js)
@@ -193,7 +211,7 @@ class FrontendCssTests(unittest.TestCase):
 
     def test_macro_liquidity_equity_lead_panel_is_mounted(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
         for element_id in (
@@ -230,7 +248,7 @@ class FrontendCssTests(unittest.TestCase):
 
     def test_equity_short_term_risk_panel_is_mounted(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
         self.assertIn('id="equityShortTermRisk"', html)
@@ -270,7 +288,7 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn(".equity-risk-drivers", css)
 
     def test_equity_short_term_risk_history_chart_is_not_gated_by_backtest(self):
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
 
         renderer_start = app_js.index("function renderEquityShortTermRisk")
         renderer_end = app_js.index("function renderEquityRiskHistoryChart")
@@ -282,7 +300,7 @@ class FrontendCssTests(unittest.TestCase):
 
     def test_equity_short_term_risk_history_chart_expands_to_interactive_modal(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
         for element_id in (
@@ -318,7 +336,7 @@ class FrontendCssTests(unittest.TestCase):
 
     def test_global_lppl_risk_panel_is_mounted_as_independent_indicator(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
         for element_id in (
@@ -368,7 +386,7 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn(".global-lppl-modal-panel", css)
 
     def test_investment_views_render_historical_spy_proxy_impact(self):
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
         self.assertIn("renderIdeaEquityImpact", app_js)
@@ -408,14 +426,14 @@ class FrontendCssTests(unittest.TestCase):
         self.assertRegex(css, re.compile(r"@media\s*\(max-width:\s*640px\)[\s\S]*\.macro-liquidity-trend-chart\s*\{[\s\S]*min-height:\s*150px", re.DOTALL))
 
     def test_decomposition_uses_backend_analysis_briefs(self):
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
 
         self.assertIn("frameworkNote", app_js)
         self.assertIn("regimeRead", app_js)
         self.assertIn("policyRead", app_js)
 
     def test_scorecard_renders_factor_source_mode_badges(self):
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
         self.assertIn("sourceModeLabel", app_js)
@@ -427,7 +445,7 @@ class FrontendCssTests(unittest.TestCase):
 
     def test_scorecard_source_mode_legend_and_mobile_rows_are_compact(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
         self.assertIn('id="scorecardSourceLegend"', html)
@@ -444,7 +462,7 @@ class FrontendCssTests(unittest.TestCase):
 
     def test_source_status_modal_exposes_data_coverage(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
         for element_id in (
@@ -463,7 +481,7 @@ class FrontendCssTests(unittest.TestCase):
 
     def test_source_status_modal_has_filter_search_and_export(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
         for element_id in (
@@ -481,7 +499,7 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn(".source-status-controls", css)
 
     def test_source_status_modal_shows_data_age_and_expected_cadence(self):
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
 
         self.assertIn("sourceStatusAgeText", app_js)
         self.assertIn("sourceStatusCadenceText", app_js)
@@ -491,7 +509,7 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn("expectedMaxAgeDays", app_js)
 
     def test_conclusion_source_quality_is_consumed_from_dashboard_payload(self):
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
 
         self.assertIn("conclusionSourceQuality", app_js)
         self.assertIn("state.conclusionSourceQuality", app_js)
@@ -499,7 +517,7 @@ class FrontendCssTests(unittest.TestCase):
 
     def test_frontend_can_trigger_manual_background_refresh(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
         self.assertIn('id="refreshRuntimeData"', html)
@@ -515,7 +533,7 @@ class FrontendCssTests(unittest.TestCase):
         self.assertRegex(css, re.compile(r"\.data-status-btn:disabled\s*\{[^}]*cursor:\s*progress", re.DOTALL))
 
     def test_frontend_auto_syncs_runtime_snapshot_without_history_reload(self):
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
 
         self.assertRegex(app_js, re.compile(r"const RUNTIME_AUTO_REFRESH_MS\s*=\s*5\s*\*\s*60\s*\*\s*1000"))
         self.assertIn("runtimeAutoRefreshTimer", app_js)
@@ -528,7 +546,7 @@ class FrontendCssTests(unittest.TestCase):
 
     def test_frontend_surfaces_equity_risk_freshness(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
         self.assertIn('id="equityFreshnessStatus"', html)
@@ -548,7 +566,7 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn("equity-freshness-stale", css)
 
     def test_equity_freshness_polling_uses_failure_backoff(self):
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
 
         self.assertIn("EQUITY_FRESHNESS_BACKOFF_MAX_MS", app_js)
         self.assertIn("equityFreshnessFailureCount", app_js)
@@ -557,7 +575,7 @@ class FrontendCssTests(unittest.TestCase):
 
     def test_history_panel_mounts_interactive_chart_controls(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
         for element_id in (
@@ -579,7 +597,7 @@ class FrontendCssTests(unittest.TestCase):
 
     def test_signal_validation_panel_mounts_walk_forward_diagnostics(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
         for element_id in (
@@ -606,7 +624,7 @@ class FrontendCssTests(unittest.TestCase):
 
     def test_portfolio_overview_panel_mounts_three_horizon_card(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
         for element_id in (
@@ -631,7 +649,7 @@ class FrontendCssTests(unittest.TestCase):
 
     def test_regional_monitor_section_mounts_first_level_region_tabs(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
-        app_js = (PROJECT_ROOT / "app.js").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
         i18n = (PROJECT_ROOT / "i18n.js").read_text(encoding="utf-8")
 
