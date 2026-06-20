@@ -44,6 +44,7 @@ def portfolio_overview_layer(
     exposure_band: list[Any] | None,
     evidence: dict[str, Any],
     note: str = "",
+    robust: bool | None = None,
 ) -> dict[str, Any]:
     band: list[float] | None = None
     if isinstance(exposure_band, (list, tuple)) and len(exposure_band) == 2:
@@ -51,6 +52,7 @@ def portfolio_overview_layer(
         high = optional_float(exposure_band[1])
         if low is not None and high is not None:
             band = [low, high]
+    tier, context_note_cn, context_note = overview_confidence_tier(robust)
     return {
         "layer": layer,
         "label": label,
@@ -64,7 +66,38 @@ def portfolio_overview_layer(
         "exposureBandPct": band,
         "evidence": evidence,
         "note": note,
+        "robust": robust,
+        "confidenceTier": tier,
+        "contextNoteCn": context_note_cn,
+        "contextNote": context_note,
     }
+
+
+def overview_confidence_tier(robust: bool | None) -> tuple[str, str, str]:
+    """Map a layer's OOS robustness verdict (from the signalValidation harness) to a
+    presentation tier + honest context note. Pure labeling — does not touch any score,
+    band, or allocation number (Phase 2 presentation-only)."""
+    if robust is True:
+        return "validated", "", ""
+    if robust is False:
+        return (
+            "context",
+            "样本外未达稳健(置信区间跨0)—仅作背景上下文,不作前瞻信号。",
+            "Not OOS-robust (confidence interval spans 0) — context only, not a forward signal.",
+        )
+    return (
+        "unverified",
+        "未经样本外稳健性(置信区间)检验—谨慎参考。",
+        "Not assessed for out-of-sample robustness — interpret with caution.",
+    )
+
+
+def overview_layer_robust(composite_row: dict[str, Any] | None) -> bool | None:
+    """Read the already-computed `robust` verdict off a signalValidation composite row;
+    returns None when the layer has no composite (robustness unknown)."""
+    if isinstance(composite_row, dict) and "robust" in composite_row:
+        return bool(composite_row.get("robust"))
+    return None
 
 
 def global_lppl_overview_state(global_lppl_risk: dict[str, Any] | None) -> dict[str, Any]:
@@ -220,6 +253,7 @@ def build_portfolio_overview(
                 stance=str(est_alloc.get("hedgeAction") or est_alloc.get("stance") or ""),
                 exposure_band=est_alloc.get("exposureBandPct"),
                 evidence=portfolio_overview_evidence(evidence_by_id.get("equityShortTermRisk")),
+                robust=overview_layer_robust(evidence_by_id.get("equityShortTermRisk")),
             )
         )
 
@@ -240,6 +274,7 @@ def build_portfolio_overview(
                 stance=str(sew_alloc.get("hedgeAction") or sew_alloc.get("stance") or ""),
                 exposure_band=sew_alloc.get("exposureBandPct"),
                 evidence=portfolio_overview_evidence(evidence_by_id.get("spyEarlyWarning")),
+                robust=overview_layer_robust(evidence_by_id.get("spyEarlyWarning")),
             )
         )
 
@@ -264,6 +299,7 @@ def build_portfolio_overview(
                 exposure_band=lppl_state["band"],
                 evidence=global_lppl_overview_evidence(global_lppl_risk),
                 note=lppl_note,
+                robust=None,
             )
         )
 
@@ -283,6 +319,7 @@ def build_portfolio_overview(
                 stance="背景层: 影响久期/曲线观点,不直接给权益仓位",
                 exposure_band=None,
                 evidence=portfolio_overview_evidence(evidence_by_id.get("bhadialComposite")),
+                robust=overview_layer_robust(evidence_by_id.get("bhadialComposite")),
             )
         )
 
@@ -299,6 +336,7 @@ def build_portfolio_overview(
     bands = [row["exposureBandPct"] for row in rows if row.get("exposureBandPct")]
     suggested_band = None
     binding_layer = None
+    binding_basis = None
     if bands:
         low = min(band[0] for band in bands)
         high = min(band[1] for band in bands)
@@ -307,7 +345,13 @@ def build_portfolio_overview(
             band = row.get("exposureBandPct")
             if band and band[1] == high:
                 binding_layer = str(row.get("labelCn") or row.get("layer"))
+                binding_basis = str(row.get("confidenceTier") or "")
                 break
+
+    # Display order: OOS-robust (validated) layers lead; context/unverified follow (stable,
+    # preserving original order within each tier). Pure presentation — bands/binding above were
+    # computed on the original order, so no allocation number changes (Phase 2 presentation-only).
+    rows.sort(key=lambda row: 0 if row.get("robust") is True else 1)
 
     conflicts: list[dict[str, Any]] = []
     lppl_alerting = bool(lppl_state["alertSymbols"]) if lppl_state["observedIndexCount"] > 0 else False
@@ -357,6 +401,7 @@ def build_portfolio_overview(
         "conflicts": conflicts,
         "suggestedEquityExposureBand": suggested_band,
         "bindingLayer": binding_layer,
+        "bindingBasis": binding_basis,
         "regionalTilt": portfolio_overview_regional_tilt(regional_monitor),
         "usInternalTilt": portfolio_overview_us_internal_tilt(regional_monitor),
     }

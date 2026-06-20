@@ -3910,5 +3910,66 @@ class RegionalMonitorTests(unittest.TestCase):
             self.assertNotIn("proxy", str(spec["name"]).lower())
 
 
+class PortfolioOverviewRobustnessTierTests(unittest.TestCase):
+    """Phase 2 (presentation-only): headline layers carry an OOS-robustness tier and sort
+    validated-first, while the suggested allocation band (min logic) is unchanged."""
+
+    def _overview(self, *, equity_robust, spy_robust, macro_robust):
+        # robust=None for a layer means its composite is ABSENT (robustness unknown -> unverified),
+        # mirroring how the LPPL layer has no signalValidation composite.
+        specs = [
+            ("equityShortTermRisk", equity_robust, {"hitRateOos": 0.6, "baseRate": 0.4}),
+            ("spyEarlyWarning", spy_robust, {}),
+            ("bhadialComposite", macro_robust, {}),
+        ]
+        composites = [
+            {"id": cid, "robust": robust, **extra}
+            for cid, robust, extra in specs
+            if robust is not None
+        ]
+        signal_validation = {"available": True, "composites": composites}
+        return dashboard_builder.build_portfolio_overview(
+            spy_early_warning={"score": 45.0, "regime": "", "asOf": "2026-06-01",
+                               "allocation": {"exposureBandPct": [60, 90], "horizon": "1-3M"}},
+            equity_short_term_risk={"score": 80.0, "asOf": "2026-06-01",
+                                    "allocation": {"exposureBandPct": [50, 70], "horizon": "1-10d"}},
+            global_lppl_risk=None,
+            macro_liquidity={"score": 48.0, "regime": ""},
+            signal_validation=signal_validation,
+            regional_monitor=None,
+        )
+
+    def test_validated_layer_sorts_first_regardless_of_insertion_order(self):
+        # spyEarlyWarning is inserted 2nd but is the only robust layer -> must lead the display.
+        po = self._overview(equity_robust=False, spy_robust=True, macro_robust=False)
+        layers = po["layers"]
+        self.assertEqual(layers[0]["layer"], "spyEarlyWarning")
+        self.assertEqual(layers[0]["confidenceTier"], "validated")
+        tiers = {l["layer"]: l["confidenceTier"] for l in layers}
+        self.assertEqual(tiers["equityShortTermRisk"], "context")
+        self.assertEqual(tiers["bhadialComposite"], "context")
+
+    def test_confidence_tier_maps_robust_verdict(self):
+        po = self._overview(equity_robust=True, spy_robust=False, macro_robust=None)
+        tiers = {l["layer"]: l["confidenceTier"] for l in po["layers"]}
+        self.assertEqual(tiers["equityShortTermRisk"], "validated")
+        self.assertEqual(tiers["spyEarlyWarning"], "context")
+        self.assertEqual(tiers["bhadialComposite"], "unverified")
+        # context/unverified layers carry an honest note; validated does not.
+        by_layer = {l["layer"]: l for l in po["layers"]}
+        self.assertTrue(by_layer["spyEarlyWarning"]["contextNote"])
+        self.assertEqual(by_layer["equityShortTermRisk"]["contextNote"], "")
+
+    def test_allocation_band_unchanged_by_tiering_and_binding_basis_reported(self):
+        # min low=50, min high=70 -> binding is the equity layer (band[1]==70).
+        po = self._overview(equity_robust=True, spy_robust=False, macro_robust=False)
+        self.assertEqual(po["suggestedEquityExposureBand"], [50, 70])
+        self.assertEqual(po["bindingBasis"], "validated")
+        # Re-run with the same bands but equity non-robust: band must NOT change (presentation-only).
+        po2 = self._overview(equity_robust=False, spy_robust=False, macro_robust=False)
+        self.assertEqual(po2["suggestedEquityExposureBand"], [50, 70])
+        self.assertEqual(po2["bindingBasis"], "context")
+
+
 if __name__ == "__main__":
     unittest.main()
