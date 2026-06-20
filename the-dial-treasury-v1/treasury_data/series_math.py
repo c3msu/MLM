@@ -8,7 +8,7 @@ from datetime import date, timedelta
 from statistics import median
 from typing import Any
 
-from .sources import SeriesPoint, TimeSeries, YieldCurveRecord
+from .sources import MarketDailyBar, SeriesPoint, TimeSeries, YieldCurveRecord
 
 
 def compute_tenor_realized_volatility(records: list[YieldCurveRecord], tenor: str, window: int = 20) -> float:
@@ -423,3 +423,109 @@ def forward_max_drawdown_pct(points: list[SeriesPoint], start: date, *, days: in
     if not future_values:
         return None
     return min(0.0, (min(future_values) / current.value - 1) * 100)
+
+
+# --- Market-bar (OHLCV) helpers (Phase 1: used by equity/lppl/regional) ---
+
+
+def bar_index_at_or_before(bars: list[MarketDailyBar], target: date) -> int | None:
+    candidates = [index for index, bar in enumerate(bars) if bar.date <= target]
+    return candidates[-1] if candidates else None
+
+
+def bar_at_or_before(bars: list[MarketDailyBar], target: date) -> MarketDailyBar | None:
+    index = bar_index_at_or_before(bars, target)
+    return bars[index] if index is not None else None
+
+
+def trailing_return(bars: list[MarketDailyBar], target: date, lookback: int) -> float | None:
+    index = bar_index_at_or_before(bars, target)
+    if index is None or index <= 0:
+        return None
+    prior_index = max(0, index - lookback)
+    prior = bars[prior_index]
+    current = bars[index]
+    if prior.close <= 0:
+        return None
+    return current.close / prior.close - 1
+
+
+def moving_average_gap(bars: list[MarketDailyBar], target: date, window: int) -> float | None:
+    index = bar_index_at_or_before(bars, target)
+    if index is None or index + 1 < window:
+        return None
+    sample = bars[index - window + 1: index + 1]
+    average_close = sum(bar.close for bar in sample) / len(sample)
+    if average_close <= 0:
+        return None
+    return bars[index].close / average_close - 1
+
+
+def drawdown_from_recent_high(bars: list[MarketDailyBar], target: date, window: int) -> float | None:
+    index = bar_index_at_or_before(bars, target)
+    if index is None:
+        return None
+    sample = bars[max(0, index - window + 1): index + 1]
+    if not sample:
+        return None
+    recent_high = max(bar.high for bar in sample)
+    if recent_high <= 0:
+        return None
+    return bars[index].close / recent_high - 1
+
+
+def high_to_low_drawdown_in_window(bars: list[MarketDailyBar], target: date, window: int) -> float | None:
+    index = bar_index_at_or_before(bars, target)
+    if index is None:
+        return None
+    sample = bars[max(0, index - window + 1): index + 1]
+    if not sample:
+        return None
+    recent_high = max(bar.high for bar in sample)
+    recent_low = min(bar.low for bar in sample)
+    if recent_high <= 0 or recent_low <= 0:
+        return None
+    return recent_low / recent_high - 1
+
+
+def rebound_from_recent_low(bars: list[MarketDailyBar], target: date, window: int) -> float | None:
+    index = bar_index_at_or_before(bars, target)
+    if index is None:
+        return None
+    sample = bars[max(0, index - window + 1): index + 1]
+    if not sample:
+        return None
+    recent_low = min(bar.low for bar in sample)
+    if recent_low <= 0:
+        return None
+    return bars[index].close / recent_low - 1
+
+
+def one_day_return(bars: list[MarketDailyBar], target: date) -> float | None:
+    index = bar_index_at_or_before(bars, target)
+    if index is None or index <= 0:
+        return None
+    prior = bars[index - 1]
+    current = bars[index]
+    if prior.close <= 0:
+        return None
+    return current.close / prior.close - 1
+
+
+def close_location_value(bar: MarketDailyBar) -> float:
+    if bar.high <= bar.low:
+        return 0.5
+    return max(0.0, min(1.0, (bar.close - bar.low) / (bar.high - bar.low)))
+
+
+def volume_percentile_at(bars: list[MarketDailyBar], target: date, *, window: int) -> float | None:
+    index = bar_index_at_or_before(bars, target)
+    if index is None:
+        return None
+    current_volume = bars[index].volume
+    if current_volume is None:
+        return None
+    sample = [bar.volume for bar in bars[max(0, index - window): index + 1] if bar.volume is not None]
+    if len(sample) < 10:
+        return None
+    return 100 * sum(1 for value in sample if value <= current_volume) / len(sample)

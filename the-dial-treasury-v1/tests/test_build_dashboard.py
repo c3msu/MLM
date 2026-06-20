@@ -5,6 +5,7 @@ from datetime import date, datetime, timezone
 from unittest.mock import patch
 
 import treasury_data.build_dashboard as dashboard_builder
+import treasury_data.scoring_equity as scoring_equity
 from treasury_data.build_dashboard import (
     apply_content_overrides,
     build_conclusion_audit,
@@ -2825,12 +2826,12 @@ class DashboardBuilderTests(unittest.TestCase):
         bars = {"SPY": [bar]}
 
         with ExitStack() as stack:
-            stack.enter_context(patch.object(dashboard_builder, "volume_percentile_at", return_value=45.0))
-            stack.enter_context(patch.object(dashboard_builder, "trailing_return", return_value=0.12))
+            stack.enter_context(patch.object(scoring_equity, "volume_percentile_at", return_value=45.0))
+            stack.enter_context(patch.object(scoring_equity, "trailing_return", return_value=0.12))
             score_45 = dashboard_builder.equity_turnover_component(bars, target, weight=0.14)["score"]
         with ExitStack() as stack:
-            stack.enter_context(patch.object(dashboard_builder, "volume_percentile_at", return_value=46.0))
-            stack.enter_context(patch.object(dashboard_builder, "trailing_return", return_value=0.12))
+            stack.enter_context(patch.object(scoring_equity, "volume_percentile_at", return_value=46.0))
+            stack.enter_context(patch.object(scoring_equity, "trailing_return", return_value=0.12))
             score_46 = dashboard_builder.equity_turnover_component(bars, target, weight=0.14)["score"]
 
         self.assertLess(abs(score_45 - score_46), 12.0)
@@ -2843,8 +2844,8 @@ class DashboardBuilderTests(unittest.TestCase):
         scores = {}
         for volume_pct in (69.0, 71.0, 75.0, 80.0):
             with ExitStack() as stack:
-                stack.enter_context(patch.object(dashboard_builder, "volume_percentile_at", return_value=volume_pct))
-                stack.enter_context(patch.object(dashboard_builder, "trailing_return", return_value=0.02))
+                stack.enter_context(patch.object(scoring_equity, "volume_percentile_at", return_value=volume_pct))
+                stack.enter_context(patch.object(scoring_equity, "trailing_return", return_value=0.02))
                 scores[volume_pct] = dashboard_builder.equity_turnover_component(bars, target, weight=0.14)["score"]
 
         self.assertLess(abs(scores[69.0] - scores[71.0]), 8.0)

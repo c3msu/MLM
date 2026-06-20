@@ -63,3 +63,33 @@ SIGNAL_VALIDATION_DRAWDOWN_DAYS = 91
 SIGNAL_VALIDATION_EQUITY_DRAWDOWN_PCT = -2.0
 SIGNAL_VALIDATION_EQUITY_DRAWDOWN_DAYS = 10
 SIGNAL_VALIDATION_OOS_SPLIT = 0.65
+
+
+# --- format / risk-linear / average utilities (Phase 1) ---
+
+
+def average_optional(values: Any) -> float | None:
+    numeric = [value for value in (optional_float(item) for item in values) if value is not None]
+    if not numeric:
+        return None
+    return sum(numeric) / len(numeric)
+
+
+def risk_linear(value: float | None, low: float, high: float) -> float:
+    if value is None:
+        return 50.0
+    if high <= low:
+        return 50.0
+    return bounded_score(100 * (float(value) - low) / (high - low))
+
+
+def format_optional_pct(value: float | None) -> str:
+    return "--" if value is None else format_signed_pct(value)
+
+
+def format_signed_pct(value: float) -> str:
+    return f"{value * 100:+.1f}%"
+
+
+def format_optional_number(value: float | None) -> str:
+    return "--" if value is None else f"{value:+.1f}"
