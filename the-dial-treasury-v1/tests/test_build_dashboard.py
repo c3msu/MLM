@@ -3971,5 +3971,42 @@ class PortfolioOverviewRobustnessTierTests(unittest.TestCase):
         self.assertEqual(po2["bindingBasis"], "context")
 
 
+class SignalValidationRobustnessLabelingTests(unittest.TestCase):
+    """Phase 2: honest one-line summary + SPY-warning robustness annotation, read off the
+    already-computed robust/classification fields (no new estimation)."""
+
+    def test_summary_counts_robust_leading_and_aggregate_verdict(self):
+        factors = [
+            {"id": "a", "robust": True, "classification": "leading"},
+            {"id": "b", "robust": True, "classification": "leading"},
+            {"id": "c", "robust": True, "classification": "coincident"},
+            {"id": "d", "robust": False, "classification": "leading"},
+            {"id": "e", "robust": False, "classification": "lagging"},
+        ]
+        composites = [{"id": "spyEarlyWarning", "robust": False}]
+        summary = dashboard_builder.signal_validation_summary(factors, composites)
+        self.assertIn("5因子", summary)
+        self.assertIn("2个稳健领先", summary)
+        self.assertIn("1个稳健同步/滞后", summary)
+        self.assertIn("未达样本外稳健", summary)
+
+    def test_annotate_spy_warning_keeps_only_robust_leading_sleeves(self):
+        spy = {"score": 45.0}
+        signal_validation = {
+            "composites": [
+                {"id": "spyEarlyWarning", "robust": False, "oosCi3m": [-0.02, 0.59]},
+                {"id": "sleeve:fundingStress", "robust": True, "oosIc3m": 0.47},
+                {"id": "sleeve:ratesCurveStress", "robust": True, "oosIc3m": 0.36},
+                {"id": "sleeve:creditVolStress", "robust": True, "oosIc3m": -0.55},
+                {"id": "sleeve:liquidityStress", "robust": False, "oosIc3m": 0.38},
+            ]
+        }
+        dashboard_builder.annotate_spy_warning_robustness(spy, signal_validation)
+        self.assertIs(spy["aggregateRobust"], False)
+        self.assertEqual(spy["aggregateOosCi3m"], [-0.02, 0.59])
+        # creditVol is robust but reversed (-) and liquidity is non-robust -> both excluded.
+        self.assertEqual(spy["robustSleeves"], ["fundingStress", "ratesCurveStress"])
+
+
 if __name__ == "__main__":
     unittest.main()

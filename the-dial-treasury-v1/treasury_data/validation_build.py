@@ -356,9 +356,11 @@ def build_signal_validation(
         if predictive_row is not None:
             composite_rows.append(predictive_row)
     predictive_payload = {key: value for key, value in predictive_lens.items() if key != "points"}
+    summary = signal_validation_summary(factor_rows, composite_rows)
     return {
         "available": True,
         "asOf": week_targets[-1].isoformat(),
+        "summary": summary,
         "method": (
             "Weekly point-in-time replay of all condition factors and composite overlays against forward "
             "S&P 500 returns; thresholds and ICs are split into calibration (first 65%) and out-of-sample "
@@ -374,6 +376,49 @@ def build_signal_validation(
         "predictiveLens": predictive_payload,
         "amplifierAudit": amplifier_audit,
     }
+
+
+def signal_validation_summary(
+    factor_rows: list[dict[str, Any]],
+    composite_rows: list[dict[str, Any]],
+) -> str:
+    """One-line honest readout of the OOS-robustness landscape, read off the already-computed
+    `robust`/`classification` fields (no new estimation). Discipline: only robust signals are
+    forward-actionable; the rest are diagnostic context."""
+    robust_factors = [f for f in factor_rows if isinstance(f, dict) and f.get("robust")]
+    robust_leading = [f for f in robust_factors if str(f.get("classification")) == "leading"]
+    robust_other = [f for f in robust_factors if str(f.get("classification")) != "leading"]
+    by_id = {str(c.get("id")): c for c in composite_rows if isinstance(c, dict)}
+    agg = by_id.get("spyEarlyWarning")
+    if isinstance(agg, dict) and "robust" in agg:
+        agg_text = "聚合预警样本外稳健" if agg.get("robust") else "聚合预警未达样本外稳健(CI跨0)"
+    else:
+        agg_text = "聚合预警稳健性未知"
+    return (
+        f"{len(factor_rows)}因子周度回放: {len(robust_leading)}个稳健领先(样本外CI排除0), "
+        f"{len(robust_other)}个稳健同步/滞后; {agg_text}。仅稳健信号可作前瞻依据,余者仅诊断。"
+    )
+
+
+def annotate_spy_warning_robustness(
+    spy_early_warning: dict[str, Any] | None,
+    signal_validation: dict[str, Any] | None,
+) -> None:
+    """Stamp the SPY early-warning dict with its OOS-robustness verdict + the names of its
+    robust *leading* sleeves, read off the signalValidation composites. Honest labeling: the
+    aggregate is not OOS-robust, but its funding/rates sleeves are robustly leading. In-place."""
+    if not isinstance(spy_early_warning, dict) or not isinstance(signal_validation, dict):
+        return
+    by_id = {str(c.get("id")): c for c in (signal_validation.get("composites") or []) if isinstance(c, dict)}
+    agg = by_id.get("spyEarlyWarning")
+    if isinstance(agg, dict) and "robust" in agg:
+        spy_early_warning["aggregateRobust"] = bool(agg.get("robust"))
+        spy_early_warning["aggregateOosCi3m"] = agg.get("oosCi3m")
+    spy_early_warning["robustSleeves"] = [
+        cid.split(":", 1)[1]
+        for cid, c in by_id.items()
+        if cid.startswith("sleeve:") and c.get("robust") and (optional_float(c.get("oosIc3m")) or 0.0) > 0
+    ]
 
 
 def build_bhadial_predictive_lens(

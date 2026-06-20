@@ -704,6 +704,7 @@ def build_dashboard_from_inputs(
     amplifier_audit = signal_validation.pop("amplifierAudit", None)
     if isinstance(spy_early_warning, dict) and isinstance(amplifier_audit, dict):
         spy_early_warning["amplifierAudit"] = amplifier_audit
+    annotate_spy_warning_robustness(spy_early_warning, signal_validation)
     portfolio_overview = build_portfolio_overview(
         spy_early_warning=spy_early_warning,
         equity_short_term_risk=equity_short_term_risk,
