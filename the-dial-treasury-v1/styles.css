@@ -5046,6 +5046,35 @@ body.modal-open {
   font-size: 10.5px;
 }
 
+/* Phase 2: OOS-robustness tier badges + honest context dimming (presentation-only). */
+.pol-tier {
+  border-radius: 999px;
+  padding: 0 6px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  white-space: nowrap;
+  border: 1px solid var(--line);
+}
+.pol-tier.validated { color: var(--bull); border-color: var(--bull); }
+.pol-tier.context { color: var(--muted); }
+.pol-tier.unverified { color: var(--faint); }
+.portfolio-overview-layer.tier-validated { border-left: 2px solid var(--bull); }
+.portfolio-overview-layer.tier-context,
+.portfolio-overview-layer.tier-unverified { opacity: 0.72; }
+.pol-context-note {
+  color: var(--faint);
+  font-size: 10px;
+  font-style: italic;
+}
+.pol-binding-note { color: var(--bear); font-family: var(--mono); font-size: 10px; }
+
+.spy-warning-robust {
+  margin: 0 0 6px;
+  font-size: 11px;
+}
+.spy-warning-robust.weak { color: var(--bear); }
+.spy-warning-robust.ok { color: var(--bull); }
+
 .portfolio-overview-conflicts {
   display: grid;
   gap: 6px;

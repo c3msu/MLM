@@ -1806,6 +1806,24 @@ function portfolioOverviewEvidenceText(evidence) {
   return parts.length ? parts.join(" · ") : "证据不足";
 }
 
+function portfolioLayerTier(layer) {
+  const tier = layer && layer.confidenceTier;
+  if (tier === "validated") {
+    return { cls: "tier-validated", badge: `<span class="pol-tier validated" title="样本外稳健: 90%自助CI排除0,可作前瞻依据 · OOS-robust">✓稳健</span>` };
+  }
+  if (tier === "context") {
+    return { cls: "tier-context", badge: `<span class="pol-tier context" title="样本外未达稳健: CI跨0,仅作背景上下文,不作前瞻信号 · context only">上下文</span>` };
+  }
+  return { cls: "tier-unverified", badge: `<span class="pol-tier unverified" title="未经样本外稳健性(CI)检验,谨慎参考 · unverified">未验证</span>` };
+}
+
+function portfolioBindingBasisSuffix(panel) {
+  const basis = panel && panel.bindingBasis;
+  if (!basis || basis === "validated") return "";
+  const label = basis === "context" ? "上下文层" : "未验证层";
+  return ` <small class="pol-binding-note" title="当前权益仓位带由${label}约束(其样本外稳健性未确立)——谨慎采用 · binding layer is not OOS-robust">⚠ 约束层:${label}</small>`;
+}
+
 function renderPortfolioOverview() {
   const panel = state.portfolioOverview || DEFAULT_DATA.portfolioOverview || {};
   const root = $("#portfolioOverviewPanel");
@@ -1818,7 +1836,9 @@ function renderPortfolioOverview() {
   if (summaryNode) summaryNode.textContent = panel.summary || "--";
   if (bandNode) {
     const band = Array.isArray(panel.suggestedEquityExposureBand) ? panel.suggestedEquityExposureBand : null;
-    bandNode.textContent = band ? `权益仓位 ${Number(band[0]).toFixed(0)}-${Number(band[1]).toFixed(0)}%` : "仓位区间 --";
+    bandNode.innerHTML = band
+      ? `权益仓位 ${Number(band[0]).toFixed(0)}-${Number(band[1]).toFixed(0)}%${portfolioBindingBasisSuffix(panel)}`
+      : "仓位区间 --";
     bandNode.dataset.tone = band && Number(band[1]) < 90 ? "restrictive" : "neutral";
   }
   if (!panel.available) {
@@ -1852,11 +1872,17 @@ function renderPortfolioOverview() {
     layersNode.innerHTML = layers.map((layer) => {
       const band = Array.isArray(layer.exposureBandPct) ? layer.exposureBandPct : null;
       const score = Number(layer.score);
+      const tier = portfolioLayerTier(layer);
+      const noteText = layer.confidenceTier && layer.confidenceTier !== "validated"
+        ? (layer.contextNoteCn || layer.contextNote || "")
+        : "";
+      const noteHtml = noteText ? `<div class="pol-context-note">${escapeHtml(noteText)}</div>` : "";
       return `
-        <div class="portfolio-overview-layer">
+        <div class="portfolio-overview-layer ${tier.cls}">
           <div class="pol-head">
             <span class="pol-horizon">${escapeHtml(layer.horizonCn || layer.horizon || "")}</span>
             <strong>${escapeHtml(layer.labelCn || layer.label || "")}</strong>
+            ${tier.badge}
             <em>${Number.isFinite(score) ? score.toFixed(1) : "--"} · ${escapeHtml(layer.regimeCn || layer.regime || "--")}</em>
           </div>
           <div class="pol-body">
@@ -1864,6 +1890,7 @@ function renderPortfolioOverview() {
             <span class="pol-stance">${escapeHtml(layer.stance || "")}</span>
           </div>
           <div class="pol-evidence">${escapeHtml(portfolioOverviewEvidenceText(layer.evidence))}${layer.note ? ` · ${escapeHtml(layer.note)}` : ""}</div>
+          ${noteHtml}
         </div>
       `;
     }).join("") || `<div class="empty-state compact">暂无可用信号层</div>`;
@@ -1989,7 +2016,8 @@ function renderSignalValidation() {
   const robustLeadingCount = factors.filter((row) => row.robust === true && row.classification === "leading").length;
   const regimeFlipCount = factors.filter((row) => row.regimeSplit && row.regimeSplit.signConsistent === false).length;
   if (read) {
-    read.textContent = `IC为信号与SPX远期收益的秩相关(已按方向校正,正值=有预测力); 命中率与基准率均在走出样本段计算。[]内为样本外90%自助置信区间——跨0(标记≈0)表示该IC未达统计显著,不应当作真实预测力。⇅标记为跨涨/跌市方向一致性(子样本小,探索性),${regimeFlipCount}个因子方向在两种市态间反转(慎用)。当前${factors.length}个因子中${leadingCount}个领先、${coincidentCount}个同步; 仅${robustCount}个样本外CI排除0(其中${robustLeadingCount}个稳健领先)。`;
+    const summaryLead = panel.summary ? `${panel.summary} ` : "";
+    read.textContent = `${summaryLead}IC为信号与SPX远期收益的秩相关(已按方向校正,正值=有预测力); 命中率与基准率均在走出样本段计算。[]内为样本外90%自助置信区间——跨0(标记≈0)表示该IC未达统计显著,不应当作真实预测力。⇅标记为跨涨/跌市方向一致性(子样本小,探索性),${regimeFlipCount}个因子方向在两种市态间反转(慎用)。当前${factors.length}个因子中${leadingCount}个领先、${coincidentCount}个同步; 仅${robustCount}个样本外CI排除0(其中${robustLeadingCount}个稳健领先)。`;
   }
   if (compositesNode) {
     const lens = panel.predictiveLens && typeof panel.predictiveLens === "object" ? panel.predictiveLens : {};
@@ -2036,6 +2064,32 @@ function renderSignalValidation() {
   }
 }
 
+function spyWarningRobustNote(item) {
+  if (!item || item.aggregateRobust == null) return "";
+  const ci = Array.isArray(item.aggregateOosCi3m) && item.aggregateOosCi3m.length >= 2
+    ? `[${Number(item.aggregateOosCi3m[0]).toFixed(2)}, ${Number(item.aggregateOosCi3m[1]).toFixed(2)}]`
+    : "";
+  if (item.aggregateRobust === false) {
+    const sleeves = Array.isArray(item.robustSleeves) ? item.robustSleeves : [];
+    const sleeveText = sleeves.length
+      ? `; 但其稳健领先 sleeve: <strong>${sleeves.map((s) => escapeHtml(spyWarningSleeveLabel(s))).join(" · ")}</strong>(样本外CI排除0,可作前瞻依据)`
+      : "";
+    return `<p class="spy-warning-robust weak" title="聚合预警样本外90%自助CI跨0,未达统计显著——勿当作真实预测力 · aggregate not OOS-robust">⚠ 聚合预警样本外未达稳健${ci ? `(CI ${ci}跨0)` : "(CI跨0)"}${sleeveText}</p>`;
+  }
+  return `<p class="spy-warning-robust ok" title="聚合预警样本外CI排除0 · OOS-robust">✓ 聚合预警样本外稳健${ci ? `(CI ${ci})` : ""}</p>`;
+}
+
+function spyWarningSleeveLabel(key) {
+  const map = {
+    fundingStress: "融资压力",
+    ratesCurveStress: "利率曲线压力",
+    liquidityStress: "流动性压力",
+    creditVolStress: "信用/波动压力",
+    externalShock: "外部冲击",
+  };
+  return map[key] || key;
+}
+
 function renderSpyEarlyWarning(warning) {
   const item = warning && typeof warning === "object" ? warning : DEFAULT_DATA.spyEarlyWarning;
   if (!item.available) {
@@ -2072,6 +2126,7 @@ function renderSpyEarlyWarning(warning) {
       </div>
     </div>
     <p class="spy-warning-summary">${escapeHtml(item.summary || "")}</p>
+    ${spyWarningRobustNote(item)}
     <div class="spy-warning-calibration">
       <span><b>基础分</b><strong>${Number.isFinite(baseScore) ? baseScore.toFixed(1) : "--"}</strong></span>
       <span><b>风险放大</b><strong>${amplifierText}</strong></span>
