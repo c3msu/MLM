@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import treasury_data.build_dashboard as dashboard_builder
 import treasury_data.scoring_equity as scoring_equity
+import treasury_data.scoring_lppl as scoring_lppl
 from treasury_data.build_dashboard import (
     apply_content_overrides,
     build_conclusion_audit,
@@ -2348,7 +2349,7 @@ class DashboardBuilderTests(unittest.TestCase):
                 "passesLpplDiagnostics": len(windows) <= 4,
             }
 
-        with patch.object(dashboard_builder, "fit_lppl_window", side_effect=fake_fit_lppl_window):
+        with patch.object(scoring_lppl, "fit_lppl_window", side_effect=fake_fit_lppl_window):
             fit = dashboard_builder.fit_global_lppl_signal(bars)
 
         self.assertEqual(windows, [120, 180, 252, 375, 500, 750])
@@ -2698,7 +2699,7 @@ class DashboardBuilderTests(unittest.TestCase):
             windows.append(len(sample))
             return {"available": True, "score": 42.0, "confidence": 0.5, "fitR2": 0.9, "fitSse": 1.0, "daysToCritical": 60, "windowDays": len(sample)}
 
-        with patch.object(dashboard_builder, "fit_lppl_window", side_effect=fake_fit_lppl_window):
+        with patch.object(scoring_lppl, "fit_lppl_window", side_effect=fake_fit_lppl_window):
             fit = dashboard_builder.fit_global_lppl_signal(bars, fast=True)
 
         self.assertTrue(fit["available"])
