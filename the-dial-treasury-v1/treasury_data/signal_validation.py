@@ -16,6 +16,7 @@ from datetime import date, timedelta
 from statistics import median
 from typing import Any, Iterable
 
+from .dashboard_core import SIGNAL_VALIDATION_DRAWDOWN_DAYS, SIGNAL_VALIDATION_DRAWDOWN_PCT, SIGNAL_VALIDATION_OOS_SPLIT
 from .sources import SeriesPoint
 
 DEFAULT_OOS_SPLIT = 0.65
@@ -658,3 +659,101 @@ def round_optional(value: float | None, *, digits: int = 3) -> float | None:
     if value is None or not math.isfinite(value):
         return None
     return round(value, digits)
+
+
+# --- metric-row builder (2026-06-20 Phase 1: pulled down from monolith; the cross-cutting
+# validation primitive used by lppl / regional / equity-bridge / validation_build) ---
+MIN_SIGNAL_VALIDATION_POINTS = 40
+
+
+def trailing_return_values(prices: SortedSeries, targets: list[date], *, days: int) -> list[float | None]:
+    values: list[float | None] = []
+    for target in targets:
+        current = prices.value_at_or_before(target)
+        past = prices.value_at_or_before(target - timedelta(days=days))
+        if current is None or past is None or past == 0:
+            values.append(None)
+        else:
+            values.append((current / past - 1) * 100)
+    return values
+
+
+def signal_validation_metric_row(
+    *,
+    row_id: str,
+    label: str,
+    label_cn: str,
+    module: str,
+    signal_points: list[SeriesPoint],
+    price_points: list[SeriesPoint],
+    prices_sorted: SortedSeries,
+    direction: str,
+    drawdown_threshold_pct: float = SIGNAL_VALIDATION_DRAWDOWN_PCT,
+    drawdown_horizon_days: int = SIGNAL_VALIDATION_DRAWDOWN_DAYS,
+) -> dict[str, Any] | None:
+    if len(signal_points) < MIN_SIGNAL_VALIDATION_POINTS:
+        return None
+    evaluation = evaluate_signal(
+        signal_points,
+        price_points,
+        horizons=(7, 30, 91),
+        oos_split=SIGNAL_VALIDATION_OOS_SPLIT,
+        direction=direction,
+        drawdown_threshold_pct=drawdown_threshold_pct,
+        drawdown_horizon_days=drawdown_horizon_days,
+    )
+    if not evaluation.get("available"):
+        return None
+    horizons = {item["days"]: item for item in evaluation["horizons"]}
+    targets = [point.date for point in signal_points]
+    signal_values: list[float | None] = [point.value for point in signal_points]
+    contemporaneous = spearman_ic(signal_values, trailing_return_values(prices_sorted, targets, days=30))
+    trailing = spearman_ic(signal_values, trailing_return_values(prices_sorted, targets, days=91))
+    forward_candidates = [
+        horizons.get(30, {}).get("icOos"),
+        horizons.get(91, {}).get("icOos"),
+    ]
+    forward_candidates = [value for value in forward_candidates if value is not None]
+    if not forward_candidates:
+        forward_candidates = [
+            value
+            for value in (horizons.get(30, {}).get("ic"), horizons.get(91, {}).get("ic"))
+            if value is not None
+        ]
+    forward_ic = max(forward_candidates, key=abs) if forward_candidates else None
+    alert = evaluation.get("alert", {})
+    return {
+        "id": row_id,
+        "label": label,
+        "labelCn": label_cn,
+        "module": module,
+        "direction": direction,
+        "observationCount": evaluation["observationCount"],
+        "ic1w": horizons.get(7, {}).get("ic"),
+        "ic1m": horizons.get(30, {}).get("ic"),
+        "ic3m": horizons.get(91, {}).get("ic"),
+        "oosIc1m": horizons.get(30, {}).get("icOos"),
+        "oosIc3m": horizons.get(91, {}).get("icOos"),
+        "ci3m": horizons.get(91, {}).get("ci"),
+        "oosCi3m": horizons.get(91, {}).get("ciOos"),
+        "robust": horizons.get(91, {}).get("robustOos"),
+        "regimeSplit": horizons.get(91, {}).get("regimeSplit"),
+        "hitRateOos": alert.get("oosHitRate"),
+        "baseRate": alert.get("baseRate"),
+        "lift": alert.get("lift"),
+        "leadTimeDays": alert.get("leadTimeDays"),
+        "falseAlarmDays": alert.get("falseAlarmDays"),
+        "oosAlertCount": alert.get("oosAlertCount"),
+        "alertThreshold": alert.get("thresholdValue"),
+        "thresholdPercentile": alert.get("thresholdPercentile"),
+        "alertCountTotal": alert.get("alertCountTotal"),
+        "hitRateTotal": alert.get("hitRateTotal"),
+        "baseRateTotal": alert.get("baseRateTotal"),
+        "breachEvents": alert.get("breachEvents", []),
+        "classification": classify_lead_lag(
+            forward_ic=forward_ic,
+            contemporaneous_corr=contemporaneous,
+            trailing_ic=trailing,
+        ),
+        "clusterId": None,
+    }
