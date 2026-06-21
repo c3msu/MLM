@@ -48610,7 +48610,7 @@
       "长端动量"
     ]
   ],
-  "generatedAt": "2026-06-19T02:34:20+00:00",
+  "generatedAt": "2026-06-21T00:52:17+00:00",
   "globalLpplRisk": {
     "asOf": "2026-06-18",
     "available": true,
@@ -149923,7 +149923,7 @@
           "note": "Bhadial Regional Banks vs SPY的公开代理: FRED NASDAQ Bank Index相对S&P 500;不是KRE/SPY ETF精确替代,但能捕捉银行股相对风险偏好。",
           "score": -1,
           "sourceMode": "proxy-public",
-          "tag": "0.68 · 历史p12",
+          "tag": "0.68 · 历史p11",
           "v": "银行承压"
         },
         {
@@ -149953,7 +149953,7 @@
           "note": "Bhadial High-Beta Preference的公开代理: FRED Nasdaq-100 Total Return相对Nasdaq US 500 Large Cap Total Return,用于替代IWM/SPY ETF历史。",
           "score": 1,
           "sourceMode": "proxy-public",
-          "tag": "7.88 · 历史p99",
+          "tag": "7.98 · 历史p100",
           "v": "高Beta占优"
         },
         {
@@ -150128,8 +150128,8 @@
       }
     ],
     "benchmark": {
-      "delta": 1.2,
-      "score": 46.6,
+      "delta": 3.7,
+      "score": 44.1,
       "sourceUrl": "https://bhadial.com/dashboard",
       "status": "ok"
     },
@@ -152988,11 +152988,11 @@
       {
         "message": "处于历史高分位区间",
         "name": "高Beta偏好(NDX/US500)",
-        "percentile": 99,
+        "percentile": 100,
         "severity": "extreme",
         "side": "high",
         "source": "FRED NASDAQXNDX / NASDAQNQUS500LCT",
-        "value": "7.88"
+        "value": "7.98"
       }
     ],
     "items": [
@@ -153117,7 +153117,7 @@
       },
       {
         "name": "银行股相对S&P500",
-        "percentile": 12,
+        "percentile": 11,
         "source": "FRED NASDAQBANK / SP500",
         "value": "0.68",
         "window": "5Y"
@@ -153131,9 +153131,9 @@
       },
       {
         "name": "高Beta偏好(NDX/US500)",
-        "percentile": 99,
+        "percentile": 100,
         "source": "FRED NASDAQXNDX / NASDAQNQUS500LCT",
-        "value": "7.88",
+        "value": "7.98",
         "window": "5Y"
       },
       {
@@ -158076,7 +158076,7 @@
       },
       {
         "change": 8,
-        "latestPercentile": 12,
+        "latestPercentile": 11,
         "name": "银行股相对S&P500",
         "points": [
           {
@@ -158145,9 +158145,9 @@
             "value": 0.69
           },
           {
-            "date": "2024-03-22",
-            "percentile": 3,
-            "value": 0.69
+            "date": "2024-03-25",
+            "percentile": 5,
+            "value": 0.7
           },
           {
             "date": "2024-04-15",
@@ -158165,7 +158165,7 @@
             "value": 0.69
           },
           {
-            "date": "2024-06-17",
+            "date": "2024-06-18",
             "percentile": 0,
             "value": 0.65
           },
@@ -158185,8 +158185,8 @@
             "value": 0.73
           },
           {
-            "date": "2024-09-11",
-            "percentile": 20,
+            "date": "2024-09-12",
+            "percentile": 19,
             "value": 0.73
           },
           {
@@ -158200,12 +158200,12 @@
             "value": 0.75
           },
           {
-            "date": "2024-11-12",
-            "percentile": 37,
-            "value": 0.81
+            "date": "2024-11-13",
+            "percentile": 36,
+            "value": 0.8
           },
           {
-            "date": "2024-12-04",
+            "date": "2024-12-05",
             "percentile": 34,
             "value": 0.79
           },
@@ -158220,14 +158220,14 @@
             "value": 0.76
           },
           {
-            "date": "2025-02-10",
-            "percentile": 28,
-            "value": 0.75
+            "date": "2025-02-11",
+            "percentile": 32,
+            "value": 0.76
           },
           {
-            "date": "2025-03-04",
-            "percentile": 24,
-            "value": 0.74
+            "date": "2025-03-05",
+            "percentile": 20,
+            "value": 0.73
           },
           {
             "date": "2025-03-25",
@@ -158235,17 +158235,17 @@
             "value": 0.73
           },
           {
-            "date": "2025-04-14",
-            "percentile": 5,
-            "value": 0.69
+            "date": "2025-04-15",
+            "percentile": 10,
+            "value": 0.7
           },
           {
-            "date": "2025-05-06",
-            "percentile": 21,
-            "value": 0.73
+            "date": "2025-05-07",
+            "percentile": 20,
+            "value": 0.72
           },
           {
-            "date": "2025-05-28",
+            "date": "2025-05-29",
             "percentile": 12,
             "value": 0.7
           },
@@ -158255,19 +158255,19 @@
             "value": 0.68
           },
           {
-            "date": "2025-07-10",
-            "percentile": 25,
-            "value": 0.73
+            "date": "2025-07-11",
+            "percentile": 22,
+            "value": 0.72
           },
           {
-            "date": "2025-07-31",
-            "percentile": 3,
-            "value": 0.68
+            "date": "2025-08-01",
+            "percentile": 2,
+            "value": 0.67
           },
           {
-            "date": "2025-08-21",
-            "percentile": 9,
-            "value": 0.69
+            "date": "2025-08-22",
+            "percentile": 20,
+            "value": 0.71
           },
           {
             "date": "2025-09-12",
@@ -158275,68 +158275,68 @@
             "value": 0.7
           },
           {
-            "date": "2025-10-02",
-            "percentile": 1,
+            "date": "2025-10-03",
+            "percentile": 2,
             "value": 0.66
           },
           {
-            "date": "2025-10-23",
+            "date": "2025-10-24",
             "percentile": 0,
-            "value": 0.63
+            "value": 0.64
           },
           {
-            "date": "2025-11-13",
+            "date": "2025-11-14",
             "percentile": 2,
             "value": 0.64
           },
           {
-            "date": "2025-12-04",
+            "date": "2025-12-05",
             "percentile": 5,
-            "value": 0.67
+            "value": 0.66
           },
           {
-            "date": "2025-12-26",
-            "percentile": 8,
+            "date": "2025-12-29",
+            "percentile": 7,
             "value": 0.68
           },
           {
-            "date": "2026-01-20",
-            "percentile": 17,
+            "date": "2026-01-21",
+            "percentile": 28,
+            "value": 0.72
+          },
+          {
+            "date": "2026-02-11",
+            "percentile": 31,
+            "value": 0.72
+          },
+          {
+            "date": "2026-03-04",
+            "percentile": 13,
             "value": 0.69
           },
           {
-            "date": "2026-02-10",
-            "percentile": 36,
-            "value": 0.73
-          },
-          {
-            "date": "2026-03-03",
+            "date": "2026-03-25",
             "percentile": 15,
             "value": 0.69
           },
           {
-            "date": "2026-03-24",
-            "percentile": 16,
+            "date": "2026-04-16",
+            "percentile": 14,
             "value": 0.69
           },
           {
-            "date": "2026-04-15",
-            "percentile": 17,
-            "value": 0.69
-          },
-          {
-            "date": "2026-05-06",
-            "percentile": 8,
+            "date": "2026-05-07",
+            "percentile": 7,
             "value": 0.67
           },
           {
-            "date": "2026-05-27",
-            "percentile": 4,
-            "value": 0.66
+            "date": "2026-05-28",
+            "percentile": 3,
+            "value": 0.65
           },
           {
-            "date": "2026-06-17",
-            "percentile": 12,
+            "date": "2026-06-18",
+            "percentile": 11,
             "value": 0.68
           }
         ],
@@ -158617,8 +158617,8 @@
         "window": "5Y"
       },
       {
-        "change": -1,
-        "latestPercentile": 99,
+        "change": 0,
+        "latestPercentile": 100,
         "name": "高Beta偏好(NDX/US500)",
         "points": [
           {
@@ -158687,7 +158687,7 @@
             "value": 7.05
           },
           {
-            "date": "2024-03-22",
+            "date": "2024-03-25",
             "percentile": 93,
             "value": 6.96
           },
@@ -158707,9 +158707,9 @@
             "value": 7.08
           },
           {
-            "date": "2024-06-17",
+            "date": "2024-06-18",
             "percentile": 100,
-            "value": 7.23
+            "value": 7.21
           },
           {
             "date": "2024-07-10",
@@ -158727,9 +158727,9 @@
             "value": 7.0
           },
           {
-            "date": "2024-09-11",
-            "percentile": 74,
-            "value": 6.86
+            "date": "2024-09-12",
+            "percentile": 76,
+            "value": 6.88
           },
           {
             "date": "2024-10-02",
@@ -158742,14 +158742,14 @@
             "value": 6.85
           },
           {
-            "date": "2024-11-12",
-            "percentile": 86,
-            "value": 6.95
-          },
-          {
-            "date": "2024-12-04",
+            "date": "2024-11-13",
             "percentile": 84,
             "value": 6.94
+          },
+          {
+            "date": "2024-12-05",
+            "percentile": 83,
+            "value": 6.93
           },
           {
             "date": "2024-12-26",
@@ -158762,14 +158762,14 @@
             "value": 7.02
           },
           {
-            "date": "2025-02-10",
-            "percentile": 95,
-            "value": 7.05
+            "date": "2025-02-11",
+            "percentile": 92,
+            "value": 7.03
           },
           {
-            "date": "2025-03-04",
-            "percentile": 82,
-            "value": 6.95
+            "date": "2025-03-05",
+            "percentile": 84,
+            "value": 6.96
           },
           {
             "date": "2025-03-25",
@@ -158777,19 +158777,19 @@
             "value": 6.93
           },
           {
-            "date": "2025-04-14",
-            "percentile": 65,
-            "value": 6.87
+            "date": "2025-04-15",
+            "percentile": 69,
+            "value": 6.89
           },
           {
-            "date": "2025-05-06",
-            "percentile": 82,
-            "value": 6.95
+            "date": "2025-05-07",
+            "percentile": 79,
+            "value": 6.94
           },
           {
-            "date": "2025-05-28",
-            "percentile": 97,
-            "value": 7.11
+            "date": "2025-05-29",
+            "percentile": 96,
+            "value": 7.09
           },
           {
             "date": "2025-06-18",
@@ -158797,17 +158797,17 @@
             "value": 7.12
           },
           {
-            "date": "2025-07-10",
-            "percentile": 96,
-            "value": 7.11
+            "date": "2025-07-11",
+            "percentile": 97,
+            "value": 7.12
           },
           {
-            "date": "2025-07-31",
-            "percentile": 98,
-            "value": 7.16
+            "date": "2025-08-01",
+            "percentile": 97,
+            "value": 7.14
           },
           {
-            "date": "2025-08-21",
+            "date": "2025-08-22",
             "percentile": 94,
             "value": 7.11
           },
@@ -158817,69 +158817,69 @@
             "value": 7.16
           },
           {
-            "date": "2025-10-02",
-            "percentile": 100,
-            "value": 7.26
-          },
-          {
-            "date": "2025-10-23",
-            "percentile": 100,
-            "value": 7.29
-          },
-          {
-            "date": "2025-11-13",
-            "percentile": 98,
-            "value": 7.29
-          },
-          {
-            "date": "2025-12-04",
+            "date": "2025-10-03",
             "percentile": 99,
-            "value": 7.34
-          },
-          {
-            "date": "2025-12-26",
-            "percentile": 97,
-            "value": 7.29
-          },
-          {
-            "date": "2026-01-20",
-            "percentile": 95,
-            "value": 7.26
-          },
-          {
-            "date": "2026-02-10",
-            "percentile": 89,
-            "value": 7.16
-          },
-          {
-            "date": "2026-03-03",
-            "percentile": 90,
-            "value": 7.17
-          },
-          {
-            "date": "2026-03-24",
-            "percentile": 92,
             "value": 7.23
           },
           {
-            "date": "2026-04-15",
+            "date": "2025-10-24",
+            "percentile": 100,
+            "value": 7.31
+          },
+          {
+            "date": "2025-11-14",
+            "percentile": 99,
+            "value": 7.29
+          },
+          {
+            "date": "2025-12-05",
             "percentile": 99,
             "value": 7.36
           },
           {
-            "date": "2026-05-06",
-            "percentile": 100,
-            "value": 7.68
+            "date": "2025-12-29",
+            "percentile": 96,
+            "value": 7.28
           },
           {
-            "date": "2026-05-27",
-            "percentile": 100,
-            "value": 7.87
+            "date": "2026-01-21",
+            "percentile": 96,
+            "value": 7.28
           },
           {
-            "date": "2026-06-17",
+            "date": "2026-02-11",
+            "percentile": 90,
+            "value": 7.18
+          },
+          {
+            "date": "2026-03-04",
+            "percentile": 92,
+            "value": 7.22
+          },
+          {
+            "date": "2026-03-25",
+            "percentile": 92,
+            "value": 7.23
+          },
+          {
+            "date": "2026-04-16",
             "percentile": 99,
+            "value": 7.38
+          },
+          {
+            "date": "2026-05-07",
+            "percentile": 100,
+            "value": 7.7
+          },
+          {
+            "date": "2026-05-28",
+            "percentile": 100,
             "value": 7.88
+          },
+          {
+            "date": "2026-06-18",
+            "percentile": 100,
+            "value": 7.98
           }
         ],
         "source": "FRED NASDAQXNDX / NASDAQNQUS500LCT",
@@ -216609,43 +216609,43 @@
   },
   "sourceStatus": [
     {
-      "ageDays": 1,
+      "ageDays": 3,
       "latest": "2026-06-18",
       "name": "U.S. Treasury yield curve XML",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "FRED DFII5",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "FRED DFII10",
       "status": "ok"
     },
     {
-      "ageDays": 1,
+      "ageDays": 3,
       "latest": "2026-06-18",
       "name": "FRED T10YIE",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "FRED DFF",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "FRED SOFR",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "FRED OBFR",
       "status": "ok"
@@ -216657,223 +216657,223 @@
       "status": "ok"
     },
     {
-      "ageDays": 1,
+      "ageDays": 3,
       "latest": "2026-06-18",
       "name": "FRED RRPONTSYAWARD",
       "status": "ok"
     },
     {
-      "ageDays": 1,
+      "ageDays": 3,
       "latest": "2026-06-18",
       "name": "FRED RPONTSYD",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "FRED WTREGEN",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "FRED WALCL",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "FRED TREAST",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "FRED WRESBAL",
       "status": "ok"
     },
     {
-      "ageDays": 1,
+      "ageDays": 3,
       "latest": "2026-06-18",
       "name": "FRED RRPONTSYD",
       "status": "ok"
     },
     {
-      "ageDays": 49,
+      "ageDays": 51,
       "latest": "2026-05-01",
       "name": "FRED CPIAUCSL",
       "status": "ok"
     },
     {
-      "ageDays": 79,
+      "ageDays": 81,
       "latest": "2026-04-01",
       "name": "FRED PCEPI",
       "status": "ok"
     },
     {
-      "ageDays": 79,
+      "ageDays": 81,
       "latest": "2026-04-01",
       "name": "FRED PCEPILFE",
       "status": "ok"
     },
     {
-      "ageDays": 79,
+      "ageDays": 81,
       "latest": "2026-04-01",
       "name": "FRED PCETRIM12M159SFRBDAL",
       "status": "ok"
     },
     {
-      "ageDays": 49,
+      "ageDays": 51,
       "latest": "2026-05-01",
       "name": "FRED PPIACO",
       "status": "ok"
     },
     {
-      "ageDays": 49,
+      "ageDays": 51,
       "latest": "2026-05-01",
       "name": "FRED UNRATE",
       "status": "ok"
     },
     {
-      "ageDays": 49,
+      "ageDays": 51,
       "latest": "2026-05-01",
       "name": "FRED PAYEMS",
       "status": "ok"
     },
     {
-      "ageDays": 169,
+      "ageDays": 171,
       "latest": "2026-01-01",
       "name": "FRED GDPC1",
       "status": "ok"
     },
     {
-      "ageDays": 1,
+      "ageDays": 3,
       "latest": "2026-06-18",
       "name": "FRED SP500",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "FRED VIXCLS",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "FRED VXVCLS",
       "status": "ok"
     },
     {
-      "ageDays": 7,
+      "ageDays": 9,
       "latest": "2026-06-12",
       "name": "FRED DTWEXBGS",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "FRED DCPF3M",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "FRED DTB3",
       "status": "ok"
     },
     {
-      "ageDays": 7,
+      "ageDays": 9,
       "latest": "2026-06-12",
       "name": "FRED NFCI",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "FRED BAMLH0A0HYM2",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "FRED BAMLC0A0CM",
       "status": "ok"
     },
     {
-      "ageDays": 49,
+      "ageDays": 51,
       "latest": "2026-05-01",
       "name": "FRED IRLTLT01JPM156N",
       "status": "ok"
     },
     {
-      "ageDays": 49,
+      "ageDays": 51,
       "latest": "2026-05-01",
       "name": "FRED IRLTLT01DEM156N",
       "status": "ok"
     },
     {
-      "ageDays": 49,
+      "ageDays": 51,
       "latest": "2026-05-01",
       "name": "FRED IRLTLT01GBM156N",
       "status": "ok"
     },
     {
-      "ageDays": 4,
+      "ageDays": 6,
       "latest": "2026-06-15",
       "name": "FRED DCOILWTICO",
       "status": "ok"
     },
     {
-      "ageDays": 4,
+      "ageDays": 6,
       "latest": "2026-06-15",
       "name": "FRED DHHNGSP",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "FRED OVXCLS",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "FRED GVZCLS",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "FRED DGS10",
       "status": "ok"
     },
     {
-      "ageDays": 2,
-      "latest": "2026-06-17",
+      "ageDays": 3,
+      "latest": "2026-06-18",
       "name": "FRED NASDAQXNDX",
       "status": "ok"
     },
     {
-      "ageDays": 2,
-      "latest": "2026-06-17",
+      "ageDays": 3,
+      "latest": "2026-06-18",
       "name": "FRED NASDAQNQUS500LCT",
       "status": "ok"
     },
     {
-      "ageDays": 2,
-      "latest": "2026-06-17",
+      "ageDays": 3,
+      "latest": "2026-06-18",
       "name": "FRED NASDAQBANK",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "FRED BAMLHYH0A0HYM2TRIV",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "FRED BAMLCC0A0CMTRIV",
       "status": "ok"
@@ -216913,43 +216913,44 @@
       "status": "warning"
     },
     {
-      "ageDays": 3,
+      "ageDays": 5,
       "expectedMaxAgeDays": 45,
       "latest": "2026-06-16",
       "name": "NY Fed ACM term premium",
       "status": "ok"
     },
     {
-      "ageDays": 10,
+      "ageDays": 12,
       "expectedMaxAgeDays": 10,
       "latest": "2026-06-09",
       "name": "CFTC financial futures COT",
-      "status": "ok"
-    },
-    {
-      "ageDays": 79,
-      "expectedMaxAgeDays": 75,
-      "latest": "2026-04",
-      "name": "Treasury TIC major foreign holders",
-      "note": "Latest observation is 79 days old; expected <= 75.",
+      "note": "Latest observation is 11 days old; expected <= 10.",
       "status": "stale"
     },
     {
-      "ageDays": 9,
+      "ageDays": 81,
+      "expectedMaxAgeDays": 75,
+      "latest": "2026-04",
+      "name": "Treasury TIC major foreign holders",
+      "note": "Latest observation is 80 days old; expected <= 75.",
+      "status": "stale"
+    },
+    {
+      "ageDays": 11,
       "expectedMaxAgeDays": 21,
       "latest": "2026-06-10",
       "name": "NY Fed primary dealer statistics",
       "status": "ok"
     },
     {
-      "ageDays": 44,
+      "ageDays": 46,
       "expectedMaxAgeDays": 120,
       "latest": "2026-05-06",
       "name": "U.S. Treasury quarterly refunding documents",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "expectedMaxAgeDays": 10,
       "latest": "2026-06-17",
       "name": "Treasury Fiscal Data debt subject to limit",
@@ -216968,25 +216969,25 @@
       "status": "warning"
     },
     {
-      "ageDays": 0,
-      "latest": "2026-06-19",
+      "ageDays": 1,
+      "latest": "2026-06-20",
       "name": "Cboe SPY option open interest",
       "status": "ok"
     },
     {
-      "ageDays": 2,
+      "ageDays": 4,
       "latest": "2026-06-17",
       "name": "Federal Reserve press release RSS",
       "status": "ok"
     },
     {
-      "ageDays": 126,
+      "ageDays": 128,
       "latest": "2026-02-13",
       "name": "U.S. Treasury press releases",
       "status": "ok"
     },
     {
-      "latest": "46.6",
+      "latest": "44.1",
       "name": "Bhadial public score benchmark",
       "status": "ok"
     },
