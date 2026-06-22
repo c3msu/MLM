@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650;9..144,750&family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20260620-robustness-tier-v1">
+  <link rel="stylesheet" href="styles.css?v=20260622-declutter-v1">
 </head>
 <body>
   <header class="site-header">
@@ -198,51 +198,6 @@
         <h2 data-i18n-html="section.scorecard.titleHtml">因子计分卡 <span>FACTOR SCORECARD</span></h2>
         <p data-i18n="section.scorecard.desc">每个因子打 -2 到 +2 分,正分代表利多久期,负分代表利空久期。点击信号格可手动调整评分,权重也可编辑。</p>
       </div>
-      <article id="macroLiquidityEquityLead" class="panel liquidity-equity-panel">
-        <div class="panel-title">
-          <div>
-            <h3>宏观环境评分 vs S&P 500 · 5Y Lead Study</h3>
-            <span id="liquidityEquityMethod" class="panel-kicker">monthly sample · forward return test</span>
-          </div>
-          <span id="liquidityEquityCoverage" class="panel-kicker">loading</span>
-        </div>
-        <p id="liquidityEquityRead" class="liquidity-equity-read">--</p>
-        <div id="spyEarlyWarning" class="spy-warning-panel"></div>
-        <div id="equityShortTermRisk" class="equity-risk-panel">equityShortTermRisk loading</div>
-        <div id="globalLpplRisk" class="global-lppl-risk-panel">globalLpplRisk loading</div>
-        <div id="liquidityEquitySignal" class="liquidity-equity-signal"></div>
-        <div id="liquidityEquityStateGrid" class="liquidity-state-grid"></div>
-        <div id="liquidityEquityStats" class="liquidity-equity-stats"></div>
-        <div id="liquidityEquityChart" class="liquidity-equity-chart"></div>
-        <div id="liquidityEquityBuckets" class="liquidity-equity-buckets"></div>
-        <div id="liquidityEquityDiagnostics" class="liquidity-equity-diagnostics">
-          <section>
-            <h4>Lead/Lag Matrix</h4>
-            <div id="liquidityEquityLeadLag"></div>
-          </section>
-          <section>
-            <h4>Score Change</h4>
-            <div id="liquidityEquityChangeBuckets"></div>
-          </section>
-          <section>
-            <h4>Rolling Corr / Drawdown</h4>
-            <div id="liquidityEquityRolling"></div>
-          </section>
-        </div>
-      </article>
-      <article id="signalValidationPanel" class="panel signal-validation-panel">
-        <div class="panel-title">
-          <div>
-            <h3>信号验证 · Signal Validation (Walk-Forward)</h3>
-            <span id="signalValidationMethod" class="panel-kicker">weekly point-in-time replay · out-of-sample split</span>
-          </div>
-          <span id="signalValidationCoverage" class="panel-kicker">loading</span>
-        </div>
-        <p id="signalValidationRead" class="liquidity-equity-read">--</p>
-        <div id="signalValidationComposites" class="signal-validation-composites"></div>
-        <div id="signalValidationFactors" class="signal-validation-factors"></div>
-        <div id="signalValidationClusters" class="signal-validation-clusters"></div>
-      </article>
       <div class="score-summary">
         <div>
           <span data-i18n="stance.duration">综合久期立场 · Composite</span>
@@ -259,6 +214,7 @@
         </div>
       </div>
       <div id="scorecardSourceLegend" class="score-source-legend"></div>
+      <div id="scorecardGroups" class="scorecard-groups"></div>
       <article id="bhadialCoveragePanel" class="panel bhadial-coverage-panel" hidden></article>
       <div class="bhadial-feature-grid">
         <article class="panel percentile-panel">
@@ -311,7 +267,59 @@
         <div id="historyInteractiveChart" class="history-chart"></div>
         <div id="historyChartTooltip" class="history-tooltip" hidden></div>
       </article>
-      <div id="scorecardGroups" class="scorecard-groups"></div>
+      <article id="macroLiquidityEquityLead" class="panel liquidity-equity-panel">
+        <div class="panel-title">
+          <div>
+            <h3>前瞻信号 · Forward Signals</h3>
+            <span id="liquidityEquityMethod" class="panel-kicker">SPY 预警 / 股票短期风险 / LPPL 泡沫</span>
+          </div>
+          <span id="liquidityEquityCoverage" class="panel-kicker">loading</span>
+        </div>
+        <p id="liquidityEquityRead" class="liquidity-equity-read">--</p>
+        <div id="spyEarlyWarning" class="spy-warning-panel"></div>
+        <div id="equityShortTermRisk" class="equity-risk-panel">equityShortTermRisk loading</div>
+        <div id="globalLpplRisk" class="global-lppl-risk-panel">globalLpplRisk loading</div>
+        <details class="diagnostic-details">
+          <summary>宏观环境评分 vs S&P 500 · 5Y Lead Study<span class="diagnostic-hint">点击展开前瞻性研究</span></summary>
+          <div class="diagnostic-body">
+            <div id="liquidityEquitySignal" class="liquidity-equity-signal"></div>
+            <div id="liquidityEquityStateGrid" class="liquidity-state-grid"></div>
+            <div id="liquidityEquityStats" class="liquidity-equity-stats"></div>
+            <div id="liquidityEquityChart" class="liquidity-equity-chart"></div>
+            <div id="liquidityEquityBuckets" class="liquidity-equity-buckets"></div>
+            <div id="liquidityEquityDiagnostics" class="liquidity-equity-diagnostics">
+              <section>
+                <h4>Lead/Lag Matrix</h4>
+                <div id="liquidityEquityLeadLag"></div>
+              </section>
+              <section>
+                <h4>Score Change</h4>
+                <div id="liquidityEquityChangeBuckets"></div>
+              </section>
+              <section>
+                <h4>Rolling Corr / Drawdown</h4>
+                <div id="liquidityEquityRolling"></div>
+              </section>
+            </div>
+          </div>
+        </details>
+      </article>
+      <details class="diagnostic-details diagnostic-panel">
+        <summary>信号验证 · Signal Validation (Walk-Forward)<span class="diagnostic-hint">周度时点回放 · 走出样本切分</span></summary>
+        <article id="signalValidationPanel" class="panel signal-validation-panel">
+          <div class="panel-title">
+            <div>
+              <h3>信号验证 · Signal Validation (Walk-Forward)</h3>
+              <span id="signalValidationMethod" class="panel-kicker">weekly point-in-time replay · out-of-sample split</span>
+            </div>
+            <span id="signalValidationCoverage" class="panel-kicker">loading</span>
+          </div>
+          <p id="signalValidationRead" class="liquidity-equity-read">--</p>
+          <div id="signalValidationComposites" class="signal-validation-composites"></div>
+          <div id="signalValidationFactors" class="signal-validation-factors"></div>
+          <div id="signalValidationClusters" class="signal-validation-clusters"></div>
+        </article>
+      </details>
     </section>
 
     <section id="policy" class="section-band">
@@ -608,11 +616,11 @@
       <div id="globalLpplRiskHistoryModalTooltip" class="percentile-tooltip global-lppl-history-tooltip modal-tooltip" hidden></div>
     </section>
   </div>
-  <script src="i18n.js?v=20260620-robustness-tier-v1"></script>
-  <script src="render-equity.js?v=20260620-robustness-tier-v1"></script>
-  <script src="render-markets.js?v=20260620-robustness-tier-v1"></script>
-  <script src="render-liquidity.js?v=20260620-robustness-tier-v1"></script>
-  <script src="render-history.js?v=20260620-robustness-tier-v1"></script>
-  <script src="app.js?v=20260620-robustness-tier-v1"></script>
+  <script src="i18n.js?v=20260622-declutter-v1"></script>
+  <script src="render-equity.js?v=20260622-declutter-v1"></script>
+  <script src="render-markets.js?v=20260622-declutter-v1"></script>
+  <script src="render-liquidity.js?v=20260622-declutter-v1"></script>
+  <script src="render-history.js?v=20260622-declutter-v1"></script>
+  <script src="app.js?v=20260622-declutter-v1"></script>
 </body>
 </html>

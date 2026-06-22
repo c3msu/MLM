@@ -5128,6 +5128,47 @@ body.modal-open {
 .region-advanced[open] > .region-advanced-summary { border-bottom: 1px solid var(--line-soft); }
 .region-advanced > div:not(:empty) { margin: 12px; }
 
+/* Collapsible deep-diagnostic blocks (declutter: headline numbers stay visible,
+   expert deep-dives fold away by default). Reused across scorecard panels. */
+.diagnostic-details {
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  background: var(--panel-2);
+  margin-top: 12px;
+}
+.diagnostic-details > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 10px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--neutral);
+  user-select: none;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.diagnostic-details > summary::-webkit-details-marker { display: none; }
+.diagnostic-details > summary::before { content: "▸"; color: var(--faint); }
+.diagnostic-details[open] > summary::before { content: "▾"; }
+.diagnostic-details > summary:hover { color: var(--ink); }
+.diagnostic-details[open] > summary { border-bottom: 1px solid var(--line-soft); }
+.diagnostic-hint {
+  margin-left: auto;
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--faint);
+  font-family: var(--mono);
+}
+.diagnostic-details > .diagnostic-body { padding: 12px 14px; }
+/* When the collapsed content is itself a full panel, drop its outer chrome to avoid a box-in-box. */
+.diagnostic-details.diagnostic-panel > .signal-validation-panel {
+  border: none;
+  background: transparent;
+  margin: 0;
+  padding: 12px 14px;
+}
+
 .regional-monitor-tabs {
   display: flex;
   flex-wrap: wrap;
