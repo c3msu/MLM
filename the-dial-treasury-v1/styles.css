@@ -5162,12 +5162,16 @@ body.modal-open {
 }
 .diagnostic-details > .diagnostic-body { padding: 12px 14px; }
 /* When the collapsed content is itself a full panel, drop its outer chrome to avoid a box-in-box. */
-.diagnostic-details.diagnostic-panel > .signal-validation-panel {
+/* When a collapsed details wraps full panels, drop their outer chrome to avoid a box-in-box;
+   separate stacked panels with a hairline instead. */
+.diagnostic-details.diagnostic-panel > .panel {
   border: none;
   background: transparent;
   margin: 0;
   padding: 12px 14px;
 }
+.diagnostic-details.diagnostic-panel > .panel + .panel { border-top: 1px solid var(--line-soft); }
+.diagnostic-details.diagnostic-panel > .panel[hidden] + .panel { border-top: none; }
 
 .regional-monitor-tabs {
   display: flex;
