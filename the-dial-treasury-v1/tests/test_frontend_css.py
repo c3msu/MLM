@@ -294,9 +294,13 @@ class FrontendCssTests(unittest.TestCase):
         renderer_end = app_js.index("function renderEquityRiskHistoryChart")
         renderer = app_js[renderer_start:renderer_end]
         self.assertIn("const trendHistory = renderEquityRiskHistoryChart(item);", renderer)
-        self.assertLess(renderer.index("${trendHistory}"), renderer.index('<div class="equity-risk-worst">'))
-        fallback_start = renderer.index('backtest.summary || "样本不足"')
-        self.assertIn("${trendHistory}", renderer[fallback_start:])
+        # Chart renders unconditionally in the main return flow (not inside the
+        # backtest.available branch / not inside the collapsed deep-dive), before the
+        # component breakdown — so it stays visible regardless of backtest availability.
+        self.assertLess(renderer.index("${trendHistory}"), renderer.index('<div class="equity-risk-components">'))
+        self.assertLess(renderer.index("${trendHistory}"), renderer.index('<details class="diagnostic-details equity-risk-deep">'))
+        # The backtest tables / factor audit are folded into the collapsed deep-dive.
+        self.assertIn('<details class="diagnostic-details equity-risk-deep">', renderer)
 
     def test_equity_short_term_risk_history_chart_expands_to_interactive_modal(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")

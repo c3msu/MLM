@@ -118,7 +118,6 @@ function renderEquityShortTermRisk(risk) {
         <span><b>高精度执行阈值</b><strong>${formatPercentMetric(highPrecisionThreshold.precision)}</strong><small>score≥${Number(highPrecisionThreshold.threshold) || 75} · recall ${formatPercentMetric(highPrecisionThreshold.recall)} · false ${Number(highPrecisionThreshold.falsePositives) || 0}</small></span>
       </div>
       ${factorAudit}
-      ${trendHistory}
       <div class="equity-risk-worst">
         <span>最差窗口</span>
         ${worstWindows.slice(0, 3).map((row) => `<b>${escapeHtml(row.date || "--")}<small>score ${Number.isFinite(Number(row.score)) ? Number(row.score).toFixed(1) : "--"} · DD ${formatSignedPercentMetric(row[`maxDrawdown${preferredHorizon}d`] ?? row.maxDrawdown10d)}</small></b>`).join("")}
@@ -127,7 +126,6 @@ function renderEquityShortTermRisk(risk) {
     </div>
   ` : `
     <div class="equity-risk-backtest muted"><span>历史回放</span><b>${escapeHtml(backtest.summary || "样本不足")}</b></div>
-    ${trendHistory}
   `;
   return `
     <div class="equity-risk-head ${riskClass}">
@@ -147,8 +145,14 @@ function renderEquityShortTermRisk(risk) {
       <span><b>SMH 当日</b><strong>${formatSignedPercentMetric(snapshot.smhDayReturn)}</strong></span>
       <span><b>次日审计</b><strong>${shockText}</strong></span>
     </div>
-    ${qualitySummary}
-    ${historicalAnalysis}
+    ${trendHistory}
+    <details class="diagnostic-details equity-risk-deep">
+      <summary>回测与因子审计 · Backtest &amp; Factor Audit<span class="diagnostic-hint">数据可信度 / 历史回放 / 阈值精确率 / 回归</span></summary>
+      <div class="diagnostic-body">
+        ${qualitySummary}
+        ${historicalAnalysis}
+      </div>
+    </details>
     <div class="equity-risk-components">
       ${components.map((component) => {
         const componentScore = Number(component.score);
