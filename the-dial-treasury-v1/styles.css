@@ -4063,7 +4063,7 @@ body.modal-open {
   grid-template-columns: minmax(210px, 1.1fr) minmax(180px, 0.8fr) minmax(180px, 1fr) 232px;
   gap: 10px;
   align-items: center;
-  padding: 10px 13px;
+  padding: 7px 13px;
   border-bottom: 1px solid var(--line-soft);
 }
 
@@ -4087,7 +4087,7 @@ body.modal-open {
   display: inline-flex;
   align-items: center;
   width: fit-content;
-  margin-top: 6px;
+  margin-top: 4px;
   border: 1px solid rgba(120, 105, 78, 0.26);
   border-radius: 999px;
   padding: 2px 7px;
