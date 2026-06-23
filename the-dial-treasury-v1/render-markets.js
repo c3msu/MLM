@@ -297,8 +297,10 @@ function renderRegionalMonitor() {
   const regions = (Array.isArray(panel.regions) ? panel.regions : []).filter(
     (region) => region && Number(region.aggregate && region.aggregate.availableCount) > 0
   );
-  if (methodNode) methodNode.textContent = panel.available ? `${regions.length} regions · per-region LPPL factors` : "per-region bubble factors";
-  if (summaryNode) summaryNode.textContent = panel.summary || (panel.available ? "" : "等待数据");
+  if (methodNode) methodNode.textContent = panel.available ? `${regions.length} 地区 · 逐地区泡沫临界因子` : "per-region bubble factors";
+  // The verbose "N regions in monitor; A/B/C show bubble risk" summary duplicated the region
+  // tabs below, so it is dropped — the rotation action bar carries the headline takeaway.
+  if (summaryNode) summaryNode.textContent = "";
   if (!panel.available || !regions.length) {
     tabsNode.innerHTML = "";
     if (rotationNode) rotationNode.innerHTML = "";
@@ -321,7 +323,11 @@ function renderRegionalMonitor() {
       ? `<div class="region-reduce-clusters">减持风险预算: ${clusterChips}</div>`
       : "";
     rotationNode.innerHTML = rotation.available
-      ? `<div class="region-rotation-card"><strong>地区轮动建议 · Regional Rotation</strong><span>${escapeHtml(rotation.summary || "")}</span>${clusterRow}</div>`
+      ? `<div class="region-rotation-card">
+           <span class="region-rotation-tag">地区轮动 · Rotation</span>
+           <strong class="region-rotation-action">${escapeHtml(rotation.summary || "")}</strong>
+           ${clusterRow}
+         </div>`
       : "";
   }
   if (!regions.some((region) => region.key === selectedRegionKey)) {
@@ -404,8 +410,11 @@ function renderRegionalMonitor() {
     ` : "";
     aggNode.innerHTML = `
       <div class="region-agg ${regionStatusClass(agg.status)}">
-        <strong>${escapeHtml(active.nameCn || active.name)}</strong>
-        <span>泡沫: ${escapeHtml(agg.statusCn || "--")} · 峰值评分 ${Number.isFinite(score) ? score.toFixed(0) : "--"} · ${daysText} · ${Number(agg.availableCount) || 0}/${Number(agg.indexCount) || 0} 指数可用</span>
+        <div class="region-agg-key">
+          <strong>${escapeHtml(active.nameCn || active.name)}</strong>
+          <span class="region-agg-status">泡沫 ${escapeHtml(agg.statusCn || "--")} · 峰值 ${Number.isFinite(score) ? score.toFixed(0) : "--"}</span>
+        </div>
+        <span class="region-agg-sub">${daysText} · ${Number(agg.availableCount) || 0}/${Number(agg.indexCount) || 0} 指数可用</span>
       </div>
       ${factorStrip}
       ${alertBanner}

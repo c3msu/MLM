@@ -1256,6 +1256,15 @@ function renderHero() {
   $("#curveStance").textContent = curveText;
   $("#curveScore").textContent = `${t("score.curve")} ${score.curve.toFixed(2)} · ${curveCode}`;
   $("#curveStance").parentElement.dataset.code = curveCode === "STEEPENER" ? "STEEP" : curveCode;
+  const equityBandNode = $("#equityBandStance");
+  if (equityBandNode) {
+    const po = state.portfolioOverview || DEFAULT_DATA.portfolioOverview || {};
+    const band = Array.isArray(po.suggestedEquityExposureBand) ? po.suggestedEquityExposureBand : null;
+    equityBandNode.textContent = band ? `${Math.round(band[0])}-${Math.round(band[1])}%` : "--";
+    equityBandNode.parentElement.dataset.code = band && Number(band[1]) < 90 ? "RESTRICT" : "NEUTRAL";
+    const basis = $("#equityBandBasis");
+    if (basis) basis.textContent = po.bindingLayer ? `约束层 ${po.bindingLayer}` : "三层调和 · OOS";
+  }
   renderConclusionAudit();
 }
 
@@ -1278,23 +1287,26 @@ function renderConclusionAudit() {
     ["数据源状态", warningText, audit.sourceErrorCount > 0 ? "low" : audit.sourceWarningCount > 0 ? "medium" : "high"]
   ];
   node.innerHTML = `
-    <div class="conclusion-audit-head">
-      <span>结论审计 · Conclusion Audit</span>
-      <strong>${escapeHtml(audit.duration.label)} / ${escapeHtml(audit.curve.label)}</strong>
-    </div>
-    <div class="conclusion-audit-grid">
-      ${cards.map(([label, value, tone]) => `
-        <div class="audit-metric ${escapeHtml(tone)}">
-          <span>${escapeHtml(label)}</span>
-          <strong>${escapeHtml(value)}</strong>
-        </div>
-      `).join("")}
-    </div>
-    <div class="conclusion-audit-read">
-      <span><b>主要拖累</b>${escapeHtml(topDrag ? `${topDrag.name} ${topDrag.contribution.toFixed(2)}` : "无")}</span>
-      <span><b>主要缓冲</b>${escapeHtml(topBuffer ? `${topBuffer.name} +${topBuffer.contribution.toFixed(2)}` : "无")}</span>
-      <span><b>权重建议</b>${escapeHtml(audit.weightRecommendation)}</span>
-    </div>
+    <details class="conclusion-audit-fold">
+      <summary class="conclusion-audit-head">
+        <span>结论审计 · Conclusion Audit</span>
+        <strong>${escapeHtml(audit.duration.label)} / ${escapeHtml(audit.curve.label)}</strong>
+        <span class="conclusion-audit-cred">可信度 ${escapeHtml(audit.confidence.label)} · 证据质量 ${Math.round(audit.confidence.evidenceQuality * 100)}%</span>
+      </summary>
+      <div class="conclusion-audit-grid">
+        ${cards.map(([label, value, tone]) => `
+          <div class="audit-metric ${escapeHtml(tone)}">
+            <span>${escapeHtml(label)}</span>
+            <strong>${escapeHtml(value)}</strong>
+          </div>
+        `).join("")}
+      </div>
+      <div class="conclusion-audit-read">
+        <span><b>主要拖累</b>${escapeHtml(topDrag ? `${topDrag.name} ${topDrag.contribution.toFixed(2)}` : "无")}</span>
+        <span><b>主要缓冲</b>${escapeHtml(topBuffer ? `${topBuffer.name} +${topBuffer.contribution.toFixed(2)}` : "无")}</span>
+        <span><b>权重建议</b>${escapeHtml(audit.weightRecommendation)}</span>
+      </div>
+    </details>
   `;
 }
 
@@ -1658,7 +1670,10 @@ function renderMacroLiquidityScore() {
     regime.className = macroLiquidityClass(safeScore);
   }
   const method = $("#macroLiquidityMethod");
-  if (method) method.textContent = panel.method || "5Y rolling percentile composite";
+  if (method) {
+    method.textContent = "21因子 · 7模块 · 5年历史百分位";
+    method.title = panel.method || "5Y rolling percentile composite";
+  }
   const read = $("#macroLiquidityRead");
   if (read) read.textContent = panel.summary || `${panel.regime || macroLiquidityLabel(safeScore)} · ${panel.method || "5Y rolling percentile composite"}`;
   const trendNode = $("#macroLiquidityTrend");

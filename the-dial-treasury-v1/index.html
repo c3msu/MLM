@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650;9..144,750&family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20260622-declutter-v8">
+  <link rel="stylesheet" href="styles.css?v=20260623-summary-region-v2">
 </head>
 <body>
   <header class="site-header">
@@ -43,29 +43,6 @@
 
   <main>
     <section id="summary" class="hero section-band">
-      <article class="panel macro-liquidity-panel macro-liquidity-topline summary-macro-liquidity">
-        <div class="panel-title">
-          <div>
-            <h3>宏观环境综合评分 · Conditions Score</h3>
-            <span id="macroLiquidityMethod" class="panel-kicker">Bhadial-compatible 21-factor composite</span>
-            <p id="macroLiquidityRead" class="macro-liquidity-read">--</p>
-            <div id="macroLiquidityTrend" class="macro-liquidity-trend"></div>
-            <div id="macroLiquidityBalance" class="macro-liquidity-balance"></div>
-            <div id="macroLiquidityQuality" class="macro-liquidity-quality"></div>
-          </div>
-          <button id="expandMacroLiquidityTrend" class="icon-btn chart-expand-btn" type="button" title="放大查看宏观环境评分与S&P 500对比" aria-label="放大查看宏观环境评分与S&P 500对比">⛶</button>
-        </div>
-        <div class="macro-liquidity-head">
-          <div>
-            <strong id="macroLiquidityScore">--</strong>
-            <span id="macroLiquidityRegime">--</span>
-          </div>
-          <div id="macroLiquidityGauge" class="macro-liquidity-gauge"></div>
-        </div>
-        <div id="macroLiquidityTrendChart" class="macro-liquidity-trend-chart"></div>
-        <div id="macroLiquidityTrendTooltip" class="percentile-tooltip macro-liquidity-tooltip" hidden></div>
-        <div id="macroLiquidityImplications" class="macro-liquidity-implications"></div>
-      </article>
       <div class="hero-copy">
         <p class="market-badge"><span></span> <span data-i18n="hero.badge">当前市场状态 · 通胀冲击 / 政策路径逆转</span></p>
         <h1 class="market-title" data-i18n-html="hero.titleHtml">
@@ -91,9 +68,36 @@
           <strong id="curveStance">--</strong>
           <small id="curveScore">曲线分 --</small>
         </div>
+        <div>
+          <span>权益仓位 · Equity Band</span>
+          <strong id="equityBandStance">--</strong>
+          <small id="equityBandBasis">三层调和 · OOS</small>
+        </div>
       </div>
-      <div id="conclusionAudit" class="conclusion-audit" aria-label="Conclusion credibility audit"></div>
       <div id="heroTiles" class="hero-tiles" aria-label="Key yield tiles"></div>
+      <article class="panel macro-liquidity-panel macro-liquidity-topline summary-macro-liquidity">
+        <div class="panel-title">
+          <div>
+            <h3>宏观环境综合评分 · Conditions Score</h3>
+            <span id="macroLiquidityMethod" class="panel-kicker">Bhadial-compatible 21-factor composite</span>
+            <p id="macroLiquidityRead" class="macro-liquidity-read">--</p>
+            <div id="macroLiquidityTrend" class="macro-liquidity-trend"></div>
+            <div id="macroLiquidityBalance" class="macro-liquidity-balance"></div>
+            <div id="macroLiquidityQuality" class="macro-liquidity-quality"></div>
+          </div>
+          <button id="expandMacroLiquidityTrend" class="icon-btn chart-expand-btn" type="button" title="放大查看宏观环境评分与S&P 500对比" aria-label="放大查看宏观环境评分与S&P 500对比">⛶</button>
+        </div>
+        <div class="macro-liquidity-head">
+          <div>
+            <strong id="macroLiquidityScore">--</strong>
+            <span id="macroLiquidityRegime">--</span>
+          </div>
+          <div id="macroLiquidityGauge" class="macro-liquidity-gauge"></div>
+        </div>
+        <div id="macroLiquidityTrendChart" class="macro-liquidity-trend-chart"></div>
+        <div id="macroLiquidityTrendTooltip" class="percentile-tooltip macro-liquidity-tooltip" hidden></div>
+        <div id="macroLiquidityImplications" class="macro-liquidity-implications"></div>
+      </article>
       <article id="portfolioOverviewPanel" class="panel portfolio-overview-panel">
         <div class="panel-title">
           <div>
@@ -107,6 +111,7 @@
         <div id="portfolioOverviewRegionalTilt" class="portfolio-overview-regional-tilt"></div>
         <div id="portfolioOverviewConflicts" class="portfolio-overview-conflicts"></div>
       </article>
+      <div id="conclusionAudit" class="conclusion-audit" aria-label="Conclusion credibility audit"></div>
     </section>
 
     <section id="curve" class="section-band">
@@ -619,11 +624,11 @@
       <div id="globalLpplRiskHistoryModalTooltip" class="percentile-tooltip global-lppl-history-tooltip modal-tooltip" hidden></div>
     </section>
   </div>
-  <script src="i18n.js?v=20260622-declutter-v8"></script>
-  <script src="render-equity.js?v=20260622-declutter-v8"></script>
-  <script src="render-markets.js?v=20260622-declutter-v8"></script>
-  <script src="render-liquidity.js?v=20260622-declutter-v8"></script>
-  <script src="render-history.js?v=20260622-declutter-v8"></script>
-  <script src="app.js?v=20260622-declutter-v8"></script>
+  <script src="i18n.js?v=20260623-summary-region-v2"></script>
+  <script src="render-equity.js?v=20260623-summary-region-v2"></script>
+  <script src="render-markets.js?v=20260623-summary-region-v2"></script>
+  <script src="render-liquidity.js?v=20260623-summary-region-v2"></script>
+  <script src="render-history.js?v=20260623-summary-region-v2"></script>
+  <script src="app.js?v=20260623-summary-region-v2"></script>
 </body>
 </html>

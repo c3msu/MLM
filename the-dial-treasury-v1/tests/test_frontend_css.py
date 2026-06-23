@@ -401,7 +401,7 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn(".idea-equity-impact.positive", css)
         self.assertIn(".idea-equity-impact.negative", css)
 
-    def test_macro_liquidity_panel_is_top_of_summary(self):
+    def test_summary_leads_with_narrative_then_stance_then_metrics(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
@@ -415,12 +415,17 @@ class FrontendCssTests(unittest.TestCase):
         scorecard_start = html.index('<section id="scorecard"')
         scorecard_end = html.index('<section id="policy"')
         scorecard_html = html[scorecard_start:scorecard_end]
-        self.assertLess(macro_index, hero_copy_index)
-        self.assertLess(macro_index, stance_index)
-        self.assertLess(macro_index, tiles_index)
+        # Reordered hierarchy (source order drives the single-column hero now that the CSS
+        # `order` overrides are gone): narrative headline -> stance strip -> key yields ->
+        # Conditions Score metric panel.
+        self.assertLess(hero_copy_index, stance_index)
+        self.assertLess(stance_index, tiles_index)
+        self.assertLess(tiles_index, macro_index)
         self.assertNotIn('macro-liquidity-topline summary-macro-liquidity', scorecard_html)
         self.assertIn(".macro-liquidity-topline", css)
         self.assertIn(".summary-macro-liquidity", css)
+        # The headline stance strip surfaces the equity position alongside duration/curve.
+        self.assertIn('id="equityBandStance"', html)
 
     def test_macro_liquidity_mobile_layout_stays_compact(self):
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
@@ -697,7 +702,10 @@ class FrontendCssTests(unittest.TestCase):
         # Round-2 directions: breach track record + composite/rotation bilingual labels.
         self.assertIn("trackRecord", app_js)
         self.assertIn("证据加权综合信号 · Composite", app_js)
-        self.assertIn("地区轮动建议 · Regional Rotation", app_js)
+        # Rotation is now a prominent action bar: a small "地区轮动 · Rotation" tag over the
+        # bold action text (the reduce/favor advice).
+        self.assertIn("地区轮动 · Rotation", app_js)
+        self.assertIn("region-rotation-action", app_js)
         # Round-4 directions: cluster shared-band chips + US internal rotation.
         self.assertIn("region-reduce-cluster", app_js)
         self.assertIn("减持风险预算", app_js)
@@ -729,7 +737,7 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn('id="regionalMonitorRotation"', html)
         self.assertIn("regionStanceClass", app_js)
         self.assertIn("region-alloc-rationale", app_js)
-        self.assertIn("地区轮动建议", app_js)
+        self.assertIn("region-rotation-tag", app_js)
         self.assertIn(".region-alloc", css)
         self.assertIn(".region-rotation-card", css)
         # Live per-region validated-factor breach alert.
