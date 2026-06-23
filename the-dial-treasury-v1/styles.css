@@ -632,8 +632,8 @@ h3 {
 
 .section-heading {
   display: grid;
-  gap: 8px;
-  margin: 22px 0 16px;
+  gap: 7px;
+  margin: 10px 0 16px;
 }
 
 .section-heading p:not(.eyebrow) {
@@ -1644,10 +1644,8 @@ h3 {
 
 .liquidity-equity-panel {
   display: grid;
-  grid-template-columns: minmax(280px, 0.8fr) minmax(420px, 1.2fr) minmax(240px, 0.6fr);
-  gap: 10px 12px;
-  align-items: stretch;
-  margin: 0 0 10px;
+  gap: 12px;
+  margin: 0 0 12px;
   padding: 12px;
 }
 
