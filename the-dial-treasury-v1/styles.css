@@ -5180,6 +5180,7 @@ body.modal-open {
 .region-tab {
   display: grid;
   gap: 1px;
+  flex: 1 1 110px;
   min-width: 92px;
   border: 1px solid var(--line);
   border-radius: 9px;
