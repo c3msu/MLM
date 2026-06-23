@@ -1733,8 +1733,9 @@ function renderMacroLiquidityEquityLead() {
   const panel = state.macroLiquidityEquity || DEFAULT_DATA.macroLiquidityEquity;
   const root = $("#macroLiquidityEquityLead");
   if (!root || !panel) return;
-  const method = $("#liquidityEquityMethod");
-  if (method) method.textContent = panel.method || "monthly sample · forward return test";
+  // The panel title now stands for the forward-signals group; the 5Y-study method text
+  // lives with that study (its conclusion paragraph) inside the collapsed details, so we
+  // keep the static "SPY 预警 / 股票短期风险 / LPPL 泡沫" kicker rather than overwriting it.
   const coverage = $("#liquidityEquityCoverage");
   if (coverage) {
     const count = Number(panel.observationCount) || 0;

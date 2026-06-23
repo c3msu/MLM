@@ -1665,7 +1665,7 @@ h3 {
 .spy-warning-panel {
   display: grid;
   grid-column: 1 / -1;
-  gap: 8px;
+  gap: 6px;
   border: 1px solid var(--line-soft);
   border-radius: 8px;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.66), rgba(250, 248, 241, 0.72));
@@ -1685,7 +1685,7 @@ h3 {
   border: 1px solid var(--line-soft);
   border-radius: 7px;
   background: rgba(255, 255, 255, 0.6);
-  padding: 8px;
+  padding: 7px 8px;
 }
 
 .spy-warning-head span,
@@ -1748,7 +1748,7 @@ h3 {
   border: 1px solid var(--line-soft);
   border-radius: 7px;
   background: rgba(255, 255, 255, 0.54);
-  padding: 6px 7px;
+  padding: 5px 7px;
 }
 
 .spy-warning-calibration b,
@@ -1774,18 +1774,18 @@ h3 {
 
 .spy-warning-sleeve {
   display: grid;
-  gap: 4px;
+  gap: 3px;
   min-width: 0;
   border: 1px solid var(--line-soft);
   border-radius: 7px;
   background: rgba(255, 255, 255, 0.58);
-  padding: 7px;
+  padding: 5px 7px;
 }
 
 .spy-warning-sleeve strong {
   color: var(--neutral);
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: 14px;
   line-height: 1;
 }
 
@@ -1822,7 +1822,7 @@ h3 {
   font-size: 11px;
   font-style: normal;
   font-weight: 700;
-  padding: 6px 7px;
+  padding: 5px 7px;
 }
 
 .spy-warning-drivers b {
