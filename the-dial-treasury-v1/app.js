@@ -1009,6 +1009,7 @@ function renderAll() {
   renderEvents();
   renderIdeas();
   bindNavObserver();
+  initCollapsibleSections();
 }
 
 function renderDataStatus() {
@@ -2483,6 +2484,61 @@ function bindNavObserver() {
     });
   }, { rootMargin: "-30% 0px -60% 0px" });
   sections.forEach((section) => observer.observe(section));
+}
+
+function expandCollapsibleSection(section) {
+  if (!section || !section.classList || !section.classList.contains("section-collapsible")) return;
+  section.classList.remove("collapsed");
+  const heading = section.querySelector(":scope > .section-heading");
+  if (heading) heading.setAttribute("aria-expanded", "true");
+}
+
+function toggleCollapsibleSection(section) {
+  if (!section) return;
+  const collapsed = section.classList.toggle("collapsed");
+  const heading = section.querySelector(":scope > .section-heading");
+  if (heading) heading.setAttribute("aria-expanded", collapsed ? "false" : "true");
+}
+
+// Executive view: secondary deep-dive sections start collapsed; the heading toggles them and
+// navigating to a section (nav click / hash) auto-expands it so anchors never land on hidden content.
+function initCollapsibleSections() {
+  $$(".section-collapsible").forEach((section) => {
+    const heading = section.querySelector(":scope > .section-heading");
+    if (!heading || heading.dataset.collapsibleInit) return;
+    heading.dataset.collapsibleInit = "1";
+    heading.setAttribute("role", "button");
+    heading.setAttribute("tabindex", "0");
+    heading.setAttribute("aria-expanded", section.classList.contains("collapsed") ? "false" : "true");
+    heading.addEventListener("click", () => toggleCollapsibleSection(section));
+    heading.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " " || event.key === "Spacebar") {
+        event.preventDefault();
+        toggleCollapsibleSection(section);
+      }
+    });
+  });
+  if (!document.body.dataset.collapsibleNavBound) {
+    document.body.dataset.collapsibleNavBound = "1";
+    const expandFromHash = () => {
+      const hash = window.location.hash;
+      if (!hash || hash.length < 2) return;
+      let target = null;
+      try { target = document.querySelector(hash); } catch (error) { target = null; }
+      if (target) expandCollapsibleSection(target);
+    };
+    window.addEventListener("hashchange", expandFromHash);
+    $$(".top-nav a, .brand").forEach((link) => {
+      link.addEventListener("click", () => {
+        const href = link.getAttribute("href") || "";
+        if (!href.startsWith("#") || href.length < 2) return;
+        let target = null;
+        try { target = document.querySelector(href); } catch (error) { target = null; }
+        if (target) expandCollapsibleSection(target);
+      });
+    });
+    expandFromHash();
+  }
 }
 
 $("#exportState").addEventListener("click", exportState);

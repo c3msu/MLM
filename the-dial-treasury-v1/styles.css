@@ -664,6 +664,31 @@ h3 {
   font-size: 13.5px;
 }
 
+/* Executive view: secondary deep-dive sections collapse to just their heading; the body
+   folds away by default and expands on click or when navigated to. */
+.section-collapsible > .section-heading {
+  position: relative;
+  cursor: pointer;
+  user-select: none;
+  padding-right: 84px;
+}
+.section-collapsible > .section-heading::after {
+  content: "▸ 展开";
+  position: absolute;
+  right: 0;
+  top: 2px;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.section-collapsible:not(.collapsed) > .section-heading::after { content: "▾ 收起"; color: var(--faint); }
+.section-collapsible > .section-heading:hover::after { color: var(--ink); }
+.section-collapsible.collapsed > .section-heading { margin-bottom: 10px; }
+.section-collapsible.collapsed > .section-heading p:not(.eyebrow) { display: none; }
+.section-collapsible.collapsed > :not(.section-heading) { display: none; }
+
 .panel {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1266,9 +1291,13 @@ h3 {
 
 .macro-liquidity-quality {
   display: grid;
+  grid-column: 1 / -1;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
-  margin-top: 6px;
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px dashed rgba(30, 41, 59, 0.14);
+  opacity: 0.82;
 }
 
 .macro-liquidity-quality span {
