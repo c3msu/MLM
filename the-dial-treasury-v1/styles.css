@@ -4027,9 +4027,29 @@ body.modal-open {
   gap: 10px;
   align-items: center;
   padding: 11px 13px;
-  border-bottom: 1px solid var(--line-soft);
   background: var(--panel-2);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
 }
+
+.score-group-header::-webkit-details-marker { display: none; }
+.score-group[open] > .score-group-header { border-bottom: 1px solid var(--line-soft); }
+.score-group-header:hover { background: var(--panel); }
+
+.score-group-title {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  min-width: 0;
+}
+
+.score-group-caret {
+  color: var(--faint);
+  font-size: 11px;
+  transition: transform 0.15s ease;
+}
+.score-group[open] > .score-group-header .score-group-caret { transform: rotate(90deg); }
 
 .score-group-header small {
   color: var(--muted);

@@ -1475,20 +1475,30 @@ function renderScorecard() {
   $("#scorecardCurve").textContent = curveText;
   $("#scorecardCurveValue").textContent = `${t("score.curve")} ${score.curve.toFixed(2)} · ${curveCode}`;
 
-  $("#scorecardGroups").innerHTML = state.groups.map((group, groupIndex) => {
+  const groupsNode = $("#scorecardGroups");
+  // Preserve which module groups are expanded across the re-renders that score/weight edits
+  // and language toggles trigger (innerHTML is rebuilt each time).
+  const openGroups = new Set(
+    Array.from(groupsNode.querySelectorAll("details.score-group[open]")).map((d) => d.dataset.groupIndex)
+  );
+  groupsNode.innerHTML = state.groups.map((group, groupIndex) => {
     const avg = group.factors.reduce((sum, factor) => sum + factor.score, 0) / group.factors.length;
+    const isOpen = openGroups.has(String(groupIndex));
     return `
-      <article class="score-group">
-        <div class="score-group-header">
-          <div>
-            <h3>${currentLanguage === "en" ? group.en : group.name}</h3>
-            <small>${currentLanguage === "en" ? group.name : group.en}</small>
+      <details class="score-group" data-group-index="${groupIndex}"${isOpen ? " open" : ""}>
+        <summary class="score-group-header">
+          <div class="score-group-title">
+            <span class="score-group-caret" aria-hidden="true">▸</span>
+            <div>
+              <h3>${currentLanguage === "en" ? group.en : group.name}</h3>
+              <small>${currentLanguage === "en" ? group.name : group.en}</small>
+            </div>
           </div>
           <label class="weight-field">${t("score.weight")}
             <input type="number" min="0" max="100" value="${group.weight}" data-weight="${groupIndex}">
           </label>
           <span class="group-average ${scoreClass(avg)}">${t("score.average")} ${avg.toFixed(2)}</span>
-        </div>
+        </summary>
         ${group.factors.map((factor, factorIndex) => `
           <div class="factor-row">
             <div class="factor-name">
@@ -1507,7 +1517,7 @@ function renderScorecard() {
             </div>
           </div>
         `).join("")}
-      </article>
+      </details>
     `;
   }).join("");
   renderScorecardSourceLegend();
@@ -2230,6 +2240,11 @@ function bindScorecardEvents() {
       renderScorecard();
       showScoreUpdate();
     });
+  });
+  // The weight field lives inside the module's <summary>; clicking it must edit the weight,
+  // not toggle the collapsible group.
+  $$(".score-group-header .weight-field").forEach((field) => {
+    field.addEventListener("click", (event) => event.stopPropagation());
   });
 }
 
