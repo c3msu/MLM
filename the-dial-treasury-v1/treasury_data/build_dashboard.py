@@ -1968,16 +1968,16 @@ def macro_liquidity_trend_summary(
     percentile_3m_change: int | None,
     direction: str,
 ) -> str:
-    percentile_text = f"p{percentile}" if percentile is not None else "p--"
-    score_change_text = format_signed_number(score_3m_change, digits=1)
-    percentile_change_text = format_signed_number(float(percentile_3m_change), digits=0) if percentile_3m_change is not None else "--"
+    # The percentile / 3M score / percentile-change numbers are already shown in the trend
+    # metric grid directly below this read, so keep only the trend direction + the narrative
+    # conclusion here to avoid restating the same figures (UI de-dup, 2026-06-24).
     if direction == "上行":
-        return f"历史分位{percentile_text},3M综合分{score_change_text},分位{percentile_change_text}pct; 低位改善正在形成边际支撑。"
+        return "3M趋势上行; 低位改善正在形成边际支撑。"
     if direction == "下行":
-        return f"历史分位{percentile_text},3M综合分{score_change_text},分位{percentile_change_text}pct; 趋势转弱会放大低分位约束。"
+        return "3M趋势下行; 趋势转弱会放大低分位约束。"
     if direction == "震荡":
-        return f"历史分位{percentile_text},3M综合分{score_change_text},分位{percentile_change_text}pct; 当前位置优先按区间震荡处理。"
-    return f"历史分位{percentile_text},历史趋势样本不足; 暂以当前分项拖累和缓冲为主。"
+        return "3M趋势震荡; 当前位置优先按区间震荡处理。"
+    return "历史趋势样本不足; 暂以当前分项拖累和缓冲为主。"
 
 
 def build_macro_liquidity_equity_lead(ind: dict[str, Any]) -> dict[str, Any]:

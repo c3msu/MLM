@@ -965,7 +965,10 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertIn(macro_liquidity["offset"]["name"], component_names)
         self.assertIn("拖累", macro_liquidity["summary"])
         self.assertIn("缓冲", macro_liquidity["summary"])
-        self.assertIn("历史分位", macro_liquidity["summary"])
+        # The summary carries the trend direction + narrative conclusion; the percentile /
+        # 3M-score numbers are NOT restated here (they live in the trend grid, asserted below).
+        self.assertIn("趋势", macro_liquidity["summary"])
+        self.assertNotIn("历史分位p", macro_liquidity["summary"])
         trend = macro_liquidity["trend"]
         self.assertIn("historicalPercentile", trend)
         self.assertIn("score3mChange", trend)
