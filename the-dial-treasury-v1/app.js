@@ -2374,19 +2374,29 @@ function renderIdeaEquityImpact(impact) {
   `;
 }
 
+// Number(null) and Number("") both coerce to 0 (a finite value), which would render a
+// missing metric as a fabricated "+0.00%"/"0.0" instead of "--". Guard blanks explicitly
+// so absent data reads as unavailable rather than a real-looking flat value.
+function isBlankMetric(value) {
+  return value === null || value === undefined || value === "";
+}
+
 function formatSignedPercentMetric(value) {
+  if (isBlankMetric(value)) return "--";
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return "--";
   return `${numeric >= 0 ? "+" : ""}${numeric.toFixed(2)}%`;
 }
 
 function formatPercentMetric(value) {
+  if (isBlankMetric(value)) return "--";
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return "--";
   return `${numeric.toFixed(1)}%`;
 }
 
 function formatNumberMetric(value, digits = 1) {
+  if (isBlankMetric(value)) return "--";
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return "--";
   return numeric.toFixed(digits);

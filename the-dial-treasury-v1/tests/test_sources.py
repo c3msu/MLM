@@ -171,6 +171,14 @@ class SourceParsingTests(unittest.TestCase):
         self.assertEqual(bars[-1].close, 737.55)
         self.assertEqual(bars[-1].volume, 93_989_420)
 
+    def test_parse_nasdaq_historical_json_raises_clean_error_on_null_data(self):
+        # Nasdaq returns {"data": null} when it transiently rate-limits a symbol mid-batch.
+        # The parser must raise a clean ValueError (so the stooq fallback path engages)
+        # instead of leaking "'NoneType' object has no attribute 'get'".
+        for payload in ('{"data": null, "status": {"rCode": 429}}', '{"data": {}}', '{"data": {"tradesTable": null}}'):
+            with self.assertRaises(ValueError):
+                parse_nasdaq_historical_json(payload, "NVDA")
+
     def test_parse_official_rss_news_items_extracts_recent_headlines(self):
         content = """<?xml version="1.0" encoding="utf-8"?>
         <rss version="2.0">

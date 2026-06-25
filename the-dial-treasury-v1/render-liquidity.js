@@ -175,6 +175,8 @@ function renderLiquidityRolling(rolling, drawdown) {
 }
 
 function formatSignedMetric(value, digits = 2) {
+  // Number(null)/Number("") coerce to 0; guard blanks so missing data reads "--" not "+0.00".
+  if (value === null || value === undefined || value === "") return "--";
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return "--";
   return `${numeric >= 0 ? "+" : ""}${numeric.toFixed(digits)}`;

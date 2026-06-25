@@ -550,13 +550,13 @@ def parse_market_number(value: Any) -> float | None:
 
 def parse_nasdaq_historical_json(content: str, symbol: str, *, source_url: str = "Nasdaq historical") -> list[MarketDailyBar]:
     payload = json.loads(content)
-    rows = (
-        payload.get("data", {})
-        .get("tradesTable", {})
-        .get("rows", [])
-        if isinstance(payload, dict)
-        else []
-    )
+    # Null-safe traversal: Nasdaq returns {"data": null} (not an absent key) when it
+    # transiently rate-limits or errors a symbol mid-batch. dict.get(k, {}) only uses the
+    # default when the key is ABSENT, so chaining .get on an explicit null raised a
+    # confusing "'NoneType' object has no attribute 'get'" instead of a clean no-data error.
+    data = payload.get("data") if isinstance(payload, dict) else None
+    trades_table = data.get("tradesTable") if isinstance(data, dict) else None
+    rows = trades_table.get("rows", []) if isinstance(trades_table, dict) else []
     if not isinstance(rows, list):
         raise ValueError(f"Nasdaq response for {symbol} did not contain historical rows")
     bars: list[MarketDailyBar] = []
