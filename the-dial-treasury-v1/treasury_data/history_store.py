@@ -1,15 +1,46 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import os
 import sqlite3
+import zlib
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_HISTORY_DB = PROJECT_ROOT / "data" / "history.sqlite3"
+DEFAULT_BUSY_TIMEOUT_MS = 5_000
+DEFAULT_PAYLOAD_RETENTION = 30
+PAYLOAD_ENCODING_JSON = "json"
+PAYLOAD_ENCODING_ZLIB = "zlib-json-v1"
+PAYLOAD_ENCODING_DISCARDED = "discarded-v1"
+
+
+@dataclass(frozen=True)
+class HistoryPayloadPolicy:
+    """Storage policy for optional full dashboard snapshot bodies.
+
+    Metric observations and snapshot metadata are always retained.  ``retain``
+    only controls how many newest *full* payloads remain recoverable; older rows
+    keep their IDs, timestamps, source status, and extracted metrics.
+    """
+
+    compression: str = "zlib"
+    retain: int | None = DEFAULT_PAYLOAD_RETENTION
+    compression_level: int = 6
+
+    def __post_init__(self) -> None:
+        if self.compression not in {"zlib", "none"}:
+            raise ValueError("history payload compression must be 'zlib' or 'none'")
+        if self.retain is not None and self.retain < 0:
+            raise ValueError("history payload retention must be non-negative or None")
+        if not 0 <= self.compression_level <= 9:
+            raise ValueError("history payload compression_level must be between 0 and 9")
 
 
 def history_db_for_output(output: Path) -> Path:
@@ -18,8 +49,11 @@ def history_db_for_output(output: Path) -> Path:
 
 def connect(db_path: Path = DEFAULT_HISTORY_DB) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(db_path)
+    connection = sqlite3.connect(db_path, timeout=DEFAULT_BUSY_TIMEOUT_MS / 1000)
+    connection.execute(f"pragma busy_timeout = {DEFAULT_BUSY_TIMEOUT_MS}")
     connection.execute("pragma foreign_keys = on")
+    connection.execute("pragma journal_mode = wal")
+    connection.execute("pragma synchronous = normal")
     return connection
 
 
@@ -32,6 +66,10 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
           generated_at text not null,
           created_at text not null,
           payload_json text not null,
+          payload_blob blob,
+          payload_encoding text not null default 'json',
+          payload_bytes integer,
+          payload_hash text,
           source_status_json text not null,
           unique(as_of, generated_at)
         );
@@ -88,33 +126,161 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
           on history_backfill_runs(completed_at);
         """
     )
+    ensure_column(connection, "dashboard_snapshots", "payload_blob", "blob")
+    ensure_column(connection, "dashboard_snapshots", "payload_encoding", "text not null default 'json'")
+    ensure_column(connection, "dashboard_snapshots", "payload_bytes", "integer")
+    ensure_column(connection, "dashboard_snapshots", "payload_hash", "text")
 
 
-def save_dashboard_history(dashboard: dict[str, Any], db_path: Path = DEFAULT_HISTORY_DB) -> int:
+def ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {str(row[1]) for row in connection.execute(f"pragma table_info({table})")}
+    if column not in columns:
+        try:
+            connection.execute(f"alter table {table} add column {column} {definition}")
+        except sqlite3.OperationalError as exc:
+            # Another refresher may have completed the same additive migration
+            # after our table-info read but before this ALTER acquired its lock.
+            if "duplicate column name" not in str(exc).lower():
+                raise
+
+
+def history_payload_policy_from_env() -> HistoryPayloadPolicy:
+    """Read optional MARCO_HISTORY_PAYLOAD_* operational overrides."""
+    compression = os.environ.get("MARCO_HISTORY_PAYLOAD_COMPRESSION", "zlib").strip().lower() or "zlib"
+    retain_text = os.environ.get("MARCO_HISTORY_PAYLOAD_RETAIN", str(DEFAULT_PAYLOAD_RETENTION)).strip().lower()
+    retain = None if retain_text in {"all", "unlimited", "none"} else int(retain_text)
+    level = int(os.environ.get("MARCO_HISTORY_PAYLOAD_COMPRESSION_LEVEL", "6"))
+    return HistoryPayloadPolicy(compression=compression, retain=retain, compression_level=level)
+
+
+def payload_envelope(as_of: str, generated_at: str, encoding: str) -> str:
+    return json.dumps(
+        {"asOf": as_of, "generatedAt": generated_at, "payloadEncoding": encoding},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def encode_dashboard_payload(
+    dashboard: dict[str, Any],
+    policy: HistoryPayloadPolicy,
+) -> tuple[str, bytes | None, str, int]:
+    payload_json = json.dumps(
+        dashboard,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    payload_bytes = payload_json.encode("utf-8")
+    if policy.compression == "none":
+        return payload_json, None, PAYLOAD_ENCODING_JSON, len(payload_bytes)
+    compressed = zlib.compress(payload_bytes, level=policy.compression_level)
+    return (
+        payload_envelope(required_text(dashboard, "asOf"), required_text(dashboard, "generatedAt"), PAYLOAD_ENCODING_ZLIB),
+        compressed,
+        PAYLOAD_ENCODING_ZLIB,
+        len(payload_bytes),
+    )
+
+
+def dashboard_payload_hash(dashboard: dict[str, Any]) -> str:
+    canonical = json.dumps(
+        dashboard,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def decode_dashboard_payload(payload_json: str, payload_blob: bytes | None, encoding: str | None) -> dict[str, Any] | None:
+    normalized = str(encoding or PAYLOAD_ENCODING_JSON)
+    if normalized == PAYLOAD_ENCODING_DISCARDED:
+        return None
+    if normalized == PAYLOAD_ENCODING_ZLIB:
+        if payload_blob is None:
+            return None
+        raw = zlib.decompress(payload_blob).decode("utf-8")
+    else:
+        raw = payload_json
+    payload = json.loads(raw)
+    return payload if isinstance(payload, dict) else None
+
+
+def save_dashboard_history(
+    dashboard: dict[str, Any],
+    db_path: Path = DEFAULT_HISTORY_DB,
+    *,
+    payload_policy: HistoryPayloadPolicy | None = None,
+) -> int:
     as_of = required_text(dashboard, "asOf")
     generated_at = required_text(dashboard, "generatedAt")
-    payload_json = json.dumps(dashboard, ensure_ascii=False, sort_keys=True)
+    policy = payload_policy or history_payload_policy_from_env()
+    payload_json, payload_blob, payload_encoding, payload_bytes = encode_dashboard_payload(dashboard, policy)
+    payload_hash = dashboard_payload_hash(dashboard)
     source_status_json = json.dumps(dashboard.get("sourceStatus", []), ensure_ascii=False, sort_keys=True)
     created_at = datetime.now(timezone.utc).isoformat()
 
     with closing(connect(db_path)) as connection:
         ensure_schema(connection)
         with connection:
+            existing = connection.execute(
+                """
+                select id, payload_json, payload_blob, payload_encoding, payload_hash
+                from dashboard_snapshots
+                where as_of = ? and generated_at = ?
+                """,
+                (as_of, generated_at),
+            ).fetchone()
+            if existing is not None:
+                existing_hash = str(existing[4] or "")
+                existing_payload = None if existing_hash else decode_dashboard_payload(existing[1], existing[2], existing[3])
+                if (
+                    (existing_hash and existing_hash != payload_hash)
+                    or (not existing_hash and (existing_payload is None or existing_payload != dashboard))
+                ):
+                    raise ValueError(
+                        "dashboard snapshot identity collision: the same asOf/generatedAt key has different content"
+                    )
             connection.execute(
                 """
                 insert or ignore into dashboard_snapshots
-                  (as_of, generated_at, created_at, payload_json, source_status_json)
-                values (?, ?, ?, ?, ?)
+                  (as_of, generated_at, created_at, payload_json, payload_blob, payload_encoding, payload_bytes, payload_hash, source_status_json)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (as_of, generated_at, created_at, payload_json, source_status_json),
+                (
+                    as_of,
+                    generated_at,
+                    created_at,
+                    payload_json,
+                    payload_blob,
+                    payload_encoding,
+                    payload_bytes,
+                    payload_hash,
+                    source_status_json,
+                ),
             )
             connection.execute(
                 """
                 update dashboard_snapshots
-                set created_at = ?, payload_json = ?, source_status_json = ?
+                set created_at = ?, payload_json = ?, payload_blob = ?, payload_encoding = ?, payload_bytes = ?,
+                    payload_hash = ?, source_status_json = ?
                 where as_of = ? and generated_at = ?
                 """,
-                (created_at, payload_json, source_status_json, as_of, generated_at),
+                (
+                    created_at,
+                    payload_json,
+                    payload_blob,
+                    payload_encoding,
+                    payload_bytes,
+                    payload_hash,
+                    source_status_json,
+                    as_of,
+                    generated_at,
+                ),
             )
             row = connection.execute(
                 "select id from dashboard_snapshots where as_of = ? and generated_at = ?",
@@ -146,7 +312,98 @@ def save_dashboard_history(dashboard: dict[str, Any], db_path: Path = DEFAULT_HI
                     for metric in extract_metric_observations(dashboard)
                 ],
             )
+            apply_payload_policy(connection, policy)
         return snapshot_id
+
+
+def apply_payload_policy(connection: sqlite3.Connection, policy: HistoryPayloadPolicy) -> None:
+    if policy.retain is not None:
+        connection.execute(
+            """
+            update dashboard_snapshots
+            set payload_json = ?, payload_blob = null, payload_encoding = ?,
+                payload_bytes = coalesce(payload_bytes, length(cast(payload_json as blob)))
+            where id not in (
+              select id from dashboard_snapshots
+              order by coalesce(julianday(generated_at), -1) desc, id desc
+              limit ?
+            )
+              and (payload_encoding != ? or payload_blob is not null)
+            """,
+            (
+                json.dumps({"payloadEncoding": PAYLOAD_ENCODING_DISCARDED}, separators=(",", ":")),
+                PAYLOAD_ENCODING_DISCARDED,
+                policy.retain,
+                PAYLOAD_ENCODING_DISCARDED,
+            ),
+        )
+
+    target_encoding = PAYLOAD_ENCODING_JSON if policy.compression == "zlib" else PAYLOAD_ENCODING_ZLIB
+    if policy.retain is None:
+        rows = connection.execute(
+            """
+            select id, as_of, generated_at, payload_json, payload_blob
+            from dashboard_snapshots
+            where payload_encoding = ?
+            """,
+            (target_encoding,),
+        ).fetchall()
+    else:
+        rows = connection.execute(
+            """
+            select id, as_of, generated_at, payload_json, payload_blob
+            from dashboard_snapshots
+            where payload_encoding = ?
+              and id in (
+                select id from dashboard_snapshots
+                order by coalesce(julianday(generated_at), -1) desc, id desc
+                limit ?
+              )
+            """,
+            (target_encoding, policy.retain),
+        ).fetchall()
+
+    for snapshot_id, as_of, generated_at, payload_json, payload_blob in rows:
+        if policy.compression == "zlib":
+            raw = str(payload_json).encode("utf-8")
+            connection.execute(
+                """
+                update dashboard_snapshots
+                set payload_json = ?, payload_blob = ?, payload_encoding = ?, payload_bytes = ?
+                where id = ?
+                """,
+                (
+                    payload_envelope(str(as_of), str(generated_at), PAYLOAD_ENCODING_ZLIB),
+                    zlib.compress(raw, level=policy.compression_level),
+                    PAYLOAD_ENCODING_ZLIB,
+                    len(raw),
+                    snapshot_id,
+                ),
+            )
+        elif payload_blob is not None:
+            raw = zlib.decompress(payload_blob).decode("utf-8")
+            connection.execute(
+                """
+                update dashboard_snapshots
+                set payload_json = ?, payload_blob = null, payload_encoding = ?, payload_bytes = ?
+                where id = ?
+                """,
+                (raw, PAYLOAD_ENCODING_JSON, len(raw.encode("utf-8")), snapshot_id),
+            )
+
+
+def load_dashboard_snapshot(snapshot_id: int, db_path: Path = DEFAULT_HISTORY_DB) -> dict[str, Any] | None:
+    if not db_path.exists():
+        return None
+    with closing(connect(db_path)) as connection:
+        ensure_schema(connection)
+        row = connection.execute(
+            "select payload_json, payload_blob, payload_encoding from dashboard_snapshots where id = ?",
+            (int(snapshot_id),),
+        ).fetchone()
+    if row is None:
+        return None
+    return decode_dashboard_payload(str(row[0]), row[1], row[2])
 
 
 def extract_metric_observations(dashboard: dict[str, Any]) -> list[dict[str, Any]]:
@@ -242,8 +499,9 @@ def history_summary(db_path: Path = DEFAULT_HISTORY_DB) -> dict[str, Any]:
             "historicalStartDate": None,
             "historicalEndDate": None,
             "latestBackfill": None,
+            "payloadStorage": {"compressedCount": 0, "jsonCount": 0, "discardedCount": 0, "storedBytes": 0},
         }
-    with closing(sqlite3.connect(db_path)) as connection:
+    with closing(connect(db_path)) as connection:
         ensure_schema(connection)
         snapshot_count = scalar_int(connection, "select count(*) from dashboard_snapshots")
         metric_count = scalar_int(connection, "select count(*) from metric_observations")
@@ -257,10 +515,22 @@ def history_summary(db_path: Path = DEFAULT_HISTORY_DB) -> dict[str, Any]:
             """
             select as_of, generated_at
             from dashboard_snapshots
-            order by generated_at desc, id desc
+            order by coalesce(julianday(generated_at), -1) desc, id desc
             limit 1
             """
         ).fetchone()
+        payload_storage = connection.execute(
+            """
+            select
+              sum(case when payload_encoding = ? then 1 else 0 end),
+              sum(case when payload_encoding = ? then 1 else 0 end),
+              sum(case when payload_encoding = ? then 1 else 0 end),
+              coalesce(sum(length(cast(payload_json as blob)) + coalesce(length(payload_blob), 0)), 0)
+            from dashboard_snapshots
+            """,
+            (PAYLOAD_ENCODING_ZLIB, PAYLOAD_ENCODING_JSON, PAYLOAD_ENCODING_DISCARDED),
+        ).fetchone()
+        latest_backfill = latest_history_backfill_run_from_connection(connection)
     return {
         "database": str(db_path),
         "snapshotCount": snapshot_count,
@@ -270,7 +540,13 @@ def history_summary(db_path: Path = DEFAULT_HISTORY_DB) -> dict[str, Any]:
         "historicalSeriesCount": historical_series_count,
         "historicalStartDate": historical_range[0] if historical_range else None,
         "historicalEndDate": historical_range[1] if historical_range else None,
-        "latestBackfill": latest_history_backfill_run(db_path),
+        "latestBackfill": latest_backfill,
+        "payloadStorage": {
+            "compressedCount": int(payload_storage[0] or 0),
+            "jsonCount": int(payload_storage[1] or 0),
+            "discardedCount": int(payload_storage[2] or 0),
+            "storedBytes": int(payload_storage[3] or 0),
+        },
     }
 
 
@@ -315,17 +591,21 @@ def has_critical_source_errors(source_errors: list[Any]) -> bool:
 def latest_history_backfill_run(db_path: Path = DEFAULT_HISTORY_DB) -> dict[str, Any] | None:
     if not db_path.exists():
         return None
-    with closing(sqlite3.connect(db_path)) as connection:
+    with closing(connect(db_path)) as connection:
         ensure_schema(connection)
-        row = connection.execute(
-            """
-            select id, completed_at, status, years, start_date, end_date,
-                   observation_count, saved_observation_count, source_errors_json
-            from history_backfill_runs
-            order by completed_at desc, id desc
-            limit 1
-            """
-        ).fetchone()
+        return latest_history_backfill_run_from_connection(connection)
+
+
+def latest_history_backfill_run_from_connection(connection: sqlite3.Connection) -> dict[str, Any] | None:
+    row = connection.execute(
+        """
+        select id, completed_at, status, years, start_date, end_date,
+               observation_count, saved_observation_count, source_errors_json
+        from history_backfill_runs
+        order by completed_at desc, id desc
+        limit 1
+        """
+    ).fetchone()
     if row is None:
         return None
     try:
@@ -350,7 +630,7 @@ def latest_history_backfill_run(db_path: Path = DEFAULT_HISTORY_DB) -> dict[str,
 def list_dashboard_snapshots(db_path: Path = DEFAULT_HISTORY_DB, limit: int = 30) -> list[dict[str, Any]]:
     if not db_path.exists():
         return []
-    with closing(sqlite3.connect(db_path)) as connection:
+    with closing(connect(db_path)) as connection:
         ensure_schema(connection)
         rows = connection.execute(
             """
@@ -358,7 +638,7 @@ def list_dashboard_snapshots(db_path: Path = DEFAULT_HISTORY_DB, limit: int = 30
             from dashboard_snapshots s
             left join metric_observations m on m.snapshot_id = s.id
             group by s.id
-            order by s.generated_at desc, s.id desc
+            order by coalesce(julianday(s.generated_at), -1) desc, s.id desc
             limit ?
             """,
             (limit,),
@@ -367,7 +647,18 @@ def list_dashboard_snapshots(db_path: Path = DEFAULT_HISTORY_DB, limit: int = 30
 
 
 def save_historical_observations(observations: list[dict[str, Any]], db_path: Path = DEFAULT_HISTORY_DB) -> int:
-    rows = [row for row in (normalize_historical_observation(item) for item in observations) if row is not None]
+    # A backfill can receive overlapping source pages.  SQLite's upsert keeps
+    # the last value, so mirror that grain explicitly and report the number of
+    # unique observations actually offered to storage rather than the raw
+    # duplicate-bearing input length.
+    rows_by_key: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for item in observations:
+        row = normalize_historical_observation(item)
+        if row is None:
+            continue
+        key = (row["date"], row["category"], row["name"], row["label"])
+        rows_by_key[key] = row
+    rows = list(rows_by_key.values())
     if not rows:
         return 0
     updated_at = datetime.now(timezone.utc).isoformat()
@@ -405,50 +696,69 @@ def save_historical_observations(observations: list[dict[str, Any]], db_path: Pa
 def list_historical_series_stats(db_path: Path = DEFAULT_HISTORY_DB, limit: int = 200) -> list[dict[str, Any]]:
     if not db_path.exists():
         return []
-    with closing(sqlite3.connect(db_path)) as connection:
+    with closing(connect(db_path)) as connection:
         ensure_schema(connection)
-        series_rows = connection.execute(
+        value_rows = connection.execute(
             """
-            select category, name, label, coalesce(unit, ''), coalesce(source, ''), count(*), min(date), max(date)
-            from historical_observations
-            group by category, name, label
-            order by count(*) desc, category, name, label
-            limit ?
+            with selected as (
+              select category, name, label, count(*) as sample_count,
+                     min(date) as start_date, max(date) as end_date
+              from historical_observations
+              group by category, name, label
+              order by sample_count desc, category, name, label
+              limit ?
+            )
+            select o.category, o.name, o.label, o.date, o.value,
+                   coalesce(o.unit, ''), coalesce(o.source, ''),
+                   selected.sample_count, selected.start_date, selected.end_date
+            from selected
+            join historical_observations o
+              on o.category = selected.category
+             and o.name = selected.name
+             and o.label = selected.label
+            order by selected.sample_count desc, o.category, o.name, o.label, o.date, o.id
             """,
             (max(1, int(limit)),),
         ).fetchall()
-        rows: list[dict[str, Any]] = []
-        for category, name, label, unit, source, count, start_date, end_date in series_rows:
-            value_rows = connection.execute(
-                """
-                select date, value
-                from historical_observations
-                where category = ? and name = ? and label = ?
-                order by date asc
-                """,
-                (category, name, label),
-            ).fetchall()
-            values = [float(row[1]) for row in value_rows if is_finite_number(row[1])]
-            latest_row = value_rows[-1] if value_rows else None
-            rows.append(
-                {
-                    "category": category,
-                    "name": name,
-                    "label": label,
-                    "unit": unit,
-                    "source": source,
-                    "count": int(count),
-                    "startDate": start_date,
-                    "endDate": end_date,
-                    "latest": round_float(float(latest_row[1])) if latest_row else None,
-                    "min": round_float(min(values)) if values else None,
-                    "max": round_float(max(values)) if values else None,
-                    "mean": round_float(sum(values) / len(values)) if values else None,
-                    "p10": round_float(quantile(values, 0.1)) if values else None,
-                    "p50": round_float(quantile(values, 0.5)) if values else None,
-                    "p90": round_float(quantile(values, 0.9)) if values else None,
-                }
-            )
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for category, name, label, point_date, value, unit, source, count, start_date, end_date in value_rows:
+        key = (str(category), str(name), str(label))
+        item = grouped.setdefault(
+            key,
+            {
+                "category": category,
+                "name": name,
+                "label": label,
+                "unit": unit,
+                "source": source,
+                "count": int(count),
+                "startDate": start_date,
+                "endDate": end_date,
+                "latest": None,
+                "_values": [],
+            },
+        )
+        if is_finite_number(value):
+            numeric = float(value)
+            item["_values"].append(numeric)
+            item["latest"] = round_float(numeric)
+        item["unit"] = unit
+        item["source"] = source
+        item["endDate"] = point_date
+    rows: list[dict[str, Any]] = []
+    for item in grouped.values():
+        values = item.pop("_values")
+        item.update(
+            {
+                "min": round_float(min(values)) if values else None,
+                "max": round_float(max(values)) if values else None,
+                "mean": round_float(sum(values) / len(values)) if values else None,
+                "p10": round_float(quantile(values, 0.1)) if values else None,
+                "p50": round_float(quantile(values, 0.5)) if values else None,
+                "p90": round_float(quantile(values, 0.9)) if values else None,
+            }
+        )
+        rows.append(item)
     return rows
 
 
@@ -484,7 +794,7 @@ def historical_series_points(
         {where}
         order by date asc
     """
-    with closing(sqlite3.connect(db_path)) as connection:
+    with closing(connect(db_path)) as connection:
         ensure_schema(connection)
         rows = connection.execute(query, params).fetchall()
     points = [

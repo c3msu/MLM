@@ -18,10 +18,10 @@ current environment.
 
 | Rule block | Primary inputs | Feasibility gate |
 | --- | --- | --- |
-| Duration | CPI, PCE, core PCE, Dallas Fed Trimmed Mean PCE, PPI, 2Y one-month change, Conditions Score | Avoids adding duration unless inflation is cooling and 2Y is repricing lower. Keeps short duration when inflation is hot, 2Y sells off, Dallas Trimmed PCE confirms sticky underlying inflation, or macro conditions are tight. |
+| Duration | CPI, PCE, core PCE, Dallas Fed Trimmed Mean PCE, PPI, 2Y one-month change, reliability-adjusted Conditions Score | Avoids adding duration unless every input used by the cooling rule is observed and 2Y is repricing lower. Missing inflation series render as `--` and can never masquerade as 0% inflation. Keeps short duration when observed inflation is hot, 2Y sells off, or reliability-adjusted macro conditions are tight. |
 | 5s30s curve | 5s30s level, QRA next-quarter borrowing | Does not chase steepeners when the curve is already steep and QRA borrowing is light. Keeps or sizes down steepeners when supply is heavy but curve is already extended. |
-| Front end | 2Y, EFFR, SOFR, 2Y one-month change | Downgrades carry when 2Y trades far below EFFR and has rallied sharply, because cuts are already priced. |
-| Breakeven inflation | 10Y BEI, CPI/PCE/core PCE/Dallas Trimmed PCE, PPI, WTI, WTI shock | Long breakevens require hot inflation and either energy confirmation or not-rich BEI. Rich BEI with cooling inflation and soft energy is reduced. |
+| Front end | 2Y, EFFR, SOFR, 2Y one-month change | Downgrades carry when 2Y trades far below EFFR and has rallied sharply, because cuts are already priced. If EFFR or SOFR is unavailable, the rule emits a non-actionable `FRONT-END 数据不足` state instead of calculating carry from compatibility zeroes. |
+| Breakeven inflation | 10Y BEI, CPI/PCE/core PCE/Dallas Trimmed PCE, PPI, WTI, WTI shock | Long breakevens require hot inflation and either energy confirmation or not-rich BEI. Rich BEI with cooling inflation and soft energy is reduced. Missing BEI or WTI produces a non-actionable `RV 数据不足` state. |
 
 ## Scenario Coverage
 
@@ -32,6 +32,7 @@ current environment.
 | Very steep 5s30s, light QRA | Curve view switches to `CURVE 观望` and explicitly says not to chase steepeners. |
 | Front end already prices cuts | Front-end view switches to `FRONT-END 谨慎`; it is no longer described as a cash substitute. |
 | Cooling inflation, soft oil, rich BEI | Breakeven view switches to `RV 降通胀补偿`. |
+| Optional FRED inputs missing | No duration-add, front-end carry, or breakeven direction is inferred from zero-valued compatibility fields; affected views explicitly say data are insufficient and carry `不建仓 · 等待数据` sizing. |
 
 ## Confidence Overlay
 
@@ -46,6 +47,23 @@ investment-view cards copy a compact summary:
 This overlay does not change trade direction by itself. It changes how strongly
 the UI should present that direction and gives the reader an immediate warning
 when a rule-triggered idea is built on weaker evidence.
+
+## Decision Contract
+
+`build_ideas()` also emits an action-oriented contract for each view:
+
+- `priority`: stable display order, currently 1 through 4.
+- `direction`: the executable direction label, aligned with `tag`.
+- `sizing`: portfolio role such as main view, relative-value view, defensive
+  cash substitute, or small tail hedge.
+- `trigger`: the observable conditions required to maintain or add the view.
+- `invalidation`: the observable conditions that reduce or close the view.
+
+The browser leads with these fields and folds the editable long thesis,
+confidence audit, factor source, and historical SPY overlay into each row.
+Manual overrides may omit the decision fields; the frontend derives the same
+conservative fallback fields from the supplied `tag` so older snapshots remain
+readable without fabricating new market data.
 
 ## Historical SPY Impact Overlay
 
@@ -152,5 +170,7 @@ Adaptive behavior is covered by unit tests in
 - `test_build_ideas_does_not_chase_steepeners_after_curve_is_already_steep_and_qra_light`
 - `test_build_ideas_marks_front_end_carry_as_less_feasible_when_cuts_are_priced`
 - `test_build_ideas_reduces_breakeven_when_inflation_cools_and_bei_is_rich`
+- `test_build_ideas_fails_closed_when_optional_macro_inputs_are_missing`
+- `test_build_ideas_prefers_macro_reliability_score_for_decision_logic`
 - `test_build_ideas_adds_historical_spy_proxy_impact_from_similar_states`
 - `test_build_ideas_marks_spy_proxy_impact_unavailable_when_history_sample_is_small`

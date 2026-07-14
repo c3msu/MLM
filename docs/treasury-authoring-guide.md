@@ -118,6 +118,21 @@ If the series is essential to the cross-market view, extend
 coverage fails verification. Keep category/name/label aligned with the rows
 written by `backfill_history.py` or the refresh snapshot persistence.
 
+Macro factor inputs that retain a numeric fallback must also register their
+source state in `compute_indicators()["availability"]`. Factor construction
+must consult that metadata before scoring: missing observations render as
+`--` / `数据不足`, remain score-neutral, and use `manual-placeholder` (or the
+remaining public proxy's source mode for a partial input). Do not interpret a
+fallback `0.0` as genuine disinflation, labor weakness, calm volatility, or a
+normal credit spread.
+
+For the 21-factor Conditions Score, preserve component-level `observed`,
+`scoreEligible`, freshness/warm-up metadata, `value`, and `direction` together.
+Missing, stale, or warming factors retain neutral score and zero contribution
+in ranked diagnostics. Missing/stale values display as `--`/`missing`; only
+eligible rows may enter driver, focus-component, or balance summaries. Keep
+observed and scored counts/coverage aligned with those rows.
+
 ## Maintaining Equity And LPPL Risk Blocks
 
 `spyEarlyWarning`, `equityShortTermRisk`, and `globalLpplRisk` are separate
@@ -142,8 +157,10 @@ When changing `globalLpplRisk`:
 3. Do not fabricate missing direct index histories. Missing sources should
    produce unavailable rows, not synthetic scores.
 4. Keep `indexValidation.rows` aligned with visible index cards. Each available
-   index should carry `validation`, `history`, `backtest`, and `forwardSignal`
-   so the UI can show own-market 15D historical precision, its own LPPL curve,
+   index should carry `validation`, `historyRef`, `backtestRef`, and
+   `forwardSignal`; referenced payloads live once in canonical
+   `perIndexHistory` and `perIndexBacktests` maps. This lets the UI show
+   own-market 15D historical precision, its own LPPL curve,
    and a validation-weighted forward-pressure read beside the current fit.
    Available rows must also expose LPPL diagnostics: relative improvement over
    the power-law-only baseline, log-periodic oscillation count,
@@ -201,15 +218,23 @@ change scorecard source modes, weights, or idea generation, verify that
 `confidenceLevel`, `confidenceLabel`, and `confidenceNote` still describe the
 evidence quality behind the visible view.
 
+Generated cards must also keep the decision contract aligned with the rule:
+`priority`, `direction`, `sizing`, `trigger`, and `invalidation`. These fields
+drive the compact ranked view, while `text` remains the editable full thesis.
+When a rule changes direction, update its trigger and invalidation language in
+the same change so the UI cannot show a trade whose exit logic belongs to the
+previous regime.
+
 Cards also carry an `equityImpact` block. It summarizes historical S&P 500
 price-index proxy behavior for past observations with the same Conditions
 Score level bucket and 3-month score-change bucket. Keep this block historical:
 use the stored `macroLiquidityEquity.series` sample, preserve the minimum
 sample gate, and avoid wording that presents the result as a prediction.
 Manual `ideas` overrides replace generated cards as supplied. If an override
-omits confidence or `equityImpact`, the API reflects that manual shape; the
-frontend displays an explicit low-confidence placeholder instead of generating
-historical statistics from override text.
+omits decision fields, the frontend derives conservative fallback fields from
+the tag. If it omits confidence or `equityImpact`, the API reflects that manual
+shape; the frontend displays an explicit low-confidence placeholder instead of
+generating historical statistics from override text.
 
 When changing this layer, add or update scenario tests in
 `tests/test_build_dashboard.py`. See `docs/investment-view-rule-audit.md` for
@@ -285,22 +310,34 @@ presenting it as a live public source.
 ## Conditions Score Alignment
 
 The headline 0-100 score is a bhadial-compatible Conditions Score, not the old
-13-component liquidity-only composite. Keep the active factors at 30 scored
-factors across the seven public modules: Liquidity, Funding, Treasury, Rates,
-Credit, Risk, and External.
+13-component liquidity-only composite. Keep the 21 active factor definitions
+(deduplicated from the original 30-factor baseline) across the seven public
+modules: Liquidity, Funding, Treasury, Rates, Credit, Risk, and External.
 
 When changing this layer:
 
 - Preserve the public scoring semantics: `level_percentile`, `deviation`,
   `target_distance`, `shock_only`, and `risk_signal`.
-- Keep Funding smoothed with EMA(5).
+- Keep Funding smoothed with EMA(5 months); do not reinterpret the span as five
+  daily observations.
 - Keep module roll-up weights aligned with the public factor-coverage/overlap
   method, and surface `macroLiquidity.benchmark` when the public bhadial score
   can be fetched.
-- Keep `macroLiquidity.scoredFactorCount == 30`,
+- Keep `macroLiquidity.activeFactorCount == 21`,
   `macroLiquidity.totalFactorCount == 47`,
   `macroLiquidity.moduleCount == 7`, and
-  `meta.bhadialCompatibility.coverage.scorecardFactorCount == 30`.
+  `meta.bhadialCompatibility.coverage.scorecardFactorCount == 21`.
+- Treat `scoredFactorCount` as dynamic. Every factor spec must declare
+  `cadence`, `maxAgeDays`, and `minSampleCount`; stale or warming rows remain
+  neutral and must not set `scoreEligible` or enter ranked summaries.
+- Preserve `score == legacyFixedScore` for compatibility and expose
+  `observedOnlyScore`, `reliabilityScore`, `scoredCoveragePct`, and
+  `effectiveWeightCoveragePct` as trust diagnostics.
+- Keep signal validation aligned with production scoring: apply publication
+  lag once, enforce the same stale/warm-up gates, use actual finite OOS pairs
+  with horizon-overlap effective sample size, and label it
+  `research-validation`. `actionableRobust` requires positive OOS evidence,
+  Benjamini-Hochberg FDR, and positive fold stability.
 - Mark ETF-relative factors as public proxies unless exact ETF history is added.
 
 ## Conclusion And Weight Audit

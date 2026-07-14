@@ -10,10 +10,21 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts import serve
 from scripts.serve import NoStoreHandler, seconds_until_next_run, start_startup_update
-from scripts.update_data import REQUIRED_EQUITY_SOURCE_STATUS_NAMES, run_update, write_dashboard_json
+from scripts.update_data import (
+    FULL_REFRESH_DATA_MODE,
+    OPTIONAL_LKG_SOURCE_STATUS_NAMES,
+    REQUIRED_EQUITY_SOURCE_STATUS_NAMES,
+    REQUIRED_FRED_SOURCE_STATUS_NAMES,
+    full_refresh_source_issues,
+    merge_last_known_good_blocks,
+    run_update,
+    write_failed_dashboard_json,
+    write_dashboard_json,
+)
 from treasury_data.history_store import (
     history_summary,
     save_dashboard_history,
@@ -86,6 +97,33 @@ class SchedulerTests(unittest.TestCase):
             "sourceStatus": [{"name": "FRED", "status": "ok", "latest": "2026-05-22"}],
         }
 
+    def full_refresh_dashboard(self, generated_at="2026-07-13T22:00:00+00:00"):
+        dashboard = self.core_dashboard(generated_at)
+        dashboard["asOf"] = "2026-07-13"
+        dashboard["meta"] = {"dataMode": FULL_REFRESH_DATA_MODE}
+        dashboard["macroLiquidity"].update(
+            {
+                "scoredFactorCount": 12,
+                "effectiveWeightCoveragePct": 68,
+            }
+        )
+        dashboard["sourceStatus"] = [
+            {"name": "U.S. Treasury yield curve XML", "status": "ok", "latest": "2026-07-13"},
+            *(
+                {"name": name, "status": "ok", "latest": "2026-07-13"}
+                for name in REQUIRED_FRED_SOURCE_STATUS_NAMES
+            ),
+            *(
+                {"name": name, "status": "ok", "latest": "2026-07-13"}
+                for name in REQUIRED_EQUITY_SOURCE_STATUS_NAMES
+            ),
+            *(
+                {"name": name, "status": "ok", "latest": "2026-07-13"}
+                for name in OPTIONAL_LKG_SOURCE_STATUS_NAMES
+            ),
+        ]
+        return dashboard
+
     def test_seconds_until_next_run_uses_today_when_time_is_future(self):
         now = datetime(2026, 5, 20, 8, 30, 0)
 
@@ -99,6 +137,20 @@ class SchedulerTests(unittest.TestCase):
         seconds = seconds_until_next_run("16:30", now=now)
 
         self.assertEqual(seconds, int((datetime(2026, 5, 21, 16, 30) - now).total_seconds()))
+
+    def test_equity_bar_timing_skips_observed_us_market_holidays(self):
+        holiday = serve.equity_bar_timing(
+            datetime(2026, 7, 3, 17, 0, tzinfo=serve.NEW_YORK_TZ)
+        )
+        monday_session = serve.equity_bar_timing(
+            datetime(2026, 7, 6, 12, 0, tzinfo=serve.NEW_YORK_TZ)
+        )
+
+        self.assertEqual(holiday["phase"], "non_trading_day")
+        self.assertEqual(holiday["expectedDate"].isoformat(), "2026-07-02")
+        self.assertIsNone(holiday["readyAt"])
+        self.assertEqual(monday_session["expectedDate"].isoformat(), "2026-07-02")
+        self.assertEqual(monday_session["phase"], "trading_session")
 
     def test_write_dashboard_json_creates_parent_directory(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -126,6 +178,54 @@ class SchedulerTests(unittest.TestCase):
             self.assertTrue(output.exists())
             self.assertFalse((Path(temp_dir) / "api").exists())
 
+    def test_non_finite_candidate_cannot_replace_valid_json(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "data" / "dashboard.json"
+            healthy = {"asOf": "2026-07-10", "score": 50.0}
+            write_dashboard_json(healthy, output)
+
+            with self.assertRaisesRegex(ValueError, "Out of range float values"):
+                write_dashboard_json({"asOf": "2026-07-11", "score": float("nan")}, output)
+
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8")), healthy)
+            self.assertFalse(list(output.parent.glob(f".{output.name}.*.tmp")))
+
+    def test_older_rejected_job_cannot_overwrite_newer_failure_candidate(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "data" / "dashboard.json"
+            newer = {"generatedAt": "2026-07-10T22:02:00+00:00", "reason": "newer"}
+            older = {"generatedAt": "2026-07-10T22:01:00+00:00", "reason": "older"}
+
+            write_failed_dashboard_json(newer, output)
+            write_failed_dashboard_json(older, output)
+
+            failed = json.loads(output.with_name("dashboard.failed.json").read_text(encoding="utf-8"))
+            self.assertEqual(failed["reason"], "newer")
+
+    def test_concurrent_dashboard_writes_remain_atomic_and_leave_no_shared_temp_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "data" / "dashboard.json"
+            barrier = threading.Barrier(3)
+            payloads = [
+                {"asOf": "2026-07-09", "blob": ["a" * 128 for _ in range(500)]},
+                {"asOf": "2026-07-10", "blob": ["b" * 128 for _ in range(500)]},
+            ]
+
+            def writer(payload):
+                barrier.wait(timeout=2)
+                write_dashboard_json(payload, output)
+
+            threads = [threading.Thread(target=writer, args=(payload,)) for payload in payloads]
+            for thread in threads:
+                thread.start()
+            barrier.wait(timeout=2)
+            for thread in threads:
+                thread.join(timeout=2)
+
+            published = json.loads(output.read_text(encoding="utf-8"))
+            self.assertIn(published, payloads)
+            self.assertFalse(list(output.parent.glob(f".{output.name}.*.tmp")))
+
     def test_run_update_keeps_existing_healthy_dashboard_when_refresh_has_source_error(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             output = Path(temp_dir) / "data" / "dashboard.json"
@@ -150,6 +250,74 @@ class SchedulerTests(unittest.TestCase):
             self.assertTrue(failed_output.exists())
             self.assertIn(failed["generatedAt"], failed_output.read_text(encoding="utf-8"))
             self.assertFalse(history_db.exists())
+
+    def test_run_update_rejects_out_of_order_generated_at_and_as_of(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "data" / "dashboard.json"
+            healthy = self.core_dashboard("2026-05-25T12:00:00+00:00")
+            healthy["asOf"] = "2026-05-24"
+            write_dashboard_json(healthy, output)
+
+            older_job = self.core_dashboard("2026-05-25T11:59:59+00:00")
+            older_job["asOf"] = "2026-05-24"
+            returned = run_update(output, build_func=lambda: older_job, save_history=False)
+            self.assertEqual(returned["generatedAt"], healthy["generatedAt"])
+            failed = json.loads(output.with_name("dashboard.failed.json").read_text(encoding="utf-8"))
+            self.assertTrue(any("precedes served generatedAt" in issue for issue in failed["meta"]["refreshGate"]["issues"]))
+
+            stale_observation = self.core_dashboard("2026-05-25T12:01:00+00:00")
+            stale_observation["asOf"] = "2026-05-23"
+            returned = run_update(output, build_func=lambda: stale_observation, save_history=False)
+            self.assertEqual(returned["asOf"], "2026-05-24")
+            failed = json.loads(output.with_name("dashboard.failed.json").read_text(encoding="utf-8"))
+            self.assertTrue(any("candidate asOf" in issue for issue in failed["meta"]["refreshGate"]["issues"]))
+
+    def test_history_failure_does_not_replace_served_dashboard(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "data" / "dashboard.json"
+            healthy = self.core_dashboard("2026-05-25T12:00:00+00:00")
+            candidate = self.core_dashboard("2026-05-25T12:01:00+00:00")
+            write_dashboard_json(healthy, output)
+
+            with patch("scripts.update_data.save_dashboard_history", side_effect=OSError("disk full")):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    run_update(output, build_func=lambda: candidate)
+
+            served = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(served["generatedAt"], healthy["generatedAt"])
+
+    def test_newer_rejected_candidate_is_visible_to_health_without_replacing_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "data" / "dashboard.json"
+            served = self.core_dashboard("2026-05-25T12:00:00+00:00")
+            rejected = self.core_dashboard("2026-05-25T12:01:00+00:00")
+            rejected.setdefault("meta", {})["refreshGate"] = {
+                "status": "rejected",
+                "issues": ["required source is stale"],
+            }
+            write_dashboard_json(served, output)
+            write_dashboard_json(rejected, output.with_name("dashboard.failed.json"))
+
+            warning = serve.rejected_refresh_warning(output, served)
+
+            self.assertIsNotNone(warning)
+            self.assertEqual(warning["scope"], "refresh_gate")
+            self.assertIn("required source is stale", warning["detail"])
+
+            newer_served = self.core_dashboard("2026-05-25T12:02:00+00:00")
+            write_dashboard_json(newer_served, output)
+            self.assertIsNone(serve.rejected_refresh_warning(output, newer_served))
+
+    def test_server_health_treats_source_error_status_case_insensitively(self):
+        payload = {"status": "ok", "sourceCounts": {}, "errors": []}
+        serve.normalize_health_source_status(
+            payload,
+            {"sourceStatus": [{"name": "required feed", "status": " ERROR "}]},
+        )
+
+        self.assertEqual(payload["status"], "degraded")
+        self.assertEqual(payload["sourceCounts"], {"error": 1})
+        self.assertEqual(payload["errors"][0]["name"], "required feed")
 
     def test_run_update_writes_core_usable_dashboard_when_soft_source_has_error(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -177,6 +345,179 @@ class SchedulerTests(unittest.TestCase):
             self.assertTrue(failed_output.exists())
             self.assertIn(refreshed["generatedAt"], failed_output.read_text(encoding="utf-8"))
             self.assertEqual(history_summary(history_db)["snapshotCount"], 1)
+
+    def test_full_refresh_source_gate_rejects_empty_source_status(self):
+        dashboard = self.full_refresh_dashboard()
+        dashboard["sourceStatus"] = []
+
+        issues = full_refresh_source_issues(dashboard)
+
+        self.assertIn("sourceStatus must contain full-refresh source rows", issues)
+
+    def test_full_refresh_source_gate_rejects_missing_optional_monitoring_not_optional_errors(self):
+        dashboard = self.full_refresh_dashboard()
+        missing_name = OPTIONAL_LKG_SOURCE_STATUS_NAMES[0]
+        dashboard["sourceStatus"] = [
+            row for row in dashboard["sourceStatus"] if row.get("name") != missing_name
+        ]
+
+        issues = full_refresh_source_issues(dashboard)
+
+        self.assertTrue(any("optional source monitoring incomplete" in issue for issue in issues))
+
+        dashboard = self.full_refresh_dashboard()
+        row = next(item for item in dashboard["sourceStatus"] if item["name"] == missing_name)
+        row.update({"status": "error", "latest": "upstream timeout"})
+        self.assertEqual(full_refresh_source_issues(dashboard), [])
+
+    def test_run_update_keeps_existing_snapshot_when_full_refresh_loses_source_status(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "data" / "dashboard.json"
+            healthy = self.full_refresh_dashboard("2026-07-13T20:00:00+00:00")
+            candidate = self.full_refresh_dashboard("2026-07-13T22:00:00+00:00")
+            candidate["sourceStatus"] = []
+            write_dashboard_json(healthy, output)
+
+            dashboard = run_update(output, build_func=lambda: candidate, save_history=False)
+
+            self.assertEqual(dashboard["generatedAt"], healthy["generatedAt"])
+            failed = json.loads(output.with_name("dashboard.failed.json").read_text(encoding="utf-8"))
+            self.assertEqual(failed["meta"]["refreshGate"]["status"], "rejected")
+            self.assertTrue(failed["meta"]["refreshGate"]["issues"])
+
+    def test_run_update_rejects_missing_fred_monitoring_row_but_allows_optional_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "data" / "dashboard.json"
+            healthy = self.full_refresh_dashboard("2026-07-13T20:00:00+00:00")
+            missing_monitoring = self.full_refresh_dashboard("2026-07-13T22:00:00+00:00")
+            missing_name = REQUIRED_FRED_SOURCE_STATUS_NAMES[-1]
+            missing_monitoring["sourceStatus"] = [
+                row for row in missing_monitoring["sourceStatus"] if row.get("name") != missing_name
+            ]
+            write_dashboard_json(healthy, output)
+
+            rejected = run_update(output, build_func=lambda: missing_monitoring, save_history=False)
+
+            self.assertEqual(rejected["generatedAt"], healthy["generatedAt"])
+            failed = json.loads(output.with_name("dashboard.failed.json").read_text(encoding="utf-8"))
+            self.assertTrue(any("FRED source monitoring incomplete" in issue for issue in failed["meta"]["refreshGate"]["issues"]))
+
+            optional_error = self.full_refresh_dashboard("2026-07-13T23:00:00+00:00")
+            optional_error["sourceStatus"].append(
+                {"name": "CFTC financial futures COT", "status": "error", "latest": "timeout"}
+            )
+            published = run_update(output, build_func=lambda: optional_error, save_history=False)
+
+            self.assertEqual(published["generatedAt"], optional_error["generatedAt"])
+            self.assertIn(optional_error["generatedAt"], output.read_text(encoding="utf-8"))
+
+    def test_full_refresh_source_gate_accepts_explicit_fred_curve_fallback(self):
+        dashboard = self.full_refresh_dashboard()
+        dashboard["sourceStatus"][0] = {
+            "name": "U.S. Treasury yield curve XML",
+            "status": "warning",
+            "latest": "FRED DGS fallback through 2026-07-13",
+            "source": "fred-fallback",
+        }
+
+        self.assertEqual(full_refresh_source_issues(dashboard), [])
+
+    def test_full_refresh_source_gate_rejects_malformed_stale_or_future_curve_fallback_dates(self):
+        cases = (
+            ("FRED DGS fallback returned no dated observation", "not a valid ISO date"),
+            ("FRED DGS fallback through 2026-07-08", "business days old"),
+            ("FRED DGS fallback through 2026-07-14", "after generatedAt date"),
+        )
+        for latest, expected_issue in cases:
+            with self.subTest(latest=latest):
+                dashboard = self.full_refresh_dashboard()
+                dashboard["sourceStatus"][0] = {
+                    "name": "U.S. Treasury yield curve XML",
+                    "status": "warning",
+                    "latest": latest,
+                    "source": "fred-fallback",
+                }
+
+                issues = full_refresh_source_issues(dashboard)
+
+                self.assertTrue(any(expected_issue in issue for issue in issues), issues)
+
+    def test_full_refresh_source_gate_rejects_malformed_stale_or_future_equity_dates(self):
+        first_equity_name = REQUIRED_EQUITY_SOURCE_STATUS_NAMES[0]
+        cases = (
+            ("not-a-date", "not a valid ISO date"),
+            ("2026-07-08", "business days old"),
+            ("2026-07-14", "after generatedAt date"),
+        )
+        for latest, expected_issue in cases:
+            with self.subTest(latest=latest):
+                dashboard = self.full_refresh_dashboard()
+                row = next(item for item in dashboard["sourceStatus"] if item["name"] == first_equity_name)
+                row["latest"] = latest
+
+                issues = full_refresh_source_issues(dashboard)
+
+                self.assertTrue(any(expected_issue in issue for issue in issues), issues)
+
+    def test_full_refresh_source_gate_validates_ok_fred_dates_without_requiring_every_series_to_succeed(self):
+        fred_name = REQUIRED_FRED_SOURCE_STATUS_NAMES[-1]
+        dashboard = self.full_refresh_dashboard()
+        row = next(item for item in dashboard["sourceStatus"] if item["name"] == fred_name)
+        row.update({"status": "error", "latest": "upstream timeout"})
+
+        self.assertEqual(full_refresh_source_issues(dashboard), [])
+
+        row.update({"status": "ok", "latest": "not-a-date"})
+        self.assertTrue(
+            any(f"{fred_name} latest observation" in issue for issue in full_refresh_source_issues(dashboard))
+        )
+
+        row["latest"] = "2026-07-14"
+        self.assertTrue(
+            any("after generatedAt date" in issue for issue in full_refresh_source_issues(dashboard))
+        )
+
+    def test_full_refresh_source_gate_rejects_invalid_snapshot_dates_and_duplicate_required_rows(self):
+        dashboard = self.full_refresh_dashboard()
+        dashboard["asOf"] = "not-a-date"
+        dashboard["sourceStatus"].append(dict(dashboard["sourceStatus"][0]))
+
+        issues = full_refresh_source_issues(dashboard)
+
+        self.assertTrue(any("asOf must be an ISO date" in issue for issue in issues))
+        self.assertTrue(any("source monitoring row is duplicated" in issue for issue in issues))
+
+    def test_full_refresh_source_gate_rejects_low_current_factor_coverage(self):
+        dashboard = self.full_refresh_dashboard()
+        dashboard["macroLiquidity"]["scoredFactorCount"] = 4
+        dashboard["macroLiquidity"]["effectiveWeightCoveragePct"] = 24
+
+        issues = full_refresh_source_issues(dashboard)
+
+        self.assertTrue(any("scoredFactorCount" in issue for issue in issues))
+        self.assertTrue(any("effectiveWeightCoveragePct" in issue for issue in issues))
+
+    def test_rejected_full_refresh_leaves_existing_snapshot_bytes_unchanged(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "data" / "dashboard.json"
+            healthy = self.full_refresh_dashboard("2026-07-13T20:00:00+00:00")
+            write_dashboard_json(healthy, output)
+            original_bytes = output.read_bytes()
+            rejected = self.full_refresh_dashboard("2026-07-13T22:00:00+00:00")
+            rejected["sourceStatus"][0] = {
+                "name": "U.S. Treasury yield curve XML",
+                "status": "warning",
+                "latest": "FRED DGS fallback through 2026-06-01",
+                "source": "fred-fallback",
+            }
+
+            returned = run_update(output, build_func=lambda: rejected, save_history=False)
+
+            self.assertEqual(returned["generatedAt"], healthy["generatedAt"])
+            self.assertEqual(output.read_bytes(), original_bytes)
+            failed = json.loads(output.with_name("dashboard.failed.json").read_text(encoding="utf-8"))
+            self.assertEqual(failed["meta"]["refreshGate"]["status"], "rejected")
+            self.assertTrue(any("business days old" in issue for issue in failed["meta"]["refreshGate"]["issues"]))
 
     def test_run_update_keeps_existing_core_dashboard_when_refresh_drops_equity_backtest(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -254,6 +595,154 @@ class SchedulerTests(unittest.TestCase):
 
             self.assertTrue(output.exists())
             self.assertEqual(history_summary(history_db)["snapshotCount"], 1)
+
+    def test_optional_source_blocks_use_explicit_last_known_good_cache(self):
+        existing = {
+            "generatedAt": "2026-07-10T22:00:00+00:00",
+            "globalLpplRisk": {"available": True, "asOf": "2026-07-10", "indices": [{"symbol": "SPY"}]},
+            "regionalMonitor": {"available": True, "regions": [{"key": "us"}]},
+        }
+        candidate = {
+            "generatedAt": "2026-07-13T01:00:00+00:00",
+            "globalLpplRisk": {"available": False, "reason": "upstream timeout"},
+            "regionalMonitor": {},
+        }
+
+        merged = merge_last_known_good_blocks(candidate, existing)
+
+        self.assertTrue(merged["globalLpplRisk"]["available"])
+        self.assertTrue(merged["regionalMonitor"]["available"])
+        borrowed = {row["key"]: row for row in merged["meta"]["lastKnownGoodBlocks"]}
+        self.assertEqual(borrowed["globalLpplRisk"]["status"], "stale-cache")
+        self.assertEqual(borrowed["globalLpplRisk"]["sourceGeneratedAt"], existing["generatedAt"])
+
+    def test_legitimate_empty_list_does_not_resurrect_stale_events_or_news(self):
+        existing = {
+            "generatedAt": "2026-07-10T22:00:00+00:00",
+            "events": [["2026-07-13", "old event", "高"]],
+            "news": [["07/13", "Federal Reserve", "old news"]],
+        }
+        candidate = {
+            "generatedAt": "2026-07-13T01:00:00+00:00",
+            "events": [],
+            "news": [],
+            "sourceStatus": [
+                {"name": "Federal Reserve FOMC calendar", "status": "ok", "latest": "none"},
+                {"name": "FRED economic release calendar", "status": "ok", "latest": "none"},
+                {"name": "BEA release schedule", "status": "ok", "latest": "none"},
+                {"name": "Federal Reserve press release RSS", "status": "ok", "latest": "none"},
+                {"name": "U.S. Treasury press releases", "status": "ok", "latest": "none"},
+            ],
+        }
+
+        merged = merge_last_known_good_blocks(candidate, existing)
+
+        self.assertEqual(merged["events"], [])
+        self.assertEqual(merged["news"], [])
+        self.assertNotIn("lastKnownGoodBlocks", merged.get("meta", {}))
+
+    def test_missing_optional_source_monitoring_borrows_last_known_good_list(self):
+        existing = {
+            "generatedAt": "2026-07-10T22:00:00+00:00",
+            "events": [["2026-07-29", "FOMC decision", "高"]],
+        }
+        candidate = {
+            "generatedAt": "2026-07-13T01:00:00+00:00",
+            "events": [],
+            "sourceStatus": [
+                {"name": "FRED economic release calendar", "status": "ok", "latest": "2026-07-13"},
+                {"name": "BEA release schedule", "status": "ok", "latest": "2026-07-13"},
+            ],
+        }
+
+        merged = merge_last_known_good_blocks(candidate, existing)
+
+        self.assertEqual(merged["events"], existing["events"])
+        self.assertEqual(merged["meta"]["lastKnownGoodBlocks"][0]["key"], "events")
+
+    def test_partial_aggregate_source_failure_preserves_complete_previous_block(self):
+        existing = {
+            "generatedAt": "2026-07-10T22:00:00+00:00",
+            "events": [["2026-07-29", "FOMC decision", "高"]],
+        }
+        candidate = {
+            "generatedAt": "2026-07-13T01:00:00+00:00",
+            "events": [["2026-07-31", "BEA release", "高"]],
+            "sourceStatus": [
+                {"name": "Federal Reserve FOMC calendar", "status": "warning", "latest": "timeout"},
+                {"name": "FRED economic release calendar", "status": "ok", "latest": "2026-07-13"},
+                {"name": "BEA release schedule", "status": "ok", "latest": "2026-07-13"},
+            ],
+        }
+
+        merged = merge_last_known_good_blocks(candidate, existing)
+
+        self.assertEqual(merged["events"], existing["events"])
+        self.assertEqual(merged["meta"]["lastKnownGoodBlocks"][0]["key"], "events")
+
+    def test_global_lppl_symbol_regression_borrows_dependency_group(self):
+        existing = {
+            "generatedAt": "2026-07-10T22:00:00+00:00",
+            "globalLpplRisk": {
+                "available": True,
+                "indices": [
+                    {"symbol": "SPY", "available": True},
+                    {"symbol": "QQQ", "available": True},
+                ],
+            },
+            "regionalMonitor": {"available": True, "regions": [{"key": "us", "from": "old-global"}]},
+            "portfolioOverview": {"available": True, "layers": [{"layer": "globalLppl", "from": "old-global"}]},
+        }
+        candidate = {
+            "generatedAt": "2026-07-13T01:00:00+00:00",
+            "globalLpplRisk": {
+                "available": True,
+                "indices": [{"symbol": "SPY", "available": True}],
+            },
+            "regionalMonitor": {"available": True, "regions": [{"key": "us", "from": "partial-global"}]},
+            "portfolioOverview": {"available": True, "layers": [{"layer": "globalLppl", "from": "partial-global"}]},
+        }
+
+        merged = merge_last_known_good_blocks(candidate, existing)
+
+        self.assertEqual(merged["globalLpplRisk"], existing["globalLpplRisk"])
+        self.assertEqual(merged["regionalMonitor"], existing["regionalMonitor"])
+        self.assertEqual(merged["portfolioOverview"], existing["portfolioOverview"])
+        self.assertEqual(
+            {row["key"] for row in merged["meta"]["lastKnownGoodBlocks"]},
+            {"globalLpplRisk", "regionalMonitor", "portfolioOverview"},
+        )
+
+    def test_validation_factor_regression_during_fred_failure_borrows_portfolio_group(self):
+        existing = {
+            "generatedAt": "2026-07-10T22:00:00+00:00",
+            "signalValidation": {
+                "available": True,
+                "factors": [{"id": "fed_net_liquidity"}, {"id": "vix"}],
+            },
+            "spyEarlyWarning": {"available": True, "score": 60.0, "from": "complete-validation"},
+            "portfolioOverview": {"available": True, "layers": [{"from": "complete-validation"}]},
+        }
+        candidate = {
+            "generatedAt": "2026-07-13T01:00:00+00:00",
+            "signalValidation": {
+                "available": True,
+                "factors": [{"id": "fed_net_liquidity"}],
+            },
+            "spyEarlyWarning": {"available": True, "score": 20.0, "from": "partial-validation"},
+            "portfolioOverview": {"available": True, "layers": [{"from": "partial-validation"}]},
+            "sourceStatus": [{"name": "FRED VIXCLS", "status": "warning", "latest": "timeout"}],
+        }
+
+        merged = merge_last_known_good_blocks(candidate, existing)
+
+        self.assertEqual(merged["signalValidation"], existing["signalValidation"])
+        self.assertEqual(merged["spyEarlyWarning"], existing["spyEarlyWarning"])
+        self.assertEqual(merged["portfolioOverview"], existing["portfolioOverview"])
+        self.assertEqual(
+            {row["key"] for row in merged["meta"]["lastKnownGoodBlocks"]},
+            {"signalValidation", "spyEarlyWarning", "portfolioOverview"},
+        )
 
     def test_start_startup_update_returns_before_slow_refresh_finishes(self):
         entered = threading.Event()
@@ -1090,6 +1579,126 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(content_type, "text/csv; charset=utf-8")
         self.assertIn("tenor,today,w1,m1,d1", body.decode("utf-8").splitlines()[0])
         self.assertIn("10Y,4.67,4.46,4.26,0.04", body.decode("utf-8"))
+
+    def test_dashboard_and_api_support_etag_conditional_requests(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "data" / "dashboard.json"
+            dashboard = self.core_dashboard()
+            write_dashboard_json(dashboard, output)
+
+            class ConditionalHandler(NoStoreHandler):
+                dashboard_output = output
+
+                def log_message(self, format, *args):  # noqa: A002
+                    return
+
+            server = http.server.ThreadingHTTPServer(
+                ("127.0.0.1", 0),
+                functools.partial(ConditionalHandler, directory=temp_dir),
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                for path in ("/data/dashboard.json", "/api/dashboard"):
+                    first = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+                    first.request("GET", path)
+                    first_response = first.getresponse()
+                    first_body = first_response.read()
+                    etag = first_response.getheader("ETag")
+                    first.close()
+
+                    second = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+                    second.request("GET", path, headers={"If-None-Match": etag})
+                    second_response = second.getresponse()
+                    second_body = second_response.read()
+                    second.close()
+
+                    self.assertEqual(first_response.status, 200)
+                    self.assertTrue(first_body)
+                    self.assertTrue(etag)
+                    self.assertEqual(first_response.getheader("Cache-Control"), "private, no-cache, max-age=0")
+                    self.assertEqual(second_response.status, 304)
+                    self.assertEqual(second_body, b"")
+                    self.assertEqual(second_response.getheader("ETag"), etag)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=1)
+
+    def test_etag_does_not_turn_error_responses_into_not_modified(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_output = Path(temp_dir) / "data" / "missing-dashboard.json"
+
+            class ConditionalErrorHandler(NoStoreHandler):
+                dashboard_output = missing_output
+
+                def log_message(self, format, *args):  # noqa: A002
+                    return
+
+            server = http.server.ThreadingHTTPServer(
+                ("127.0.0.1", 0),
+                functools.partial(ConditionalErrorHandler, directory=temp_dir),
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                for path, expected_status in (
+                    ("/api/unknown-route", 404),
+                    ("/data/dashboard.json", 500),
+                ):
+                    if expected_status == 404:
+                        write_dashboard_json(
+                            {
+                                "asOf": "2026-07-10",
+                                "generatedAt": "2026-07-13T00:00:00+00:00",
+                                "sourceStatus": [],
+                            },
+                            missing_output,
+                        )
+                    else:
+                        missing_output.unlink(missing_ok=True)
+                    first = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+                    first.request("GET", path)
+                    first_response = first.getresponse()
+                    first_body = first_response.read()
+                    etag = first_response.getheader("ETag")
+                    first.close()
+
+                    second = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+                    second.request("GET", path, headers={"If-None-Match": etag})
+                    second_response = second.getresponse()
+                    second_body = second_response.read()
+                    second.close()
+
+                    self.assertEqual(first_response.status, expected_status)
+                    self.assertEqual(second_response.status, expected_status)
+                    self.assertTrue(first_body)
+                    self.assertEqual(second_body, first_body)
+                    self.assertEqual(second_response.getheader("ETag"), etag)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=1)
+
+    def test_response_writer_ignores_normal_client_disconnects(self):
+        class DisconnectingWriter:
+            def __init__(self, error):
+                self.error = error
+
+            def write(self, _body):
+                raise self.error
+
+        for error in (BrokenPipeError("closed"), ConnectionResetError("reset")):
+            with self.subTest(error=type(error).__name__):
+                handler = object.__new__(NoStoreHandler)
+                handler.command = "GET"
+                handler.headers = {}
+                handler.send_response = lambda _status: None
+                handler.send_header = lambda _name, _value: None
+                handler.end_headers = lambda: None
+                handler.wfile = DisconnectingWriter(error)
+
+                handler.write_bytes_response(200, b"payload", "application/json")
 
 
 if __name__ == "__main__":

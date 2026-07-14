@@ -17,7 +17,7 @@ Inputs:
 - `macroLiquidity.score`: current Conditions Score level.
 - `macroLiquidityEquity.currentSignal.score3mChange`: 3-month Conditions Score
   deterioration or improvement.
-- `macroLiquidity.components`: existing 30 scored factor components.
+- `macroLiquidity.components`: existing 21 active scored factor components.
 
 Risk sleeves:
 

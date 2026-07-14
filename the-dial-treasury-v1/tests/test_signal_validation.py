@@ -13,10 +13,13 @@ from treasury_data.build_dashboard import (
 from treasury_data.signal_validation import (
     SortedSeries,
     alert_breach_episodes,
+    apply_benjamini_hochberg,
+    approximate_correlation_p_value,
     block_bootstrap_ci,
     classify_lead_lag,
     effective_weights,
     evaluate_signal,
+    fold_ic_stability,
     redundancy_clusters,
     spearman_ic,
     weekly_dates,
@@ -64,6 +67,105 @@ class SpearmanIcTests(unittest.TestCase):
         forward = [1.0, 99.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
         self.assertAlmostEqual(spearman_ic(signal, forward), 1.0, places=9)
 
+    def test_correlation_p_value_and_fdr_are_exposed_as_diagnostics(self) -> None:
+        self.assertLess(approximate_correlation_p_value(0.5, 60), 0.01)
+        rows = [
+            {"pValue3m": 0.001, "robust": True, "foldStability3m": {"stablePositive": True}},
+            {"pValue3m": 0.03, "robust": True, "foldStability3m": {"stablePositive": True}},
+            {"pValue3m": 0.4, "robust": True, "foldStability3m": {"stablePositive": True}},
+        ]
+
+        apply_benjamini_hochberg(rows, alpha=0.10)
+
+        self.assertTrue(rows[0]["fdrSignificant3m"])
+        self.assertTrue(rows[0]["actionableRobust"])
+        self.assertFalse(rows[2]["fdrSignificant3m"])
+        self.assertFalse(rows[2]["actionableRobust"])
+        self.assertEqual(rows[0]["fdrFamilySize"], 3)
+
+    def test_fdr_keeps_missing_p_values_in_the_preregistered_family(self) -> None:
+        rows = [
+            {"pValue3m": 0.04, "robust": True, "foldStability3m": {"stablePositive": True}},
+            {"pValue3m": None, "robust": True, "foldStability3m": {"stablePositive": True}},
+        ]
+
+        apply_benjamini_hochberg(rows, alpha=0.10)
+
+        self.assertEqual(rows[0]["fdrFamilySize"], 2)
+        self.assertEqual(rows[0]["fdrQValue3m"], 0.08)
+        self.assertTrue(rows[0]["actionableRobust"])
+        self.assertEqual(rows[1]["fdrQValue3m"], 1.0)
+        self.assertFalse(rows[1]["fdrSignificant3m"])
+        self.assertFalse(rows[1]["actionableRobust"])
+
+    def test_fdr_reserves_unreported_preregistered_hypotheses(self) -> None:
+        rows = [
+            {"pValue3m": 0.04, "robust": True, "foldStability3m": {"stablePositive": True}},
+        ]
+
+        apply_benjamini_hochberg(rows, alpha=0.10, family_size=4)
+
+        self.assertEqual(rows[0]["fdrFamilySize"], 4)
+        self.assertEqual(rows[0]["fdrQValue3m"], 0.16)
+        self.assertFalse(rows[0]["fdrSignificant3m"])
+        self.assertFalse(rows[0]["actionableRobust"])
+
+
+class FoldStabilityTests(unittest.TestCase):
+    def test_reports_contiguous_positive_folds_for_stable_leading_signal(self) -> None:
+        prices: list[SeriesPoint] = []
+        current = date(2021, 1, 4)
+        trading_index = 0
+        while len(prices) < 1300:
+            if current.weekday() < 5:
+                level = 100.0 * math.exp(0.0000012 * trading_index * trading_index)
+                prices.append(SeriesPoint(date=current, value=level))
+                trading_index += 1
+            current += timedelta(days=1)
+        signals = [
+            SeriesPoint(date=point.date, value=float(index))
+            for index, point in enumerate(prices[::5])
+        ]
+
+        stability = fold_ic_stability(signals, prices, direction="higher_better")
+
+        self.assertTrue(stability["available"])
+        self.assertGreaterEqual(stability["foldCount"], 2)
+        self.assertTrue(stability["stablePositive"])
+        self.assertEqual(stability["positiveFoldPct"], 100.0)
+        self.assertAlmostEqual(stability["initialResearchPct"], 65.0, delta=0.5)
+
+    def test_requires_every_available_oos_fold_to_be_positive(self) -> None:
+        prices: list[SeriesPoint] = []
+        current = date(2024, 1, 1)
+        level = 100.0
+        forward_returns: list[float] = []
+        for index in range(120):
+            next_return = ((index % 7) - 3) * 0.001
+            forward_returns.append(next_return)
+            prices.append(SeriesPoint(date=current, value=level))
+            level *= 1 + next_return
+            current += timedelta(days=1)
+        signals: list[SeriesPoint] = []
+        # 119 complete one-day labels -> the 65% boundary starts at row 77.
+        # Make the first of three evaluation folds negative and the other two positive.
+        for index, point in enumerate(prices):
+            forward = forward_returns[index]
+            value = -forward if 77 <= index < 91 else forward
+            signals.append(SeriesPoint(date=point.date, value=value))
+
+        stability = fold_ic_stability(
+            signals,
+            prices,
+            horizon_days=1,
+            direction="higher_better",
+        )
+
+        self.assertTrue(stability["available"])
+        self.assertEqual(stability["foldCount"], 3)
+        self.assertLess(stability["positiveFoldPct"], 100.0)
+        self.assertFalse(stability["stablePositive"])
+
 
 class WeeklyDatesTests(unittest.TestCase):
     def test_picks_last_trading_day_per_week(self) -> None:
@@ -82,20 +184,108 @@ class SortedSeriesTests(unittest.TestCase):
         series = SortedSeries(points)
         self.assertEqual(series.percentile_at(points[-1].date), 100)
         self.assertEqual(series.percentile_at(points[0].date), None)
+        self.assertEqual(series.percentile_with_sample_count_at(points[-1].date), (100, 5))
+        self.assertEqual(series.percentile_with_sample_count_at(points[0].date), (None, 1))
 
     def test_forward_return_and_drawdown(self) -> None:
         points = daily_points([100.0, 95.0, 90.0, 99.0, 110.0])
         series = SortedSeries(points)
-        drawdown = series.forward_max_drawdown_pct(points[0].date, days=30)
+        drawdown = series.forward_max_drawdown_pct(points[0].date, days=4)
         self.assertAlmostEqual(drawdown, -10.0, places=6)
         forward = series.forward_return_pct(points[0].date, days=4)
         self.assertIsNotNone(forward)
+        self.assertIsNone(series.forward_max_drawdown_pct(points[0].date, days=30))
+        self.assertIsNone(series.forward_trough_date(points[0].date, days=30))
 
     def test_forward_trough_date(self) -> None:
         points = daily_points([100.0, 95.0, 90.0, 99.0, 110.0])
         series = SortedSeries(points)
-        trough = series.forward_trough_date(points[0].date, days=30)
+        trough = series.forward_trough_date(points[0].date, days=4)
         self.assertEqual(trough, points[2].date)
+
+
+class BhadialWeeklyReplayContractTests(unittest.TestCase):
+    @staticmethod
+    def factor_spec(**overrides) -> dict:
+        spec = {
+            "id": "nfci-replay-contract",
+            "scoreKey": "nfci",
+            "method": "level_percentile",
+            "direction": "higher_better",
+            "maxAgeDays": 7,
+            "minSampleCount": 3,
+            "publicationLagDays": 0,
+        }
+        spec.update(overrides)
+        return spec
+
+    def test_warming_factor_is_neutral_and_excluded_until_minimum_sample(self) -> None:
+        points = [
+            SeriesPoint(date=date(2024, 1, 1), value=10.0),
+            SeriesPoint(date=date(2024, 1, 8), value=20.0),
+            SeriesPoint(date=date(2024, 1, 15), value=30.0),
+        ]
+        replay = BhadialWeeklyReplay({"nfci": points})
+        spec = self.factor_spec()
+
+        self.assertEqual(replay.factor_score_at(spec, date(2024, 1, 8)), (50.0, False))
+        self.assertEqual(replay.factor_score_at(spec, date(2024, 1, 15)), (100.0, True))
+
+    def test_stale_factor_is_neutral_and_not_eligible(self) -> None:
+        points = [
+            SeriesPoint(date=date(2023, 12, 18), value=10.0),
+            SeriesPoint(date=date(2023, 12, 25), value=20.0),
+            SeriesPoint(date=date(2024, 1, 1), value=30.0),
+        ]
+        replay = BhadialWeeklyReplay({"nfci": points})
+
+        self.assertEqual(
+            replay.factor_score_at(self.factor_spec(maxAgeDays=7), date(2024, 1, 9)),
+            (50.0, False),
+        )
+
+    def test_publication_lag_excludes_unavailable_and_future_observations(self) -> None:
+        available = [
+            SeriesPoint(date=date(2024, 1, 1), value=10.0),
+            SeriesPoint(date=date(2024, 1, 2), value=20.0),
+            SeriesPoint(date=date(2024, 1, 3), value=30.0),
+            SeriesPoint(date=date(2024, 1, 4), value=-100.0),
+        ]
+        with_future = [*available, SeriesPoint(date=date(2024, 1, 5), value=-1000.0)]
+        spec = self.factor_spec(publicationLagDays=2, maxAgeDays=10)
+
+        score_without_future = BhadialWeeklyReplay({"nfci": available}).factor_score_at(
+            spec, date(2024, 1, 5)
+        )
+        score_with_future = BhadialWeeklyReplay({"nfci": with_future}).factor_score_at(
+            spec, date(2024, 1, 5)
+        )
+
+        # Jan 5's availability cutoff is Jan 3: Jan 4 and Jan 5 cannot enter.
+        self.assertEqual(score_without_future, (100.0, True))
+        self.assertEqual(score_with_future, score_without_future)
+        # On Jan 6 the Jan 4 observation becomes available exactly once.
+        self.assertEqual(
+            BhadialWeeklyReplay({"nfci": with_future}).factor_score_at(spec, date(2024, 1, 6)),
+            (0.0, True),
+        )
+
+    def test_replay_shock_only_factor_never_turns_quiet_stress_into_support(self) -> None:
+        points = [
+            SeriesPoint(date=date(2024, 1, 1), value=10.0),
+            SeriesPoint(date=date(2024, 1, 2), value=20.0),
+            SeriesPoint(date=date(2024, 1, 3), value=1.0),
+        ]
+        spec = self.factor_spec(
+            method="shock_only",
+            direction="lower_better",
+            maxAgeDays=10,
+        )
+
+        self.assertEqual(
+            BhadialWeeklyReplay({"nfci": points}).factor_score_at(spec, date(2024, 1, 3)),
+            (50.0, True),
+        )
 
 
 class EvaluateSignalTests(unittest.TestCase):
@@ -225,6 +415,26 @@ class EvaluateSignalTests(unittest.TestCase):
         alert = result["alert"]
         self.assertTrue(alert["available"])
         self.assertLessEqual(alert["thresholdValue"], 50.0)
+
+    def test_explicit_calendar_oos_boundary_overrides_row_count_split(self) -> None:
+        price_points = daily_points([100.0 + index * 0.1 for index in range(220)])
+        signal_points = [
+            SeriesPoint(date=point.date, value=float(index % 17))
+            for index, point in enumerate(price_points[50:150])
+        ]
+        common_boundary = price_points[100].date
+
+        result = evaluate_signal(
+            signal_points,
+            price_points,
+            horizons=(7,),
+            oos_start_date=common_boundary,
+        )
+
+        self.assertEqual(result["oosStartDate"], common_boundary.isoformat())
+        self.assertEqual(result["calibrationCount"], 50)
+        self.assertEqual(result["evaluationCount"], 50)
+        self.assertEqual(result["evaluationStartDate"], common_boundary.isoformat())
 
     def test_unavailable_for_tiny_sample(self) -> None:
         points = daily_points([100.0, 101.0])
@@ -363,10 +573,38 @@ class BuildSignalValidationTests(unittest.TestCase):
         return {"percentile_series": series}
 
     def test_emits_contract_fields(self) -> None:
-        payload = build_signal_validation(self.build_indicators())
+        indicators = self.build_indicators()
+        equity_points = [
+            {
+                "date": point.date.isoformat(),
+                "score": float(index % 100),
+                "spyClose": point.value,
+            }
+            for index, point in enumerate(indicators["percentile_series"]["sp500"][-220:])
+        ]
+        payload = build_signal_validation(
+            indicators,
+            equity_short_term_risk={"trend": {"available": True, "points": equity_points}},
+        )
         self.assertTrue(payload["available"])
         self.assertGreaterEqual(payload["weeklyObservationCount"], 60)
         self.assertEqual(payload["oosSplitPct"], 65)
+        self.assertEqual(payload["validationStatus"], "research-validation")
+        self.assertIs(payload["independentHoldout"], False)
+        self.assertEqual(payload["multipleTesting"]["method"], "Benjamini-Hochberg")
+        self.assertEqual(
+            {row["name"] for row in payload["multipleTesting"]["families"]},
+            {"factors", "composites"},
+        )
+        families = {row["name"]: row for row in payload["multipleTesting"]["families"]}
+        self.assertGreaterEqual(families["factors"]["size"], families["factors"]["reportedRows"])
+        self.assertGreater(families["factors"]["implicitUnavailableHypotheses"], 0)
+        self.assertTrue(
+            all(row["oosStartDate"] == payload["commonOosStartDate"] for row in payload["factors"])
+        )
+        self.assertTrue(
+            all(row["oosStartDate"] == payload["commonOosStartDate"] for row in payload["composites"])
+        )
         self.assertTrue(payload["factors"])
         factor_ids = {row["id"] for row in payload["factors"]}
         self.assertIn("fed_net_liquidity", factor_ids)
@@ -383,6 +621,12 @@ class BuildSignalValidationTests(unittest.TestCase):
         self.assertIn("bhadialChange13w", composite_ids)
         self.assertIn("spyEarlyWarning", composite_ids)
         self.assertTrue(any(row["id"].startswith("sleeve:") for row in payload["composites"]))
+        self.assertNotIn("equityShortTermRisk", composite_ids)
+        excluded = {row["id"]: row for row in payload["excludedModels"]}
+        self.assertEqual(excluded["equityShortTermRisk"]["primaryEndpoint"], "15 trading days")
+        self.assertEqual(excluded["equityShortTermRisk"]["validationPath"], "equityShortTermRisk.backtest")
+        self.assertTrue(all("actionableRobust" in row for row in payload["composites"]))
+        self.assertTrue(all("fdrQValue3m" in row for row in payload["composites"]))
         self.assertTrue(payload["effectiveWeights"])
         weight_sum = sum(row["effectiveWeight"] for row in payload["effectiveWeights"])
         self.assertAlmostEqual(weight_sum, 1.0, places=2)
@@ -460,13 +704,20 @@ class PredictiveLensTests(unittest.TestCase):
         self.assertIn("hy_credit", selected_ids)
         self.assertIn("nfci", selected_ids)
         self.assertNotIn("vix", selected_ids)
+        self.assertTrue(lens["purge"]["applied"])
+        self.assertEqual(lens["purge"]["horizonDays"], 91)
+        self.assertGreater(lens["purge"]["purgedObservationCount"], 0)
+        oos_start = date.fromisoformat(lens["purge"]["oosStartDate"])
+        for item in lens["selectedFactors"]:
+            calibration_end = date.fromisoformat(item["calibrationEndDate"])
+            self.assertLess(calibration_end + timedelta(days=91), oos_start)
         self.assertIsNotNone(lens["latestScore"])
         composite_ids = {row["id"] for row in payload["composites"]}
         self.assertIn("bhadialPredictive", composite_ids)
         predictive_row = next(row for row in payload["composites"] if row["id"] == "bhadialPredictive")
         self.assertIsNotNone(predictive_row["oosIc3m"])
 
-    def test_lens_applies_publication_lag_when_replaying(self) -> None:
+    def test_lens_delegates_publication_lag_once_to_replay(self) -> None:
         requests: list[tuple[str, date]] = []
 
         class StubReplay:
@@ -495,9 +746,9 @@ class PredictiveLensTests(unittest.TestCase):
 
         self.assertTrue(lens["available"])
         requested = {factor_id: target for factor_id, target in requests}
-        self.assertEqual(requested["nfci"], week - timedelta(days=7))
-        self.assertEqual(requested["fed_net_liquidity"], week - timedelta(days=2))
-        self.assertEqual(requested["vix"], week - timedelta(days=1))
+        self.assertEqual(requested["nfci"], week)
+        self.assertEqual(requested["fed_net_liquidity"], week)
+        self.assertEqual(requested["vix"], week)
 
 
 class SpyWarningRuleAuditTests(unittest.TestCase):
@@ -591,6 +842,7 @@ class PortfolioOverviewTests(unittest.TestCase):
             "composites": [
                 {
                     "id": "spyEarlyWarning",
+                    "actionableRobust": True,
                     "hitRateOos": 0.4,
                     "baseRate": 0.3,
                     "lift": 1.33,
@@ -600,6 +852,7 @@ class PortfolioOverviewTests(unittest.TestCase):
                 },
                 {
                     "id": "equityShortTermRisk",
+                    "actionableRobust": True,
                     "hitRateOos": 0.33,
                     "baseRate": 0.23,
                     "lift": 1.42,
@@ -645,10 +898,13 @@ class PortfolioOverviewTests(unittest.TestCase):
         overview = build_portfolio_overview(**self.build_inputs(sew_score=35.0, est_score=30.0, lppl_status="risk"))
         self.assertTrue(overview["available"])
         lppl_layer = next(layer for layer in overview["layers"] if layer["layer"] == "globalLppl")
-        self.assertEqual(lppl_layer["exposureBandPct"], [60.0, 85.0])
+        self.assertIsNone(lppl_layer["exposureBandPct"])
+        self.assertEqual(lppl_layer["contextBand"], [60.0, 85.0])
         self.assertTrue(any("globalLppl" in conflict["layers"] for conflict in overview["conflicts"]))
-        # Binding layer is the LPPL bubble band: [60,85] vs neutral [75,100] and normal [100,100]
-        self.assertEqual(overview["suggestedEquityExposureBand"], [60.0, 85.0])
+        # LPPL has no complete actionable gate, so it remains context and cannot
+        # override the validated SPY/equity bands.
+        self.assertEqual(overview["contextBand"], [60.0, 85.0])
+        self.assertEqual(overview["suggestedEquityExposureBand"], [75.0, 100.0])
 
     def test_unavailable_with_fewer_than_two_layers(self) -> None:
         overview = build_portfolio_overview(
@@ -667,6 +923,8 @@ class PortfolioOverviewTests(unittest.TestCase):
         evidence = next(layer for layer in overview["layers"] if layer["layer"] == "spyEarlyWarning")["evidence"]
         self.assertFalse(evidence["available"])
         self.assertIn("证据不足", evidence["note"])
+        self.assertIsNone(overview["suggestedEquityExposureBand"])
+        self.assertEqual(overview["contextBand"], [50.0, 75.0])
 
     def test_regional_tilt_surfaces_rotation_and_breaches(self) -> None:
         regional_monitor = {

@@ -59,6 +59,8 @@ function renderEquityShortTermRisk(risk) {
   })[value] || "未分类";
   const shockText = shock.available ? `${escapeHtml(shock.date || "--")} ${formatSignedPercentMetric(shock.returnPct)}` : "next session --";
   const trendHistory = renderEquityRiskHistoryChart(item);
+  const actionLabel = allocation.stance || "等待确认";
+  const actionDetail = allocation.hedgeAction || allocation.equityExposure || "维持当前风险预算";
   const qualitySummary = `
     <div class="equity-risk-quality">
       <span><b>数据可信度</b><strong>${escapeHtml(sourceQuality.verdict || "--")}</strong><small>${escapeHtml(sourceQuality.detail || "等待证据评估")}</small></span>
@@ -139,44 +141,54 @@ function renderEquityShortTermRisk(risk) {
       </div>
     </div>
     <p class="equity-risk-summary">${escapeHtml(item.summary || "")}</p>
+    <div class="equity-risk-decision ${riskClass}">
+      <span>当前动作</span>
+      <strong>${escapeHtml(actionLabel)}</strong>
+      <small>${escapeHtml(actionDetail)}</small>
+    </div>
     <div class="equity-risk-metrics">
-      <span><b>基础分</b><strong>${Number.isFinite(baseScore) ? baseScore.toFixed(1) : "--"}</strong></span>
       <span><b>SPY 63D</b><strong>${formatSignedPercentMetric(snapshot.spy63dReturn)}</strong></span>
       <span><b>SMH 当日</b><strong>${formatSignedPercentMetric(snapshot.smhDayReturn)}</strong></span>
       <span><b>次日审计</b><strong>${shockText}</strong></span>
     </div>
-    ${trendHistory}
-    <details class="diagnostic-details equity-risk-deep">
-      <summary>回测与因子审计 · Backtest &amp; Factor Audit<span class="diagnostic-hint">数据可信度 / 历史回放 / 阈值精确率 / 回归</span></summary>
+    <div class="equity-risk-drivers">
+      <span>为什么</span>
+      ${drivers.length ? drivers.slice(0, 3).map((driver) => `
+        <b>${escapeHtml(driver.name || "")}<small>${escapeHtml(driver.component || "")} · ${Number.isFinite(Number(driver.riskScore)) ? Number(driver.riskScore).toFixed(0) : "--"}</small></b>
+      `).join("") : `<em>暂无高风险驱动</em>`}
+    </div>
+    <details class="diagnostic-details equity-risk-explain">
+      <summary>趋势与风险构成<span class="diagnostic-hint">历史曲线 / 完整因子</span></summary>
       <div class="diagnostic-body">
+        ${trendHistory}
+        <div class="equity-risk-components">
+          ${components.map((component) => {
+            const componentScore = Number(component.score);
+            const componentClass = component.available ? spyWarningClass(componentScore) : "neutral";
+            return `
+              <div class="equity-risk-component ${componentClass}">
+                <span>${escapeHtml(component.label || component.key || "")}</span>
+                <strong>${component.available && Number.isFinite(componentScore) ? componentScore.toFixed(0) : "--"}</strong>
+                <small>${escapeHtml(component.detail || "")}</small>
+                <em>${escapeHtml(scoreUseLabel(component.scoreUse))} · ${escapeHtml(component.sourceQuality || "--")}</em>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      </div>
+    </details>
+    <details class="diagnostic-details equity-risk-deep">
+      <summary>模型与回测<span class="diagnostic-hint">数据质量 / 阈值精确率 / 回归</span></summary>
+      <div class="diagnostic-body">
+        <div class="equity-risk-metrics equity-risk-model-metrics">
+          <span><b>基础分</b><strong>${Number.isFinite(baseScore) ? baseScore.toFixed(1) : "--"}</strong></span>
+          <span><b>计分因子</b><strong>${Number(sourceQuality.scoredComponentCount) || 0}</strong></span>
+          <span><b>数据截止</b><strong>${escapeHtml(guard.dataThrough || item.asOf || "--")}</strong></span>
+        </div>
         ${qualitySummary}
         ${historicalAnalysis}
       </div>
     </details>
-    <div class="equity-risk-components">
-      ${components.map((component) => {
-        const componentScore = Number(component.score);
-        const componentClass = component.available ? spyWarningClass(componentScore) : "neutral";
-        return `
-          <div class="equity-risk-component ${componentClass}">
-            <span>${escapeHtml(component.label || component.key || "")}</span>
-            <strong>${component.available && Number.isFinite(componentScore) ? componentScore.toFixed(0) : "--"}</strong>
-            <small>${escapeHtml(component.detail || "")}</small>
-            <em>${escapeHtml(scoreUseLabel(component.scoreUse))} · ${escapeHtml(component.sourceQuality || "--")}</em>
-          </div>
-        `;
-      }).join("")}
-    </div>
-    <div class="equity-risk-drivers">
-      <span>短期驱动</span>
-      ${drivers.length ? drivers.slice(0, 5).map((driver) => `
-        <b>${escapeHtml(driver.name || "")}<small>${escapeHtml(driver.component || "")} · ${Number.isFinite(Number(driver.riskScore)) ? Number(driver.riskScore).toFixed(0) : "--"}</small></b>
-      `).join("") : `<em>暂无高风险驱动</em>`}
-    </div>
-    <div class="equity-risk-foot">
-      <span>${escapeHtml(allocation.hedgeAction || "")}</span>
-      <em>dataThrough ${escapeHtml(guard.dataThrough || item.asOf || "--")}</em>
-    </div>
   `;
 }
 

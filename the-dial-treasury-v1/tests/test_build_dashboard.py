@@ -1,16 +1,20 @@
 import unittest
 import math
 from contextlib import ExitStack
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import patch
 
 import treasury_data.build_dashboard as dashboard_builder
 import treasury_data.scoring_equity as scoring_equity
 import treasury_data.scoring_lppl as scoring_lppl
+import treasury_data.scoring_lppl_history as scoring_lppl_history
+import treasury_data.scoring_lppl_validation as scoring_lppl_validation
 from treasury_data.build_dashboard import (
     apply_content_overrides,
     build_conclusion_audit,
     build_dashboard_from_inputs,
+    build_fed_path,
+    build_fed_path_audit,
     build_equity_short_term_risk_backtest,
     build_equity_short_term_risk_index,
     build_events,
@@ -43,6 +47,173 @@ from treasury_data.sources import (
 
 
 class DashboardBuilderTests(unittest.TestCase):
+    def test_missing_optional_series_do_not_render_as_zero_percentile_observations(self):
+        values = {
+            "1M": 4.0,
+            "3M": 4.0,
+            "6M": 4.0,
+            "1Y": 4.0,
+            "2Y": 4.0,
+            "3Y": 4.0,
+            "5Y": 4.0,
+            "7Y": 4.0,
+            "10Y": 4.0,
+            "20Y": 4.0,
+            "30Y": 4.0,
+        }
+        curves = [
+            YieldCurveRecord(date=date(2026, 1, 1) + timedelta(days=index), values=values)
+            for index in range(3)
+        ]
+        indicators = dashboard_builder.compute_indicators(
+            today=curves[-1],
+            one_week=curves[0],
+            one_month=curves[0],
+            curve_records=curves,
+            fred={},
+        )
+
+        percentiles = dashboard_builder.build_percentiles(indicators, [])
+        by_name = {item["name"]: item for item in percentiles["items"]}
+
+        for name in (
+            "银行准备金",
+            "净流动性",
+            "流动性动量",
+            "SOFR-EFFR利差",
+            "VIX",
+            "HY信用利差",
+            "金融条件指数(NFCI)",
+            "天然气",
+        ):
+            self.assertEqual(by_name[name]["value"], "--")
+            self.assertIsNone(by_name[name]["percentile"])
+
+        expectation_rows = dashboard_builder.build_expectation_sources(indicators, None)
+        policy_proxy = expectation_rows[1]
+        self.assertEqual(policy_proxy["value"], "通胀数据不足")
+        self.assertIn("不把兼容字段0当作降温证据", policy_proxy["note"])
+
+    def test_decomposition_uses_aligned_real_and_breakeven_changes(self):
+        row = dashboard_builder.decomposition_attribution_row(
+            {
+                "availability": {
+                    "real_10y_m1_change_bp": True,
+                    "breakeven_10y_m1_change_bp": True,
+                },
+                "real_10y_m1_change_bp": 12.4,
+                "breakeven_10y_m1_change_bp": -3.1,
+            },
+            label="1 月",
+            total_bp=20.0,
+            real_key="real_10y_m1_change_bp",
+            breakeven_key="breakeven_10y_m1_change_bp",
+        )
+
+        self.assertTrue(row["measured"])
+        self.assertEqual(row["real"], 12)
+        self.assertEqual(row["inflation"], -3)
+        self.assertEqual(row["term"], 11)
+        self.assertIsNone(row["risk"])
+
+    def test_fed_path_fails_closed_and_filters_future_official_meetings(self):
+        indicators = {
+            "two_year_m1_change_bp": 16.0,
+            "cpi_yoy": 3.4,
+            "pce_yoy": 2.8,
+            "core_pce_yoy": 3.1,
+            "trimmed_mean_pce_yoy": 2.9,
+            "fed_funds_futures_implied_rate": 4.55,
+            "dff": 4.35,
+        }
+        calendar_events = [
+            CalendarEvent(date=date(2026, 6, 17), title="FOMC decision + SEP", source="Federal Reserve FOMC calendar", importance="高"),
+            CalendarEvent(date=date(2026, 7, 29), title="FOMC decision", source="Federal Reserve FOMC calendar", importance="高"),
+            CalendarEvent(date=date(2026, 9, 16), title="FOMC decision + SEP", source="Federal Reserve FOMC calendar", importance="高"),
+            CalendarEvent(date=date(2026, 9, 16), title="FOMC decision + SEP", source="Federal Reserve Bank of Chicago FOMC schedule", importance="高"),
+            CalendarEvent(date=date(2026, 8, 12), title="BLS Consumer Price Index", source="FRED release calendar", importance="高"),
+            CalendarEvent(date=date(2026, 10, 28), title="FOMC rumor", source="unofficial calendar", importance="高"),
+        ]
+
+        path = build_fed_path(indicators, as_of=date(2026, 7, 13), calendar_events=calendar_events)
+        audit = build_fed_path_audit(indicators, as_of=date(2026, 7, 13), calendar_events=calendar_events)
+
+        self.assertEqual(path, [])
+        self.assertEqual(audit["status"], "modeled-scenario-only")
+        self.assertFalse(audit["probabilitiesAvailable"])
+        self.assertFalse(audit["isProbability"])
+        self.assertEqual(audit["calibrationStatus"], "not-calibrated")
+        self.assertFalse(audit["actionable"])
+        self.assertEqual(
+            [meeting["date"] for meeting in audit["futureMeetings"]],
+            ["2026-07-29", "2026-09-16"],
+        )
+        self.assertEqual(audit["scenario"]["direction"], "restrictive-bias")
+        self.assertIn("not a probability", audit["method"])
+        compatibility = dashboard_builder.fed_path_compatibility_factor(indicators)
+        self.assertEqual(compatibility["score"], 0)
+        self.assertFalse(compatibility["auditEligible"])
+        self.assertFalse(compatibility["probabilitiesAvailable"])
+        self.assertIn("非概率", compatibility["tag"])
+
+    def test_fed_path_audit_is_unavailable_without_official_future_meetings(self):
+        audit = build_fed_path_audit(
+            {"two_year_m1_change_bp": -15.0, "cpi_yoy": 2.0, "dff": 4.35},
+            as_of=date(2026, 7, 13),
+            calendar_events=[
+                CalendarEvent(date=date(2026, 6, 17), title="FOMC decision", source="Federal Reserve FOMC calendar", importance="高"),
+                CalendarEvent(date=date(2026, 7, 29), title="FOMC decision", source="unofficial calendar", importance="高"),
+            ],
+        )
+
+        self.assertEqual(audit["status"], "unavailable")
+        self.assertEqual(audit["futureMeetings"], [])
+        self.assertFalse(audit["probabilitiesAvailable"])
+        self.assertIn("No future official", audit["reason"])
+
+    def test_optional_market_price_never_turns_missing_gold_into_zero(self):
+        self.assertEqual(dashboard_builder.format_optional_market_price(None), "--")
+        self.assertEqual(dashboard_builder.format_optional_market_price(0), "--")
+        self.assertEqual(dashboard_builder.format_optional_market_price(float("nan")), "--")
+        self.assertEqual(dashboard_builder.format_optional_market_price(4536.7), "$4536.70")
+
+    def test_lppl_validation_core_is_reexported_from_dedicated_module(self):
+        extracted_names = (
+            "build_global_lppl_backtest",
+            "build_global_lppl_validation_observations",
+            "global_lppl_oos_validation_fields",
+            "global_lppl_recommended_threshold",
+            "global_lppl_validation_weight",
+            "global_lppl_validation_summary",
+            "global_lppl_status",
+            "global_lppl_regime",
+        )
+
+        for name in extracted_names:
+            with self.subTest(name=name):
+                self.assertIs(getattr(dashboard_builder, name), getattr(scoring_lppl_validation, name))
+        facade_source = (dashboard_builder.PROJECT_ROOT / "treasury_data" / "build_dashboard.py").read_text(encoding="utf-8")
+        self.assertNotIn("def build_global_lppl_backtest(", facade_source)
+        self.assertNotIn("def global_lppl_recommended_threshold(", facade_source)
+
+    def test_lppl_history_core_is_reexported_from_dedicated_module(self):
+        direct_exports = (
+            "global_lppl_index_row",
+            "parse_lppl_point_date",
+            "build_lppl_clip_state",
+            "build_global_lppl_per_index_backtests",
+            "attach_global_lppl_per_index_payloads",
+        )
+
+        for name in direct_exports:
+            with self.subTest(name=name):
+                self.assertIs(getattr(dashboard_builder, name), getattr(scoring_lppl_history, name))
+        facade_source = (dashboard_builder.PROJECT_ROOT / "treasury_data" / "build_dashboard.py").read_text(encoding="utf-8")
+        self.assertNotIn("def global_lppl_index_row(", facade_source)
+        self.assertNotIn("def build_lppl_clip_state(", facade_source)
+        self.assertNotIn("def build_global_lppl_per_index_backtests(", facade_source)
+
+
     def make_equity_bars(
         self,
         symbol: str,
@@ -51,21 +222,24 @@ class DashboardBuilderTests(unittest.TestCase):
         pre_event_return: float,
         june4_return: float,
         june5_return: float,
+        start: date = date(2026, 3, 2),
         volume_base: int = 50_000_000,
         june4_volume_multiplier: float = 1.0,
     ) -> list[MarketDailyBar]:
         days: list[date] = []
-        cursor = date(2026, 3, 2)
+        cursor = start
         while cursor <= date(2026, 6, 5):
             if cursor.weekday() < 5:
                 days.append(cursor)
             cursor += dashboard_builder.timedelta(days=1)
-        pre_days = [day for day in days if day < date(2026, 6, 4)]
+        pre_days = [day for day in days if date(2026, 3, 2) <= day < date(2026, 6, 4)]
         daily_return = (1 + pre_event_return) ** (1 / max(len(pre_days) - 1, 1)) - 1
         close = start_price
         bars: list[MarketDailyBar] = []
         for index, day in enumerate(days):
             if index == 0:
+                day_return = 0.0
+            elif day < date(2026, 3, 2):
                 day_return = 0.0
             elif day == date(2026, 6, 4):
                 day_return = june4_return
@@ -190,6 +364,25 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(historical_percentile(2.0, [1.0, 2.0, 3.0, 4.0]), 33)
         self.assertIsNone(historical_percentile(2.0, [2.0]))
 
+    def test_auction_demand_percentile_uses_same_security_cohort(self):
+        auctions = [
+            {"auctionDate": "2026-01-10", "securityTerm": "10-Year", "originalSecurityTerm": "10-Year", "securityType": "Note", "bidToCoverRatio": "2.20"},
+            {"auctionDate": "2026-02-10", "securityTerm": "4-Week", "securityType": "Bill", "bidToCoverRatio": "3.60"},
+            {"auctionDate": "2026-03-10", "securityTerm": "10-Year", "originalSecurityTerm": "10-Year", "securityType": "Note", "bidToCoverRatio": "2.30"},
+            {"auctionDate": "2026-04-10", "securityTerm": "4-Week", "securityType": "Bill", "bidToCoverRatio": "3.50"},
+            {"auctionDate": "2026-05-10", "securityTerm": "9-Year 10-Month", "originalSecurityTerm": "10-Year", "securityType": "Note", "bidToCoverRatio": "2.40"},
+            {"auctionDate": "2026-06-10", "securityTerm": "4-Week", "securityType": "Bill", "bidToCoverRatio": "nan"},
+        ]
+
+        signal = dashboard_builder.auction_demand_signal(auctions)
+        points = dashboard_builder.auction_percentile_points(auctions)
+
+        self.assertEqual(signal["percentile"], 100)
+        self.assertEqual(signal["score"], 1)
+        self.assertIn("n=3", signal["note"])
+        self.assertIn("同期限、同证券类型", signal["note"])
+        self.assertEqual(points[-1], {"date": "2026-05-10", "value": 2.4, "percentile": 100})
+
     def test_build_ideas_adds_duration_when_disinflation_and_policy_repricing_align(self):
         ideas = dashboard_builder.build_ideas(
             self.idea_indicators(
@@ -210,6 +403,12 @@ class DashboardBuilderTests(unittest.TestCase):
         for idea in ideas:
             self.assertEqual(idea["horizon"], "3-6M")
             self.assertEqual(idea["horizonCn"], "3-6个月")
+            self.assertGreaterEqual(idea["priority"], 1)
+            self.assertTrue(idea["direction"])
+            self.assertTrue(idea["trigger"])
+            self.assertTrue(idea["invalidation"])
+            self.assertTrue(idea["sizing"])
+        self.assertEqual([idea["priority"] for idea in ideas], [1, 2, 3, 4])
 
     def test_build_ideas_does_not_chase_steepeners_after_curve_is_already_steep_and_qra_light(self):
         qra = QuarterlyRefunding(
@@ -259,6 +458,56 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(ideas[3]["tag"], "RV 降通胀补偿")
         self.assertIn("降温", ideas[3]["text"])
         self.assertNotEqual(ideas[3]["title"], "战术做多盈亏平衡通胀")
+
+    def test_build_ideas_fails_closed_when_optional_macro_inputs_are_missing(self):
+        indicators = self.idea_indicators(two_year_m1_change_bp=-32.0)
+        indicators["availability"] = {
+            "cpi_yoy": False,
+            "pce_yoy": False,
+            "core_pce_yoy": False,
+            "trimmed_mean_pce_yoy": False,
+            "ppi_yoy": False,
+            "dff": False,
+            "sofr": False,
+            "breakeven_10y": False,
+        }
+        indicators["percentile_series"] = {"wti": [], "wti_shock": []}
+
+        ideas = dashboard_builder.build_ideas(
+            indicators,
+            macro_liquidity={"score": 62.0, "regime": "偏松"},
+        )
+
+        self.assertNotEqual(ideas[0]["title"], "加回久期")
+        self.assertIn("数据不完整", ideas[0]["text"])
+        self.assertNotIn("0.0%", ideas[0]["text"])
+        self.assertEqual(ideas[2]["tag"], "FRONT-END 数据不足")
+        self.assertNotIn("LONG 前端", ideas[2]["tag"])
+        self.assertEqual(ideas[2]["sizing"], "不建仓 · 等待数据")
+        self.assertEqual(ideas[3]["tag"], "RV 数据不足")
+        self.assertEqual(ideas[3]["sizing"], "不建仓 · 等待数据")
+        self.assertNotIn("$0.00", ideas[3]["text"])
+
+    def test_build_ideas_prefers_macro_reliability_score_for_decision_logic(self):
+        ideas = dashboard_builder.build_ideas(
+            self.idea_indicators(
+                cpi_yoy=2.6,
+                pce_yoy=2.6,
+                core_pce_yoy=2.6,
+                trimmed_mean_pce_yoy=2.6,
+                ppi_yoy=2.6,
+                two_year_m1_change_bp=0.0,
+            ),
+            macro_liquidity={
+                "score": 80.0,
+                "reliabilityScore": 40.0,
+                "regime": "宽松",
+            },
+        )
+
+        self.assertEqual(ideas[0]["tag"], "SHORT 久期")
+        self.assertIn("宏观可靠性评分40.0", ideas[0]["text"])
+        self.assertNotIn("宏观环境评分80.0", ideas[0]["text"])
 
     def test_build_ideas_surfaces_conclusion_audit_confidence(self):
         ideas = dashboard_builder.build_ideas(
@@ -681,7 +930,7 @@ class DashboardBuilderTests(unittest.TestCase):
         fred = {
             "WALCL": TimeSeries("WALCL", [SeriesPoint(date(2021 + i, 5, 1), 6_000_000.0 + i * 100_000) for i in range(6)]),
             "WTREGEN": TimeSeries("WTREGEN", [SeriesPoint(date(2021 + i, 5, 1), 700_000.0) for i in range(6)]),
-            "RRPONTSYD": TimeSeries("RRPONTSYD", [SeriesPoint(date(2021 + i, 5, 1), 100_000.0) for i in range(6)]),
+            "RRPONTSYD": TimeSeries("RRPONTSYD", [SeriesPoint(date(2021 + i, 5, 1), 100.0) for i in range(6)]),
             "WRESBAL": TimeSeries(
                 "WRESBAL",
                 [
@@ -756,7 +1005,7 @@ class DashboardBuilderTests(unittest.TestCase):
             "WTREGEN": TimeSeries("WTREGEN", [SeriesPoint(day, 500_000.0 + index * 25_000) for index, day in enumerate(dated)]),
             "WALCL": TimeSeries("WALCL", [SeriesPoint(day, 7_200_000.0 - index * 20_000) for index, day in enumerate(dated)]),
             "TREAST": TimeSeries("TREAST", [SeriesPoint(dated[-1], 4_210_000.0)]),
-            "RRPONTSYD": TimeSeries("RRPONTSYD", [SeriesPoint(day, max(0.0, 260_000.0 - index * 20_000)) for index, day in enumerate(dated)]),
+            "RRPONTSYD": TimeSeries("RRPONTSYD", [SeriesPoint(day, max(0.0, 260.0 - index * 20.0)) for index, day in enumerate(dated)]),
             "WRESBAL": TimeSeries("WRESBAL", [SeriesPoint(day, 3_250_000.0 - index * 12_000) for index, day in enumerate(dated)]),
             "DCPF3M": TimeSeries("DCPF3M", [SeriesPoint(day, 3.55 + index * 0.010) for index, day in enumerate(dated)]),
             "DTB3": TimeSeries("DTB3", [SeriesPoint(day, 3.45 + index * 0.006) for index, day in enumerate(dated)]),
@@ -908,7 +1157,7 @@ class DashboardBuilderTests(unittest.TestCase):
         fred = {
             "WALCL": TimeSeries("WALCL", [SeriesPoint(date(2021 + i, 5, 1), 6_000_000.0 + i * 100_000) for i in range(6)]),
             "WTREGEN": TimeSeries("WTREGEN", [SeriesPoint(date(2021 + i, 5, 1), 600_000.0 + i * 50_000) for i in range(6)]),
-            "RRPONTSYD": TimeSeries("RRPONTSYD", [SeriesPoint(date(2021 + i, 5, 1), 500_000.0 - i * 80_000) for i in range(6)]),
+            "RRPONTSYD": TimeSeries("RRPONTSYD", [SeriesPoint(date(2021 + i, 5, 1), 500.0 - i * 80.0) for i in range(6)]),
             "WRESBAL": TimeSeries("WRESBAL", [SeriesPoint(date(2021 + i, 5, 1), 2_000_000.0 + i * 60_000) for i in range(6)]),
             "SOFR": TimeSeries("SOFR", [SeriesPoint(date(2021 + i, 5, 1), 3.50 + i * 0.01) for i in range(6)]),
             "DFF": TimeSeries("DFF", [SeriesPoint(date(2021 + i, 5, 1), 3.50) for i in range(6)]),
@@ -934,7 +1183,10 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(macro_liquidity["sourceUrl"], "https://bhadial.com/dashboard")
         self.assertEqual(macro_liquidity["moduleCount"], 7)
         self.assertEqual(macro_liquidity["totalFactorCount"], 47)
-        self.assertEqual(macro_liquidity["scoredFactorCount"], 21)
+        self.assertEqual(macro_liquidity["activeFactorCount"], 21)
+        self.assertLessEqual(macro_liquidity["scoredFactorCount"], macro_liquidity["activeFactorCount"])
+        self.assertIn("reliabilityScore", macro_liquidity)
+        self.assertIn("effectiveWeightCoveragePct", macro_liquidity)
         self.assertIn("Bhadial Conditions Score", macro_liquidity["method"])
         self.assertIn("module weights", macro_liquidity["method"])
         self.assertIn("EMA(5)", macro_liquidity["method"])
@@ -959,34 +1211,48 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertNotIn("SOFR-OBFR回购摩擦", component_names)
         self.assertNotIn("银行股相对S&P500", component_names)
         self.assertNotIn("真实利率水平", component_names)
-        self.assertTrue(macro_liquidity["drivers"])
+        self.assertTrue(all(item["scoreEligible"] for item in macro_liquidity["drivers"]))
         self.assertTrue(all("score" in item and "weight" in item for item in macro_liquidity["components"]))
-        self.assertIn(macro_liquidity["constraint"]["name"], component_names)
-        self.assertIn(macro_liquidity["offset"]["name"], component_names)
+        if macro_liquidity["constraint"]:
+            self.assertIn(macro_liquidity["constraint"]["name"], component_names)
+        if macro_liquidity["offset"]:
+            self.assertIn(macro_liquidity["offset"]["name"], component_names)
         self.assertIn("拖累", macro_liquidity["summary"])
         self.assertIn("缓冲", macro_liquidity["summary"])
-        # The summary carries the trend direction + narrative conclusion; the percentile /
-        # 3M-score numbers are NOT restated here (they live in the trend grid, asserted below).
-        self.assertIn("趋势", macro_liquidity["summary"])
+        # Six annual observations cannot satisfy the production warm-up and
+        # cadence checks.  The composite remains available, but its historical
+        # trend must fail closed instead of manufacturing a short backtest.
+        self.assertIn("历史样本不足", macro_liquidity["summary"])
         self.assertNotIn("历史分位p", macro_liquidity["summary"])
         trend = macro_liquidity["trend"]
         self.assertIn("historicalPercentile", trend)
         self.assertIn("score3mChange", trend)
         self.assertIn("percentile3mChange", trend)
         self.assertIn(trend["direction"], {"上行", "下行", "震荡", "不足"})
-        self.assertGreaterEqual(len(trend["points"]), 3)
-        self.assertIn("percentile", trend["points"][-1])
-        latest_trend_point = trend["points"][-1]
-        self.assertAlmostEqual(latest_trend_point["score"], trend["score"], delta=0.2)
-        trailing_scores = [float(point["score"]) for point in trend["points"]]
-        self.assertEqual(trend["historicalPercentile"], historical_percentile(float(latest_trend_point["score"]), trailing_scores))
+        self.assertEqual(trend["regimeCalibration"]["mode"], "shadow-only")
+        if trend["regimeCalibration"]["available"]:
+            self.assertEqual(len(trend["regimeCalibration"]["empiricalThresholds"]), 4)
+            self.assertEqual(
+                sorted(trend["regimeCalibration"]["empiricalThresholds"]),
+                trend["regimeCalibration"]["empiricalThresholds"],
+            )
+        self.assertFalse(trend["available"])
+        self.assertEqual(trend["points"], [])
+        self.assertIsNone(trend["historicalPercentile"])
         bucket_labels = {item["label"] for item in macro_liquidity["balance"]}
         self.assertEqual(bucket_labels, {"拖累", "中性", "缓冲"})
         self.assertLessEqual(len(macro_liquidity["focusComponents"]), 5)
         self.assertGreaterEqual(macro_liquidity["hiddenComponentCount"], 0)
         self.assertEqual(
             [item["name"] for item in macro_liquidity["focusComponents"]],
-            [item["name"] for item in sorted(macro_liquidity["components"], key=lambda item: abs(item["contribution"]), reverse=True)[:5]],
+            [
+                item["name"]
+                for item in sorted(
+                    [component for component in macro_liquidity["components"] if component["scoreEligible"]],
+                    key=lambda item: abs(item["contribution"]),
+                    reverse=True,
+                )[:5]
+            ],
         )
         implication_labels = {item["label"] for item in macro_liquidity["implications"]}
         self.assertEqual(implication_labels, {"久期", "风险资产", "融资压力"})
@@ -997,6 +1263,8 @@ class DashboardBuilderTests(unittest.TestCase):
             return date(start.year + month_index // 12, month_index % 12 + 1, 15)
 
         months = [month_add(date(2021, 5, 15), index) for index in range(62)]
+        macro_days = [day - timedelta(days=4) for day in months]
+        spx_days = [day - timedelta(days=2) for day in months]
         curve_records = [
             YieldCurveRecord(
                 date=day,
@@ -1022,25 +1290,25 @@ class DashboardBuilderTests(unittest.TestCase):
         for index, day in enumerate(months):
             liquidity = index / (len(months) - 1)
             spx *= 1 + 0.002 + liquidity * 0.008
-            spx_points.append(SeriesPoint(day, spx))
+            spx_points.append(SeriesPoint(spx_days[index], spx))
         fred["SP500"] = TimeSeries("SP500", spx_points)
-        fred["WALCL"] = TimeSeries("WALCL", [SeriesPoint(day, 6_000_000.0 + index * 30_000) for index, day in enumerate(months)])
-        fred["WTREGEN"] = TimeSeries("WTREGEN", [SeriesPoint(day, 900_000.0 - index * 5_000) for index, day in enumerate(months)])
-        fred["RRPONTSYD"] = TimeSeries("RRPONTSYD", [SeriesPoint(day, 120_000.0 + index * 1_200) for index, day in enumerate(months)])
-        fred["WRESBAL"] = TimeSeries("WRESBAL", [SeriesPoint(day, 2_600_000.0 + index * 15_000) for index, day in enumerate(months)])
-        fred["SOFR"] = TimeSeries("SOFR", [SeriesPoint(day, 2.10 - index * 0.005) for index, day in enumerate(months)])
-        fred["DFF"] = TimeSeries("DFF", [SeriesPoint(day, 2.00) for day in months])
-        fred["DCPF3M"] = TimeSeries("DCPF3M", [SeriesPoint(day, 2.30 - index * 0.004) for index, day in enumerate(months)])
-        fred["DTB3"] = TimeSeries("DTB3", [SeriesPoint(day, 2.00) for day in months])
-        fred["NFCI"] = TimeSeries("NFCI", [SeriesPoint(day, 0.25 - index * 0.01) for index, day in enumerate(months)])
-        fred["BAMLH0A0HYM2"] = TimeSeries("BAMLH0A0HYM2", [SeriesPoint(day, 5.80 - index * 0.035) for index, day in enumerate(months)])
-        fred["VIXCLS"] = TimeSeries("VIXCLS", [SeriesPoint(day, 28.0 - index * 0.15) for index, day in enumerate(months)])
-        fred["DGS10"] = TimeSeries("DGS10", [SeriesPoint(day, 2.80 - index * 0.01) for index, day in enumerate(months)])
-        fred["NASDAQXNDX"] = TimeSeries("NASDAQXNDX", [SeriesPoint(day, 10_000.0 + index * 130) for index, day in enumerate(months)])
-        fred["NASDAQNQUS500LCT"] = TimeSeries("NASDAQNQUS500LCT", [SeriesPoint(day, 3_000.0 + index * 35) for index, day in enumerate(months)])
-        fred["NASDAQBANK"] = TimeSeries("NASDAQBANK", [SeriesPoint(day, 3_000.0 + index * 20) for index, day in enumerate(months)])
-        fred["BAMLHYH0A0HYM2TRIV"] = TimeSeries("BAMLHYH0A0HYM2TRIV", [SeriesPoint(day, 1_100.0 + index * 6) for index, day in enumerate(months)])
-        fred["BAMLCC0A0CMTRIV"] = TimeSeries("BAMLCC0A0CMTRIV", [SeriesPoint(day, 2_200.0 + index * 4) for index, day in enumerate(months)])
+        fred["WALCL"] = TimeSeries("WALCL", [SeriesPoint(day, 6_000_000.0 + index * 30_000) for index, day in enumerate(macro_days)])
+        fred["WTREGEN"] = TimeSeries("WTREGEN", [SeriesPoint(day, 900_000.0 - index * 5_000) for index, day in enumerate(macro_days)])
+        fred["RRPONTSYD"] = TimeSeries("RRPONTSYD", [SeriesPoint(day, 120.0 + index * 1.2) for index, day in enumerate(macro_days)])
+        fred["WRESBAL"] = TimeSeries("WRESBAL", [SeriesPoint(day, 2_600_000.0 + index * 15_000) for index, day in enumerate(macro_days)])
+        fred["SOFR"] = TimeSeries("SOFR", [SeriesPoint(day, 2.10 - index * 0.005) for index, day in enumerate(macro_days)])
+        fred["DFF"] = TimeSeries("DFF", [SeriesPoint(day, 2.00) for day in macro_days])
+        fred["DCPF3M"] = TimeSeries("DCPF3M", [SeriesPoint(day, 2.30 - index * 0.004) for index, day in enumerate(macro_days)])
+        fred["DTB3"] = TimeSeries("DTB3", [SeriesPoint(day, 2.00) for day in macro_days])
+        fred["NFCI"] = TimeSeries("NFCI", [SeriesPoint(day, 0.25 - index * 0.01) for index, day in enumerate(macro_days)])
+        fred["BAMLH0A0HYM2"] = TimeSeries("BAMLH0A0HYM2", [SeriesPoint(day, 5.80 - index * 0.035) for index, day in enumerate(macro_days)])
+        fred["VIXCLS"] = TimeSeries("VIXCLS", [SeriesPoint(day, 28.0 - index * 0.15) for index, day in enumerate(macro_days)])
+        fred["DGS10"] = TimeSeries("DGS10", [SeriesPoint(day, 2.80 - index * 0.01) for index, day in enumerate(macro_days)])
+        fred["NASDAQXNDX"] = TimeSeries("NASDAQXNDX", [SeriesPoint(day, 10_000.0 + index * 130) for index, day in enumerate(macro_days)])
+        fred["NASDAQNQUS500LCT"] = TimeSeries("NASDAQNQUS500LCT", [SeriesPoint(day, 3_000.0 + index * 35) for index, day in enumerate(macro_days)])
+        fred["NASDAQBANK"] = TimeSeries("NASDAQBANK", [SeriesPoint(day, 3_000.0 + index * 20) for index, day in enumerate(macro_days)])
+        fred["BAMLHYH0A0HYM2TRIV"] = TimeSeries("BAMLHYH0A0HYM2TRIV", [SeriesPoint(day, 1_100.0 + index * 6) for index, day in enumerate(macro_days)])
+        fred["BAMLCC0A0CMTRIV"] = TimeSeries("BAMLCC0A0CMTRIV", [SeriesPoint(day, 2_200.0 + index * 4) for index, day in enumerate(macro_days)])
 
         dashboard = build_dashboard_from_inputs(
             curve_records=curve_records,
@@ -1050,7 +1318,11 @@ class DashboardBuilderTests(unittest.TestCase):
         )
 
         macro_trend = dashboard["macroLiquidity"]["trend"]
-        self.assertGreaterEqual(len(macro_trend["points"]), 60)
+        self.assertGreaterEqual(len(macro_trend["points"]), 30)
+        self.assertLessEqual(
+            date.fromisoformat(macro_trend["points"][-1]["date"]),
+            curve_records[-1].date,
+        )
         latest_macro_point = macro_trend["points"][-1]
         self.assertEqual(
             macro_trend["historicalPercentile"],
@@ -1059,7 +1331,7 @@ class DashboardBuilderTests(unittest.TestCase):
 
         lead = dashboard["macroLiquidityEquity"]
         self.assertTrue(lead["available"])
-        self.assertGreaterEqual(lead["observationCount"], 50)
+        self.assertGreaterEqual(lead["observationCount"], 30)
         self.assertIn("S&P 500", lead["method"])
         self.assertIsNotNone(lead["correlations"]["forward3m"])
         self.assertEqual(len(lead["buckets"]), 3)
@@ -1072,7 +1344,19 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual({row["signal"] for row in lead["leadLag"]}, {"评分水平", "3M评分变化"})
         self.assertEqual({bucket["label"] for bucket in lead["changeBuckets"]}, {"评分下行", "变化不大", "评分上行"})
         self.assertIn("latest", lead["rollingCorrelation"])
-        self.assertGreater(len(lead["rollingCorrelation"]["points"]), 0)
+        rolling = lead["rollingCorrelation"]
+        self.assertEqual(rolling["windowMonths"], 24)
+        if rolling["points"]:
+            self.assertLessEqual(
+                date.fromisoformat(rolling["points"][-1]["date"]),
+                date.fromisoformat(lead["asOf"]),
+            )
+            self.assertEqual(rolling["latest"], rolling["points"][-1]["correlation"])
+        else:
+            self.assertIsNone(rolling["latest"])
+        # The latest row cannot have a complete 3M forward outcome; keeping it
+        # null proves the lead study does not borrow future observations.
+        self.assertIsNone(lead["series"][-1]["forward3m"])
         self.assertIn("maxDrawdown", lead["drawdownRisk"])
         signal = lead["currentSignal"]
         self.assertIn(signal["levelBucket"], {"低评分", "中位评分", "高评分"})
@@ -1108,25 +1392,30 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(warning["backtest"]["target"], "3M SPX drawdown and negative forward-return warning")
         self.assertIn("trend", warning)
         self.assertTrue(warning["trend"]["available"])
-        self.assertGreaterEqual(len(warning["trend"]["points"]), 50)
+        self.assertGreaterEqual(len(warning["trend"]["points"]), 30)
+        self.assertLessEqual(
+            date.fromisoformat(warning["trend"]["points"][-1]["date"]),
+            curve_records[-1].date,
+        )
         self.assertEqual(warning["trend"]["points"][-1]["score"], warning["score"])
         self.assertIn("regime", warning["trend"]["points"][-1])
 
     def test_equity_short_term_risk_flags_june4_before_next_day_selloff(self):
+        replay_start = date(2025, 12, 1)
         market_bars = {
-            "SPY": self.make_equity_bars("SPY", start_price=680, pre_event_return=0.103, june4_return=0.0038, june5_return=-0.0258, june4_volume_multiplier=0.72),
-            "QQQ": self.make_equity_bars("QQQ", start_price=520, pre_event_return=0.218, june4_return=-0.0048, june5_return=-0.048),
-            "SMH": self.make_equity_bars("SMH", start_price=190, pre_event_return=0.544, june4_return=-0.0163, june5_return=-0.092),
-            "XLK": self.make_equity_bars("XLK", start_price=180, pre_event_return=0.384, june4_return=-0.0156, june5_return=-0.066),
-            "TLT": self.make_equity_bars("TLT", start_price=88, pre_event_return=-0.021, june4_return=-0.002, june5_return=0.006),
-            "RSP": self.make_equity_bars("RSP", start_price=170, pre_event_return=0.031, june4_return=0.0076, june5_return=-0.014),
-            "IWM": self.make_equity_bars("IWM", start_price=210, pre_event_return=0.107, june4_return=0.0151, june5_return=-0.035),
-            "XLV": self.make_equity_bars("XLV", start_price=140, pre_event_return=-0.041, june4_return=0.0307, june5_return=0.006),
-            "AMD": self.make_equity_bars("AMD", start_price=80, pre_event_return=1.63, june4_return=-0.0356, june5_return=-0.108),
-            "AVGO": self.make_equity_bars("AVGO", start_price=700, pre_event_return=0.314, june4_return=-0.1259, june5_return=-0.079),
-            "TSLA": self.make_equity_bars("TSLA", start_price=320, pre_event_return=0.038, june4_return=-0.0124, june5_return=-0.066),
-            "META": self.make_equity_bars("META", start_price=620, pre_event_return=-0.04, june4_return=0.0074, june5_return=-0.055),
-            "MSFT": self.make_equity_bars("MSFT", start_price=460, pre_event_return=0.074, june4_return=0.0017, june5_return=-0.027),
+            "SPY": self.make_equity_bars("SPY", start_price=680, pre_event_return=0.103, june4_return=0.0038, june5_return=-0.0258, start=replay_start, june4_volume_multiplier=0.72),
+            "QQQ": self.make_equity_bars("QQQ", start_price=520, pre_event_return=0.218, june4_return=-0.0048, june5_return=-0.048, start=replay_start),
+            "SMH": self.make_equity_bars("SMH", start_price=190, pre_event_return=0.544, june4_return=-0.0163, june5_return=-0.092, start=replay_start),
+            "XLK": self.make_equity_bars("XLK", start_price=180, pre_event_return=0.384, june4_return=-0.0156, june5_return=-0.066, start=replay_start),
+            "TLT": self.make_equity_bars("TLT", start_price=88, pre_event_return=-0.021, june4_return=-0.002, june5_return=0.006, start=replay_start),
+            "RSP": self.make_equity_bars("RSP", start_price=170, pre_event_return=0.031, june4_return=0.0076, june5_return=-0.014, start=replay_start),
+            "IWM": self.make_equity_bars("IWM", start_price=210, pre_event_return=0.107, june4_return=0.0151, june5_return=-0.035, start=replay_start),
+            "XLV": self.make_equity_bars("XLV", start_price=140, pre_event_return=-0.041, june4_return=0.0307, june5_return=0.006, start=replay_start),
+            "AMD": self.make_equity_bars("AMD", start_price=80, pre_event_return=1.63, june4_return=-0.0356, june5_return=-0.108, start=replay_start),
+            "AVGO": self.make_equity_bars("AVGO", start_price=700, pre_event_return=0.314, june4_return=-0.1259, june5_return=-0.079, start=replay_start),
+            "TSLA": self.make_equity_bars("TSLA", start_price=320, pre_event_return=0.038, june4_return=-0.0124, june5_return=-0.066, start=replay_start),
+            "META": self.make_equity_bars("META", start_price=620, pre_event_return=-0.04, june4_return=0.0074, june5_return=-0.055, start=replay_start),
+            "MSFT": self.make_equity_bars("MSFT", start_price=460, pre_event_return=0.074, june4_return=0.0017, june5_return=-0.027, start=replay_start),
         }
         events = [CalendarEvent(date=date(2026, 6, 5), title="BLS Employment Situation", source="FRED release calendar", importance="高")]
 
@@ -1145,11 +1434,14 @@ class DashboardBuilderTests(unittest.TestCase):
         )
 
         self.assertTrue(risk["available"])
-        self.assertEqual(risk["asOf"], "2026-06-04")
-        self.assertEqual(risk["lookAheadGuard"]["dataThrough"], "2026-06-04")
-        self.assertEqual(risk["regime"], "Strong Alert")
-        self.assertGreaterEqual(risk["score"], 75)
-        self.assertLessEqual(risk["nextSessionShock"]["returnPct"], -2.0)
+        self.assertEqual(risk["asOf"], "2026-06-05")
+        self.assertEqual(risk["lookAheadGuard"]["dataThrough"], "2026-06-05")
+        self.assertLess(risk["score"], 75)
+        self.assertLessEqual(risk["detectedPostSignalShock"]["returnPct"], -2.0)
+        self.assertEqual(risk["priorSessionAudit"]["asOf"], "2026-06-04")
+        self.assertGreaterEqual(risk["priorSessionAudit"]["score"], 75)
+        self.assertEqual(risk["priorSessionAudit"]["regime"], "Strong Alert")
+        self.assertTrue(risk["priorSessionAudit"]["auditOnly"])
         component_keys = {component["key"] for component in risk["components"]}
         self.assertTrue({"volTargetPressure", "qqqTltRotation", "marketFlow", "sectorRotation", "hotStockReversal", "turnover", "eventRisk"}.issubset(component_keys))
         driver_keys = {driver["key"] for driver in risk["drivers"]}
@@ -1211,6 +1503,73 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(evidence_by_component["qqqTltRotation"]["sourceQuality"], "high")
         self.assertTrue(evidence_by_component["qqqTltRotation"]["historicalReplay"])
 
+    def test_standard_parkinson_rms_is_explicit_and_not_below_legacy_mean(self):
+        values = [0.01, 0.03]
+
+        legacy = scoring_equity.aggregate_parkinson_vol(
+            values,
+            estimator=scoring_equity.PARKINSON_ESTIMATOR_LEGACY_MEAN,
+        )
+        standard = scoring_equity.aggregate_parkinson_vol(
+            values,
+            estimator=scoring_equity.PARKINSON_ESTIMATOR_STANDARD_RMS,
+        )
+
+        self.assertAlmostEqual(legacy, 0.02)
+        self.assertAlmostEqual(standard, math.sqrt(0.0005))
+        self.assertGreater(standard, legacy)
+        with self.assertRaises(ValueError):
+            scoring_equity.aggregate_parkinson_vol(values, estimator="unknown")
+
+    def test_equity_risk_exposes_shadow_parkinson_estimator_audit(self):
+        market_bars = {
+            symbol: self.make_equity_bars(
+                symbol,
+                start_price=100 + index * 10,
+                pre_event_return=0.10 + index * 0.01,
+                june4_return=-0.012 if symbol in {"QQQ", "SMH", "XLK"} else -0.004,
+                june5_return=-0.02,
+                start=date(2025, 12, 1),
+            )
+            for index, symbol in enumerate(scoring_equity.EQUITY_RISK_SYMBOLS)
+        }
+
+        risk = build_equity_short_term_risk_index(market_bars=market_bars)
+        audit = risk["volatilityEstimatorAudit"]
+
+        self.assertTrue(audit["available"])
+        self.assertTrue(audit["productionUnchanged"])
+        self.assertEqual(audit["productionEstimator"], scoring_equity.PARKINSON_ESTIMATOR_LEGACY_MEAN)
+        self.assertEqual(audit["candidateEstimator"], scoring_equity.PARKINSON_ESTIMATOR_STANDARD_RMS)
+        self.assertEqual(audit["current"]["production"]["riskScore"], risk["score"])
+        self.assertEqual(audit["backtest"]["production"]["threshold"], 75)
+        self.assertEqual(audit["backtest"]["candidate"]["threshold"], 75)
+        self.assertIn(audit["verdict"], {"insufficientEvidence", "candidatePromising", "retainLegacy"})
+        self.assertIn(audit["recommendedAction"], {"retainProduction", "keepShadowTesting"})
+
+    def test_parkinson_estimator_verdict_requires_sufficient_oos_improvement(self):
+        production = {
+            "precision": 60.0,
+            "oosAlertDays": 10,
+            "oosPrecision": 55.0,
+            "oosLiftVsBaseRate": 1.20,
+            "oosFalsePositives": 4,
+        }
+        candidate = {
+            "precision": 59.0,
+            "oosAlertDays": 10,
+            "oosPrecision": 58.0,
+            "oosLiftVsBaseRate": 1.25,
+            "oosFalsePositives": 3,
+        }
+
+        promising = scoring_equity.equity_estimator_audit_verdict(production, candidate)
+        self.assertEqual(promising["verdict"], "candidatePromising")
+
+        candidate["oosAlertDays"] = 4
+        insufficient = scoring_equity.equity_estimator_audit_verdict(production, candidate)
+        self.assertEqual(insufficient["verdict"], "insufficientEvidence")
+
     def test_equity_qqq_tlt_rotation_flags_crowded_risk_on_rollover(self):
         qqq_closes = [100 + index * 0.35 for index in range(70)] + [125, 126, 127, 128, 129, 130, 130.5, 130.2]
         tlt_closes = [100 - index * 0.08 for index in range(70)] + [94.4, 94.1, 93.8, 93.5, 93.2, 93.0, 92.8, 93.0]
@@ -1229,8 +1588,8 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertIn("qqqTltCrowdedRollover", {driver["key"] for driver in rotation["drivers"]})
 
     def test_equity_short_term_risk_backtest_summarizes_forward_drawdowns_by_bucket(self):
-        days = [date(2026, 1, 2) + dashboard_builder.timedelta(days=index) for index in range(20)]
-        closes = [100, 101, 102, 103, 99, 98, 101, 103, 104, 105, 104, 102, 101, 103, 104, 105, 104, 103, 102, 101]
+        days = [date(2026, 1, 2) + dashboard_builder.timedelta(days=index) for index in range(24)]
+        closes = [100, 101, 102, 103, 99, 98, 101, 103, 104, 105, 104, 102, 101, 103, 104, 105, 104, 103, 102, 101, 101, 101, 101, 101]
         spy_bars = [
             MarketDailyBar(
                 symbol="SPY",
@@ -1272,18 +1631,16 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertIn("覆盖", tiered[60]["useCase"])
         self.assertEqual([row["threshold"] for row in backtest["calibrationGrid"]], [50, 55, 60, 65, 70, 75])
         recommended = backtest["recommendedCautionThreshold"]
-        self.assertIn(recommended["threshold"], {55, 60, 65, 70})
-        self.assertIn("推荐观察", recommended["label"])
-        self.assertIn("precision", recommended)
+        self.assertFalse(recommended["available"])
+        self.assertIn("minimum precision", recommended["reason"])
         self.assertEqual([row["threshold"] for row in backtest["precisionThresholdTests"]], [75, 78, 80, 82, 85, 88, 90])
-        self.assertIn("高精度", backtest["highPrecisionThresholdTest"]["label"])
-        self.assertIn("precision", backtest["highPrecisionThresholdTest"])
+        self.assertFalse(backtest["highPrecisionThresholdTest"]["available"])
         self.assertIn("componentDiagnostics", backtest)
         self.assertGreaterEqual(len(backtest["worstWindows"]), 1)
 
     def test_equity_short_term_risk_backtest_audits_component_predictive_quality(self):
-        days = [date(2026, 1, 2) + dashboard_builder.timedelta(days=index) for index in range(25)]
-        closes = [100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 98, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100]
+        days = [date(2026, 1, 2) + dashboard_builder.timedelta(days=index) for index in range(33)]
+        closes = [100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 98, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100]
         spy_bars = [
             MarketDailyBar(
                 symbol="SPY",
@@ -1548,11 +1905,17 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertFalse(risk["backtest"]["available"])
         for symbol in ("SPY", "QQQ"):
             row = next(item for item in risk["indices"] if item["symbol"] == symbol)
-            self.assertTrue(row["history"]["available"])
-            self.assertGreaterEqual(len(row["history"]["points"]), 20)
-            self.assertTrue(all("indexedClose" in point for point in row["history"]["points"][:3]))
-            self.assertTrue(row["backtest"]["available"])
-            self.assertEqual([item["horizon"] for item in row["backtest"]["horizonTests"]], [5, 10, 15, 20])
+            self.assertNotIn("history", row)
+            self.assertNotIn("backtest", row)
+            self.assertEqual(row["historyRef"]["path"], f"globalLpplRisk.perIndexHistory.{symbol}")
+            self.assertEqual(row["backtestRef"]["path"], f"globalLpplRisk.perIndexBacktests.{symbol}")
+            history = risk["perIndexHistory"][symbol]
+            backtest = risk["perIndexBacktests"][symbol]
+            self.assertTrue(history["available"])
+            self.assertGreaterEqual(len(history["points"]), 20)
+            self.assertTrue(all("indexedClose" in point for point in history["points"][:3]))
+            self.assertTrue(backtest["available"])
+            self.assertEqual([item["horizon"] for item in backtest["horizonTests"]], [5, 10, 15, 20])
         self.assertIn("perIndexHistory", risk)
         self.assertIn("perIndexBacktests", risk)
         self.assertTrue(risk["perIndexHistory"]["QQQ"]["available"])
@@ -1626,6 +1989,73 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(calibration_rows["marketFlow"]["configuredWeight"], 0.22)
         self.assertIn(calibration_rows["marketFlow"]["calibratedRole"], {"validated", "context", "downweighted"})
 
+    def test_equity_score_adjustments_expose_behavior_preserving_rule_audit(self):
+        def component(key: str, score: float, metrics: dict | None = None) -> dict:
+            return {"key": key, "score": score, "metrics": metrics or {}}
+
+        components = [
+            component("sectorRotation", 85.0),
+            component("hotStockReversal", 85.0),
+            component("marketFlow", 75.0, {"downtrendFragilityScore": 40.0}),
+            component("qqqTltRotation", 75.0),
+            component("volTargetPressure", 40.0),
+            component("turnover", 50.0),
+            component("eventRisk", 30.0),
+            component("macroOverlay", 30.0),
+        ]
+
+        adjustments = scoring_equity.equity_score_adjustments(components, base_score=70.0)
+        rule_keys = [rule["key"] for rule in adjustments["rules"]]
+
+        self.assertEqual(adjustments["amplifier"], 9.0)
+        self.assertEqual(adjustments["dampener"], -14.0)
+        self.assertEqual(adjustments["scoreFloor"], 0.0)
+        self.assertEqual(adjustments["adjustedBeforeFloor"], 65.0)
+        self.assertEqual(adjustments["finalScore"], 65.0)
+        self.assertFalse(adjustments["floorApplied"])
+        self.assertEqual(
+            rule_keys,
+            ["broadHighRiskBreadth", "confirmedRotationBreak", "rotationWithoutVolConfirmation"],
+        )
+        self.assertEqual(scoring_equity.equity_convexity_amplifier(components), 9.0)
+        self.assertEqual(scoring_equity.equity_noise_dampener(components), -14.0)
+        self.assertEqual(scoring_equity.equity_convexity_score_floor(components), 0.0)
+
+    def test_equity_noise_dampener_does_not_treat_missing_macro_as_low_risk(self):
+        components = [
+            {"key": "sectorRotation", "score": 85.0},
+            {"key": "hotStockReversal", "score": 85.0},
+            {"key": "marketFlow", "score": 75.0, "metrics": {"downtrendFragilityScore": 40.0}},
+            {"key": "qqqTltRotation", "score": 75.0},
+            {"key": "volTargetPressure", "score": 40.0},
+            {"key": "eventRisk", "score": 30.0},
+        ]
+
+        self.assertEqual(scoring_equity.equity_noise_dampener(components), 0.0)
+        components.append({"key": "macroOverlay", "score": 30.0})
+        self.assertEqual(scoring_equity.equity_noise_dampener(components), -14.0)
+
+    def test_equity_forward_labels_require_complete_trading_session_horizon(self):
+        start = date(2026, 1, 2)
+        bars = [
+            MarketDailyBar(
+                symbol="SPY",
+                date=start + dashboard_builder.timedelta(days=index),
+                open=100.0,
+                high=101.0,
+                low=99.0 - index,
+                close=100.0,
+                volume=10_000_000,
+                source="unit-test",
+            )
+            for index in range(5)
+        ]
+
+        self.assertIsNone(scoring_equity.equity_forward_return_pct(bars, 0, 5))
+        self.assertIsNone(scoring_equity.equity_forward_max_drawdown_pct(bars, 0, 5))
+        self.assertIsNone(scoring_equity.equity_forward_drawdown_lead_days(bars, 0, 5, -2.0))
+        self.assertEqual(scoring_equity.equity_forward_return_pct(bars, 0, 4), 0.0)
+
     def test_equity_short_term_risk_keeps_warning_after_fragile_relief_rally(self):
         spy_closes = [100.0 + index * 0.04 for index in range(12)] + [100, 100.5, 101, 100.6, 99.8, 98.7, 97.5, 96.1, 94.0, 92.0, 93.4, 95.6, 96.3]
         qqq_closes = [100.0 + index * 0.03 for index in range(12)] + [100, 100.2, 100.5, 99.6, 98.0, 96.1, 94.0, 92.3, 90.4, 89.0, 90.1, 91.0, 91.5]
@@ -1677,7 +2107,7 @@ class DashboardBuilderTests(unittest.TestCase):
             dashboard_builder.normalize_market_bars(market_bars),
             date(2026, 6, 4),
             macro_liquidity_equity={},
-            spy_early_warning={},
+            spy_early_warning={"score": 45.0},
             calendar_events=[],
             option_open_interest=None,
         )
@@ -1714,7 +2144,7 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertLess(risk["score"], 75)
         self.assertNotEqual(risk["regime"], "Strong Alert")
 
-    def test_equity_short_term_risk_dampens_post_washout_vol_without_sector_confirmation(self):
+    def test_equity_short_term_risk_keeps_alert_when_downtrend_is_confirmed_despite_weak_sector(self):
         def bars(symbol: str, closes: list[float], ranges: list[float]) -> list[MarketDailyBar]:
             return self.make_equity_bars_from_closes_and_ranges(symbol, closes, ranges)
 
@@ -1744,13 +2174,14 @@ class DashboardBuilderTests(unittest.TestCase):
             dashboard_builder.normalize_market_bars(market_bars),
             date(2025, 5, 1),
             macro_liquidity_equity={},
-            spy_early_warning={},
+            spy_early_warning={"score": 45.0},
             calendar_events=[],
             option_open_interest=None,
         )
 
-        self.assertLess(risk["score"], 75)
-        self.assertNotEqual(risk["regime"], "Strong Alert")
+        self.assertGreaterEqual(risk["score"], 75)
+        self.assertEqual(risk["regime"], "Strong Alert")
+        self.assertIn("confirmedDowntrend", {rule["key"] for rule in risk["scoreAdjustments"]["rules"]})
 
     def test_equity_short_term_risk_attaches_source_quality_and_factor_evidence(self):
         market_bars = {
@@ -1876,7 +2307,7 @@ class DashboardBuilderTests(unittest.TestCase):
             dashboard_builder.normalize_market_bars(market_bars),
             date(2025, 5, 1),
             macro_liquidity_equity={},
-            spy_early_warning={},
+            spy_early_warning={"score": 45.0},
             calendar_events=[],
             option_open_interest=None,
         )
@@ -1919,7 +2350,7 @@ class DashboardBuilderTests(unittest.TestCase):
             dashboard_builder.normalize_market_bars(market_bars),
             date(2025, 5, 1),
             macro_liquidity_equity={},
-            spy_early_warning={},
+            spy_early_warning={"score": 45.0},
             calendar_events=[],
             option_open_interest=None,
         )
@@ -1943,7 +2374,7 @@ class DashboardBuilderTests(unittest.TestCase):
             dashboard_builder.normalize_market_bars(market_bars),
             date(2026, 6, 4),
             macro_liquidity_equity={},
-            spy_early_warning={},
+            spy_early_warning={"score": 45.0},
             calendar_events=[],
             option_open_interest=None,
         )
@@ -1986,7 +2417,7 @@ class DashboardBuilderTests(unittest.TestCase):
             dashboard_builder.normalize_market_bars(market_bars),
             date(2025, 5, 1),
             macro_liquidity_equity={},
-            spy_early_warning={},
+            spy_early_warning={"score": 45.0},
             calendar_events=[],
             option_open_interest=None,
         )
@@ -2023,7 +2454,7 @@ class DashboardBuilderTests(unittest.TestCase):
             dashboard_builder.normalize_market_bars(market_bars),
             date(2025, 5, 1),
             macro_liquidity_equity={},
-            spy_early_warning={},
+            spy_early_warning={"score": 45.0},
             calendar_events=[],
             option_open_interest=None,
         )
@@ -2058,7 +2489,7 @@ class DashboardBuilderTests(unittest.TestCase):
             dashboard_builder.normalize_market_bars(market_bars),
             date(2025, 5, 1),
             macro_liquidity_equity={},
-            spy_early_warning={},
+            spy_early_warning={"score": 45.0},
             calendar_events=[],
             option_open_interest=None,
         )
@@ -2636,7 +3067,12 @@ class DashboardBuilderTests(unittest.TestCase):
             "confidence": 0.72,
             "daysToCritical": 58,
             "effectiveWeightMultiplier": 1.0,
-            "validation": {"effectiveWeightMultiplier": 1.0},
+            "validation": {
+                "productionEvidenceAvailable": True,
+                "productionThreshold": 65,
+                "productionEffectiveWeightMultiplier": 1.0,
+                "effectiveWeightMultiplier": 1.0,
+            },
             "history": {"available": True, "points": points, "clipState": clip_state},
             "backtest": {"threshold": 65},
             "clipState": clip_state,
@@ -2723,7 +3159,12 @@ class DashboardBuilderTests(unittest.TestCase):
             "confidence": 0.72,
             "daysToCritical": 60,
             "effectiveWeightMultiplier": 1.0,
-            "validation": {"effectiveWeightMultiplier": 1.0},
+            "validation": {
+                "productionEvidenceAvailable": True,
+                "productionThreshold": 65,
+                "productionEffectiveWeightMultiplier": 1.0,
+                "effectiveWeightMultiplier": 1.0,
+            },
             "history": history,
             "backtest": {"threshold": 65},
         }
@@ -2752,7 +3193,13 @@ class DashboardBuilderTests(unittest.TestCase):
             "confidence": 0.50,
             "daysToCritical": 170,
             "effectiveWeightMultiplier": 0.60,
-            "validation": {"effectiveWeightMultiplier": 0.60, "validationRole": "weak"},
+            "validation": {
+                "productionEvidenceAvailable": True,
+                "productionThreshold": 65,
+                "productionEffectiveWeightMultiplier": 0.60,
+                "effectiveWeightMultiplier": 0.60,
+                "validationRole": "weak",
+            },
             "history": history,
             "backtest": {"threshold": 65},
         }
@@ -2780,7 +3227,12 @@ class DashboardBuilderTests(unittest.TestCase):
             "confidence": 0.80,
             "daysToCritical": 45,
             "effectiveWeightMultiplier": 1.0,
-            "validation": {"effectiveWeightMultiplier": 1.0},
+            "validation": {
+                "productionEvidenceAvailable": True,
+                "productionThreshold": 65,
+                "productionEffectiveWeightMultiplier": 1.0,
+                "effectiveWeightMultiplier": 1.0,
+            },
             "history": history,
             "backtest": {"threshold": 65},
             "fitEnsemble": {
@@ -2907,7 +3359,7 @@ class DashboardBuilderTests(unittest.TestCase):
             "WTREGEN": TimeSeries("WTREGEN", [SeriesPoint(date(2026, 5, 13), 838_584.0)]),
             "WALCL": TimeSeries("WALCL", [SeriesPoint(date(2026, 5, 13), 6_731_000.0)]),
             "TREAST": TimeSeries("TREAST", [SeriesPoint(date(2026, 5, 13), 4_210_000.0)]),
-            "RRPONTSYD": TimeSeries("RRPONTSYD", [SeriesPoint(date(2026, 5, 18), 4_000.0)]),
+            "RRPONTSYD": TimeSeries("RRPONTSYD", [SeriesPoint(date(2026, 5, 18), 4.0)]),
             "CPIAUCSL": TimeSeries("CPIAUCSL", [SeriesPoint(date(2025, 4, 1), 313.0), SeriesPoint(date(2026, 4, 1), 324.9)]),
             "PPIACO": TimeSeries("PPIACO", [SeriesPoint(date(2025, 4, 1), 255.0), SeriesPoint(date(2026, 4, 1), 270.3)]),
             "UNRATE": TimeSeries("UNRATE", [SeriesPoint(date(2026, 4, 1), 4.1)]),
@@ -2965,7 +3417,7 @@ class DashboardBuilderTests(unittest.TestCase):
             "WTREGEN": TimeSeries("WTREGEN", [SeriesPoint(date(2026, 5, 13), 838_584.0)]),
             "WALCL": TimeSeries("WALCL", [SeriesPoint(date(2026, 5, 13), 6_731_000.0)]),
             "TREAST": TimeSeries("TREAST", [SeriesPoint(date(2026, 5, 13), 4_210_000.0)]),
-            "RRPONTSYD": TimeSeries("RRPONTSYD", [SeriesPoint(date(2026, 5, 18), 4_000.0)]),
+            "RRPONTSYD": TimeSeries("RRPONTSYD", [SeriesPoint(date(2026, 5, 18), 4.0)]),
             "WRESBAL": TimeSeries("WRESBAL", [SeriesPoint(date(2026, 5, 14), 3_130_000.0)]),
             "CPIAUCSL": TimeSeries("CPIAUCSL", [SeriesPoint(date(2025, 4, 1), 313.0), SeriesPoint(date(2026, 4, 1), 324.9)]),
             "PPIACO": TimeSeries("PPIACO", [SeriesPoint(date(2025, 4, 1), 255.0), SeriesPoint(date(2026, 4, 1), 270.3)]),
@@ -3009,7 +3461,7 @@ class DashboardBuilderTests(unittest.TestCase):
             idea_titles[:4],
             ["战术减久期", "做陡 5s30s 曲线", "前端持有 · 吃 carry", "战术做多盈亏平衡通胀"],
         )
-        self.assertIn("宏观环境评分", dashboard["ideas"][0]["text"])
+        self.assertIn("宏观可靠性评分", dashboard["ideas"][0]["text"])
         self.assertIn("QRA", dashboard["ideas"][1]["text"])
         self.assertIn("SOFR", dashboard["ideas"][2]["text"])
         self.assertIn("WTI", dashboard["ideas"][3]["text"])
@@ -3033,7 +3485,7 @@ class DashboardBuilderTests(unittest.TestCase):
             "WTREGEN": TimeSeries("WTREGEN", [SeriesPoint(date(2026, 5, 13), 838_584.0)]),
             "WALCL": TimeSeries("WALCL", [SeriesPoint(date(2026, 5, 13), 6_731_000.0)]),
             "TREAST": TimeSeries("TREAST", [SeriesPoint(date(2026, 5, 13), 4_210_000.0)]),
-            "RRPONTSYD": TimeSeries("RRPONTSYD", [SeriesPoint(date(2026, 5, 18), 4_000.0)]),
+            "RRPONTSYD": TimeSeries("RRPONTSYD", [SeriesPoint(date(2026, 5, 18), 4.0)]),
             "WRESBAL": TimeSeries("WRESBAL", [SeriesPoint(date(2026, 5, 14), 3_130_000.0)]),
             "CPIAUCSL": TimeSeries("CPIAUCSL", [SeriesPoint(date(2025, 4, 1), 313.0), SeriesPoint(date(2026, 4, 1), 324.9)]),
             "PPIACO": TimeSeries("PPIACO", [SeriesPoint(date(2025, 4, 1), 255.0), SeriesPoint(date(2026, 4, 1), 270.3)]),
@@ -3077,7 +3529,12 @@ class DashboardBuilderTests(unittest.TestCase):
         }
         self.assertTrue(expected_names.issubset(factors))
         self.assertEqual(factors["隐含政策路径"]["sourceMode"], "modeled")
-        self.assertIn("加息", factors["隐含政策路径"]["tag"])
+        self.assertEqual(factors["隐含政策路径"]["tag"], "定性模型 · 非概率")
+        self.assertEqual(factors["隐含政策路径"]["score"], 0)
+        self.assertFalse(factors["隐含政策路径"]["auditEligible"])
+        self.assertFalse(factors["隐含政策路径"]["probabilitiesAvailable"])
+        self.assertEqual(dashboard["fedPath"], [])
+        self.assertEqual(dashboard["fedPathAudit"]["status"], "unavailable")
         self.assertIn("+150k", factors["非农就业"]["tag"])
         self.assertIn("+150k", factors["增长动能"]["tag"])
         self.assertEqual(factors["新任主席倾向"]["sourceMode"], "official-news")
@@ -3087,7 +3544,8 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertIn("$500.4B", factors["一级交易商持仓"]["tag"])
         self.assertEqual(factors["互换利差"]["sourceMode"], "manual-placeholder")
         self.assertEqual(factors["新老券利差"]["sourceMode"], "manual-placeholder")
-        self.assertEqual(factors["市场流动性"]["sourceMode"], "proxy-public")
+        self.assertEqual(factors["市场流动性"]["sourceMode"], "manual-placeholder")
+        self.assertFalse(factors["市场流动性"]["auditEligible"])
         self.assertTrue(all(factors[name]["compatibilityWith"] == "us-treasury-bonds-monitor-luffa" for name in expected_names))
         self.assertEqual(set(dashboard["meta"]["remoteCompatibility"]["factorNames"]), expected_names)
 
@@ -3110,7 +3568,7 @@ class DashboardBuilderTests(unittest.TestCase):
             "WTREGEN": TimeSeries("WTREGEN", [SeriesPoint(date(2026, 5, 13), 838_584.0)]),
             "WALCL": TimeSeries("WALCL", [SeriesPoint(date(2026, 5, 13), 6_731_000.0)]),
             "TREAST": TimeSeries("TREAST", [SeriesPoint(date(2026, 5, 13), 4_210_000.0)]),
-            "RRPONTSYD": TimeSeries("RRPONTSYD", [SeriesPoint(date(2026, 5, 18), 4_000.0)]),
+            "RRPONTSYD": TimeSeries("RRPONTSYD", [SeriesPoint(date(2026, 5, 18), 4.0)]),
             "CPIAUCSL": TimeSeries("CPIAUCSL", [SeriesPoint(date(2025, 4, 1), 313.0), SeriesPoint(date(2026, 4, 1), 324.9)]),
             "PPIACO": TimeSeries("PPIACO", [SeriesPoint(date(2025, 4, 1), 255.0), SeriesPoint(date(2026, 4, 1), 270.3)]),
             "UNRATE": TimeSeries("UNRATE", [SeriesPoint(date(2026, 4, 1), 4.1)]),
@@ -3231,7 +3689,8 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertTrue(any(factor["n"] == "SOMA Treasury持仓" for factor in dashboard["groups"][0]["factors"]))
         vol_factor = next(factor for factor in dashboard["groups"][5]["factors"] if factor["n"] == "10Y实现波动率")
         self.assertIn("Treasury curve", vol_factor["note"])
-        self.assertIn("20D", vol_factor["tag"])
+        self.assertEqual(vol_factor["tag"], "数据不足")
+        self.assertFalse(vol_factor["auditEligible"])
         self.assertEqual(dashboard["cross"]["yields"][1], ["德国 Bund", 3.0])
         cross_history_groups = {group["id"]: group for group in dashboard["cross"]["historySeries"]}
         self.assertEqual(set(cross_history_groups), {"global", "risk", "inflation"})
@@ -3252,6 +3711,13 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertTrue(any(factor["n"] == "发行节奏 / QRA" for factor in dashboard["groups"][2]["factors"]))
         self.assertIn(["黄金现货", "$4536.70", "Stooq XAUUSD"], dashboard["cross"]["inflation"])
         self.assertIn(["2026-06-17", "FOMC decision + SEP", "高"], dashboard["events"])
+        self.assertEqual(dashboard["fedPath"], [])
+        self.assertEqual(dashboard["fedPathAudit"]["status"], "modeled-scenario-only")
+        self.assertFalse(dashboard["fedPathAudit"]["probabilitiesAvailable"])
+        self.assertEqual(
+            [meeting["date"] for meeting in dashboard["fedPathAudit"]["futureMeetings"]],
+            ["2026-06-17"],
+        )
         self.assertIn(["2026-08-05", "Treasury quarterly refunding statement", "高"], dashboard["events"])
         self.assertIn(["2026-08-03", "Treasury borrowing estimates / QRA pre-release", "中"], dashboard["events"])
         self.assertTrue(any(row[0] == "2026-05-21" and row[1].startswith("Treasury auction") for row in dashboard["events"]))
@@ -3637,12 +4103,58 @@ class RegionalMonitorTests(unittest.TestCase):
             "available": True, "beatsBestSingleFactor": True, "classification": "leading",
             "lift": 1.3, "hitRateOos": 0.5, "baseRate": 0.3, "leadTimeDays": 40.0,
             "currentValue": 1.8, "alertThreshold": 1.2,
+            "direction": "higher_risk", "oosIc3m": 0.31, "wrongWay": False,
+            "robust": True, "fdrSignificant3m": True,
+            "foldStability3m": {"stablePositive": True}, "actionableRobust": True,
+            "observationCount": 180, "oosSampleSize3m": 60, "oosAlertCount": 8,
         }
         alert = dashboard_builder.build_region_factor_alert(region)
         self.assertEqual(alert["source"], "composite")
         self.assertEqual(alert["factorId"], "regionComposite")
         self.assertEqual(alert["state"], "breached")  # 1.8 >= 1.2
         self.assertIn("综合信号", alert["factorLabelCn"])
+
+    def test_factor_alert_beats_best_cannot_bypass_complete_gate(self):
+        region = self._region(
+            "hongkong", "香港", "watch", "neutral", 0.0,
+            validated_factor="realizedVol", vol_current=30.0, vol_threshold=24.0,
+        )
+        valid = {
+            "available": True,
+            "beatsBestSingleFactor": True,
+            "classification": "leading",
+            "lift": 1.3,
+            "currentValue": 1.8,
+            "alertThreshold": 1.2,
+            "direction": "higher_risk",
+            "oosIc3m": 0.31,
+            "wrongWay": False,
+            "robust": True,
+            "fdrSignificant3m": True,
+            "foldStability3m": {"stablePositive": True},
+            "actionableRobust": True,
+            "observationCount": 180,
+            "oosSampleSize3m": 60,
+            "oosAlertCount": 8,
+        }
+        invalid_variants = {
+            "lagging": {"classification": "lagging"},
+            "unexpected_direction": {"direction": "higher_better"},
+            "wrong_direction": {"wrongWay": True, "oosIc3m": -0.31},
+            "weak_lift": {"lift": 1.0},
+            "fdr_failed": {"fdrSignificant3m": False, "actionableRobust": False},
+            "fold_failed": {"foldStability3m": {"stablePositive": False}, "actionableRobust": False},
+            "too_few_observations": {"observationCount": 59},
+            "too_few_oos_observations": {"oosSampleSize3m": 19},
+            "too_few_oos_alerts": {"oosAlertCount": 2},
+        }
+        for label, change in invalid_variants.items():
+            with self.subTest(label=label):
+                composite = {**valid, **change}
+                region["indices"][0]["factorValidation"]["composite"] = composite
+                alert = dashboard_builder.build_region_factor_alert(region)
+                self.assertEqual(alert["source"], "factor")
+                self.assertEqual(alert["factorId"], "realizedVol")
 
     def test_factor_alert_falls_back_to_single_factor_when_composite_weak(self):
         region = self._region("korea", "韩国", "watch", "neutral", 0.0, validated_factor="realizedVol", vol_current=30.0, vol_threshold=24.0)
@@ -3914,8 +4426,7 @@ class RegionalMonitorTests(unittest.TestCase):
 
 
 class PortfolioOverviewRobustnessTierTests(unittest.TestCase):
-    """Phase 2 (presentation-only): headline layers carry an OOS-robustness tier and sort
-    validated-first, while the suggested allocation band (min logic) is unchanged."""
+    """Only complete-gate layers may bind the headline allocation band."""
 
     def _overview(self, *, equity_robust, spy_robust, macro_robust):
         # robust=None for a layer means its composite is ABSENT (robustness unknown -> unverified),
@@ -3926,7 +4437,7 @@ class PortfolioOverviewRobustnessTierTests(unittest.TestCase):
             ("bhadialComposite", macro_robust, {}),
         ]
         composites = [
-            {"id": cid, "robust": robust, **extra}
+            {"id": cid, "robust": robust, "actionableRobust": robust, **extra}
             for cid, robust, extra in specs
             if robust is not None
         ]
@@ -3963,15 +4474,25 @@ class PortfolioOverviewRobustnessTierTests(unittest.TestCase):
         self.assertTrue(by_layer["spyEarlyWarning"]["contextNote"])
         self.assertEqual(by_layer["equityShortTermRisk"]["contextNote"], "")
 
-    def test_allocation_band_unchanged_by_tiering_and_binding_basis_reported(self):
+    def test_actionable_gate_requires_literal_true(self):
+        self.assertTrue(dashboard_builder.overview_layer_robust({"actionableRobust": True}))
+        self.assertFalse(dashboard_builder.overview_layer_robust({"actionableRobust": "true"}))
+        self.assertFalse(dashboard_builder.overview_layer_robust({"actionableRobust": 1}))
+        self.assertIsNone(dashboard_builder.overview_layer_robust({"robust": True}))
+
+    def test_only_validated_layers_bind_allocation_and_context_is_retained(self):
         # min low=50, min high=70 -> binding is the equity layer (band[1]==70).
         po = self._overview(equity_robust=True, spy_robust=False, macro_robust=False)
         self.assertEqual(po["suggestedEquityExposureBand"], [50, 70])
         self.assertEqual(po["bindingBasis"], "validated")
-        # Re-run with the same bands but equity non-robust: band must NOT change (presentation-only).
+        self.assertEqual(po["contextBand"], [60, 90])
+        # With no complete-gate layer, the bands remain inspectable context but
+        # there is no actionable recommendation or binding layer.
         po2 = self._overview(equity_robust=False, spy_robust=False, macro_robust=False)
-        self.assertEqual(po2["suggestedEquityExposureBand"], [50, 70])
-        self.assertEqual(po2["bindingBasis"], "context")
+        self.assertIsNone(po2["suggestedEquityExposureBand"])
+        self.assertEqual(po2["contextBand"], [50, 70])
+        self.assertIsNone(po2["bindingLayer"])
+        self.assertIsNone(po2["bindingBasis"])
 
 
 class SignalValidationRobustnessLabelingTests(unittest.TestCase):
@@ -3980,35 +4501,37 @@ class SignalValidationRobustnessLabelingTests(unittest.TestCase):
 
     def test_summary_counts_robust_leading_and_aggregate_verdict(self):
         factors = [
-            {"id": "a", "robust": True, "classification": "leading"},
-            {"id": "b", "robust": True, "classification": "leading"},
-            {"id": "c", "robust": True, "classification": "coincident"},
-            {"id": "d", "robust": False, "classification": "leading"},
-            {"id": "e", "robust": False, "classification": "lagging"},
+            {"id": "a", "robust": True, "actionableRobust": True, "classification": "leading"},
+            {"id": "b", "robust": True, "actionableRobust": True, "classification": "leading"},
+            {"id": "c", "robust": True, "actionableRobust": True, "classification": "coincident"},
+            {"id": "d", "robust": False, "actionableRobust": False, "classification": "leading"},
+            {"id": "e", "robust": False, "actionableRobust": False, "classification": "lagging"},
         ]
         composites = [{"id": "spyEarlyWarning", "robust": False}]
         summary = dashboard_builder.signal_validation_summary(factors, composites)
         self.assertIn("5因子", summary)
-        self.assertIn("2个稳健领先", summary)
+        self.assertIn("2个通过CI、FDR与分折一致性的领先因子", summary)
         self.assertIn("1个稳健同步/滞后", summary)
-        self.assertIn("未达样本外稳健", summary)
+        self.assertIn("未达样本外统计显著", summary)
 
-    def test_annotate_spy_warning_keeps_only_robust_leading_sleeves(self):
+    def test_annotate_spy_warning_separates_actionable_and_exploratory_sleeves(self):
         spy = {"score": 45.0}
         signal_validation = {
             "composites": [
-                {"id": "spyEarlyWarning", "robust": False, "oosCi3m": [-0.02, 0.59]},
-                {"id": "sleeve:fundingStress", "robust": True, "oosIc3m": 0.47},
-                {"id": "sleeve:ratesCurveStress", "robust": True, "oosIc3m": 0.36},
-                {"id": "sleeve:creditVolStress", "robust": True, "oosIc3m": -0.55},
-                {"id": "sleeve:liquidityStress", "robust": False, "oosIc3m": 0.38},
+                {"id": "spyEarlyWarning", "robust": False, "actionableRobust": False, "oosCi3m": [-0.02, 0.59]},
+                {"id": "sleeve:fundingStress", "robust": True, "actionableRobust": False, "oosIc3m": 0.47},
+                {"id": "sleeve:ratesCurveStress", "robust": True, "actionableRobust": True, "oosIc3m": 0.36},
+                {"id": "sleeve:creditVolStress", "robust": False, "actionableRobust": False, "oosIc3m": -0.55},
+                {"id": "sleeve:liquidityStress", "robust": False, "actionableRobust": False, "oosIc3m": 0.38},
             ]
         }
         dashboard_builder.annotate_spy_warning_robustness(spy, signal_validation)
         self.assertIs(spy["aggregateRobust"], False)
+        self.assertIs(spy["aggregateCiRobust"], False)
+        self.assertIs(spy["aggregateActionableRobust"], False)
         self.assertEqual(spy["aggregateOosCi3m"], [-0.02, 0.59])
-        # creditVol is robust but reversed (-) and liquidity is non-robust -> both excluded.
-        self.assertEqual(spy["robustSleeves"], ["fundingStress", "ratesCurveStress"])
+        self.assertEqual(spy["robustSleeves"], ["ratesCurveStress"])
+        self.assertEqual(spy["exploratorySleeves"], ["fundingStress"])
 
 
 if __name__ == "__main__":

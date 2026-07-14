@@ -53,6 +53,25 @@ class SourceParsingTests(unittest.TestCase):
         self.assertEqual(series.latest.value, 4.61)
         self.assertEqual(len(series.points), 2)
 
+    def test_parse_fred_csv_rejects_nonfinite_values_and_deduplicates_dates(self):
+        content = "\n".join(
+            [
+                "observation_date,DGS10",
+                "2026-05-18,4.60",
+                "2026-05-16,4.50",
+                "2026-05-18,4.61",
+                "2026-05-19,NaN",
+                "2026-05-20,Infinity",
+            ]
+        )
+
+        series = parse_fred_csv(content, "DGS10")
+
+        self.assertEqual(
+            [(point.date, point.value) for point in series.points],
+            [(date(2026, 5, 16), 4.50), (date(2026, 5, 18), 4.61)],
+        )
+
     def test_parse_fred_bulk_zip_extracts_daily_series(self):
         content = BytesIO()
         with zipfile.ZipFile(content, "w") as archive:
@@ -116,6 +135,27 @@ class SourceParsingTests(unittest.TestCase):
         self.assertEqual(series["DFII10"].latest.date, date(2026, 5, 20))
         self.assertEqual(series["T10YIE"].latest.value, 2.40)
 
+    def test_required_curve_fetch_rejects_successful_http_with_no_complete_records(self):
+        empty_feed = '<feed xmlns="http://www.w3.org/2005/Atom"></feed>'
+        with patch.object(sources, "fetch_text", return_value=empty_feed):
+            with self.assertRaisesRegex(ValueError, "complete curve record"):
+                sources.fetch_treasury_yield_curves(today=date(2026, 7, 13), months_back=1)
+
+    def test_auctioned_feed_rejects_empty_rows_while_announced_feed_may_be_empty(self):
+        with patch.object(sources, "fetch_json_curl_first", return_value=[]):
+            with self.assertRaisesRegex(ValueError, "returned no securities"):
+                sources.fetch_treasury_auctions()
+
+        with patch.object(sources, "fetch_json_curl_first", return_value=[]):
+            self.assertEqual(sources.fetch_announced_auctions(), [])
+
+    def test_official_macro_calendars_reject_empty_parser_results(self):
+        with patch.object(sources, "fetch_text_curl_first", return_value="<html></html>"):
+            with self.assertRaisesRegex(ValueError, "FRED economic release calendars"):
+                sources.fetch_fred_macro_release_events(today=date(2026, 7, 13))
+            with self.assertRaisesRegex(ValueError, "BEA release schedule"):
+                sources.fetch_bea_release_events()
+
     def test_parse_stooq_quote_csv_extracts_public_futures_quote(self):
         content = "\n".join(
             [
@@ -147,6 +187,23 @@ class SourceParsingTests(unittest.TestCase):
         self.assertEqual(bars[0].volume, 123456)
         self.assertIsNone(bars[1].volume)
         self.assertEqual(bars[1].close, 9725.5)
+
+    def test_market_bar_parser_rejects_nonfinite_incoherent_rows_and_deduplicates(self):
+        content = "\n".join(
+            [
+                "Date,Open,High,Low,Close,Volume",
+                "2026-06-05,100,105,95,101,1000",
+                "2026-06-04,100,NaN,95,99,1000",
+                "2026-06-03,100,99,95,98,1000",
+                "2026-06-05,101,106,96,102,-10",
+            ]
+        )
+
+        bars = parse_stooq_daily_csv(content, "SPY")
+
+        self.assertEqual(len(bars), 1)
+        self.assertEqual((bars[0].date, bars[0].close), (date(2026, 6, 5), 102.0))
+        self.assertIsNone(bars[0].volume)
 
     def test_parse_nasdaq_historical_json_extracts_descending_ohlcv_rows(self):
         content = """
@@ -249,6 +306,7 @@ class SourceParsingTests(unittest.TestCase):
         self.assertEqual(records[0].date, date(2026, 5, 15))
         self.assertEqual(records[0].values["10Y"], 4.42)
         self.assertEqual(records[0].values["30Y"], 4.98)
+        self.assertEqual(parse_treasury_yield_xml(xml.replace(">4.42<", ">NaN<")), [])
 
     def test_select_latest_acm_record_uses_latest_complete_daily_row(self):
         rows = [
@@ -271,6 +329,7 @@ class SourceParsingTests(unittest.TestCase):
                 '"ULTRA UST 10Y - CHICAGO BOARD OF TRADE",2026-05-05,2000,100,80,400,100,90,300',
                 '"ULTRA UST 10Y - CHICAGO BOARD OF TRADE",2026-05-12,2500,110,90,420,120,100,350',
                 '"U.S. TREASURY BONDS - CHICAGO BOARD OF TRADE",2026-05-12,3000,120,140,500,200,150,500',
+                '"UST 5Y - CHICAGO BOARD OF TRADE",2026-05-12,1500,100,80,400,100,,300',
             ]
         )
 

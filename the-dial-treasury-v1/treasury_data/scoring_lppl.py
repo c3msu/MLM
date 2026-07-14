@@ -2,8 +2,9 @@
 (behavior-unchanged, 2026-06-19 全面重构 Phase 1). The log-periodic power-law bubble-fit
 primitives: windowing constants, grid + local-refine candidate search, the bounded
 least-squares solver, residual diagnostics, and ensemble/percentile helpers. Depends
-only on stdlib + sources types + dashboard_core scalars. The LPPL *orchestration*
-(per-index histories, backtests, regional/advice bridges) stays in build_dashboard.
+only on stdlib + sources types + dashboard_core scalars. Per-index row/history/CLIP
+orchestration lives in scoring_lppl_history, validation/backtests in
+scoring_lppl_validation, while forward/regional/advice bridges stay in build_dashboard.
 Re-exported by build_dashboard via `from .scoring_lppl import *`."""
 from __future__ import annotations
 

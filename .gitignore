@@ -42,6 +42,8 @@ playwright-report/
 the-dial-treasury-v1/logs/
 the-dial-treasury-v1/output/
 the-dial-treasury-v1/data/dashboard.failed.json
+the-dial-treasury-v1/data/cache/
+the-dial-treasury-v1/data/*.lock
 the-dial-treasury-v1/content/overrides.json
 
 # Claude Code local machine settings (not shared)

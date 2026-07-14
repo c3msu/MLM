@@ -56,6 +56,61 @@ class FrontendCssTests(unittest.TestCase):
         self.assertRegex(html, r'href="styles\.css\?v=[^"]+"')
         self.assertRegex(html, r'src="app\.js\?v=[^"]+"')
 
+    def test_primary_navigation_keeps_five_core_links_and_folds_secondary_sections(self):
+        html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
+        css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
+
+        nav = re.search(r'<nav class="top-nav"[^>]*>(.*?)</nav>', html, re.DOTALL)
+        self.assertIsNotNone(nav)
+        nav_html = nav.group(1)
+        more_start = nav_html.index('id="primaryNavMore"')
+        core_html = nav_html[:more_start]
+        more_html = nav_html[more_start:]
+        self.assertEqual(core_html.count('<a href='), 5)
+        self.assertEqual(more_html.count('<a href='), 6)
+        for target in ("#summary", "#curve", "#scorecard", "#regions", "#views"):
+            self.assertIn(f'href="{target}"', core_html)
+        for target in ("#decomposition", "#policy", "#supply", "#positioning", "#crossmarket", "#events"):
+            self.assertIn(f'href="{target}"', more_html)
+        self.assertIn('aria-label="更多页面"', more_html)
+        self.assertIn("function initTopNavMore()", app_js)
+        self.assertIn("function syncTopNavMoreActiveState()", app_js)
+        self.assertIn('event.key !== "Escape"', app_js)
+        self.assertIn('link.setAttribute("aria-current", "page")', app_js)
+        self.assertIn(".top-nav-more-menu", css)
+        self.assertIn(".top-nav a:focus-visible", css)
+        self.assertRegex(css, re.compile(r"@media \(max-width: 640px\).*?\.data-status-row\s*\{[^}]*grid-template-columns:", re.DOTALL))
+
+    def test_collapsible_sections_are_keyboard_operable_and_have_visible_focus(self):
+        app_js = FRONTEND_JS
+        css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('heading.setAttribute("role", "button")', app_js)
+        self.assertIn('heading.setAttribute("tabindex", "0")', app_js)
+        self.assertIn('heading.setAttribute("aria-expanded"', app_js)
+        self.assertIn('event.key === "Enter"', app_js)
+        self.assertIn('event.key === " "', app_js)
+        self.assertIn(".section-collapsible > .section-heading:focus-visible", css)
+        self.assertIn(".diagnostic-details > summary:focus-visible", css)
+        self.assertIn(".region-advanced-summary:focus-visible", css)
+        self.assertIn(".idea-decision-summary:focus-visible", css)
+        for selector in (
+            "button:focus-visible",
+            "input:focus-visible",
+            "select:focus-visible",
+            "summary:focus-visible",
+            '[contenteditable="true"]:focus-visible',
+        ):
+            self.assertIn(selector, css)
+
+    def test_removed_legacy_investment_card_css_does_not_linger(self):
+        css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
+
+        self.assertNotIn(".idea-grid", css)
+        self.assertNotIn(".idea-card", css)
+        self.assertNotIn(".idea-card-meta", css)
+
     def test_header_export_downloads_current_html_document(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
         app_js = FRONTEND_JS
@@ -74,6 +129,28 @@ class FrontendCssTests(unittest.TestCase):
         self.assertRegex(app_js, r"link\.download\s*=\s*`macro-liquidity-monitor-\$\{[^}]+\}\.html`;")
         self.assertNotIn("treasury-factor-desk-${state.asOf}.json", app_js)
         self.assertNotIn("JSON.stringify({ exportedAt: new Date().toISOString(), state }", app_js)
+
+    def test_symbol_buttons_have_localized_accessible_names_and_touch_targets(self):
+        html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
+        css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
+
+        for element_id, label in (("resetState", "恢复默认计分"), ("exportState", "导出当前页面HTML")):
+            button = re.search(rf'<button id="{element_id}"[^>]*>', html)
+            self.assertIsNotNone(button)
+            self.assertIn(f'aria-label="{label}"', button.group(0))
+            self.assertIn('data-i18n-aria-label=', button.group(0))
+        self.assertIn('[data-i18n-aria-label]', app_js)
+        self.assertRegex(css, re.compile(r"\.icon-btn\s*\{[^}]*width:\s*44px;[^}]*height:\s*44px", re.DOTALL))
+        self.assertRegex(css, re.compile(r"\.chart-expand-btn,\s*\.chart-close-btn\s*\{[^}]*width:\s*44px;[^}]*height:\s*44px", re.DOTALL))
+
+    def test_runtime_snapshot_requests_use_stable_conditional_cache_urls(self):
+        app_js = FRONTEND_JS
+
+        self.assertIn('fetch("data/dashboard.json", { cache: "no-cache"', app_js)
+        self.assertIn('fetch("/api/health", { cache: "no-cache"', app_js)
+        self.assertNotIn('data/dashboard.json?ts=${Date.now()}', app_js)
+        self.assertNotIn('/api/health?ts=${Date.now()}', app_js)
 
     def test_percentile_chart_has_expand_modal_controls(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
@@ -287,17 +364,18 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn(".equity-risk-components", css)
         self.assertIn(".equity-risk-drivers", css)
 
-    def test_equity_short_term_risk_history_chart_is_not_gated_by_backtest(self):
+    def test_equity_short_term_risk_history_chart_is_available_in_explanation_layer(self):
         app_js = FRONTEND_JS
 
         renderer_start = app_js.index("function renderEquityShortTermRisk")
         renderer_end = app_js.index("function renderEquityRiskHistoryChart")
         renderer = app_js[renderer_start:renderer_end]
         self.assertIn("const trendHistory = renderEquityRiskHistoryChart(item);", renderer)
-        # Chart renders unconditionally in the main return flow (not inside the
-        # backtest.available branch / not inside the collapsed deep-dive), before the
-        # component breakdown — so it stays visible regardless of backtest availability.
+        # Chart remains independent of backtest availability, but is intentionally folded
+        # with the full component breakdown so the default view can lead with action.
         self.assertLess(renderer.index("${trendHistory}"), renderer.index('<div class="equity-risk-components">'))
+        self.assertIn('<details class="diagnostic-details equity-risk-explain">', renderer)
+        self.assertLess(renderer.index('<details class="diagnostic-details equity-risk-explain">'), renderer.index("${trendHistory}"))
         self.assertLess(renderer.index("${trendHistory}"), renderer.index('<details class="diagnostic-details equity-risk-deep">'))
         # The backtest tables / factor audit are folded into the collapsed deep-dive.
         self.assertIn('<details class="diagnostic-details equity-risk-deep">', renderer)
@@ -401,7 +479,7 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn(".idea-equity-impact.positive", css)
         self.assertIn(".idea-equity-impact.negative", css)
 
-    def test_summary_leads_with_narrative_then_stance_then_metrics(self):
+    def test_summary_leads_with_narrative_then_action_and_folds_market_metrics(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
@@ -410,20 +488,27 @@ class FrontendCssTests(unittest.TestCase):
         summary_html = html[summary_start:summary_end]
         macro_index = summary_html.index('class="panel macro-liquidity-panel macro-liquidity-topline summary-macro-liquidity"')
         hero_copy_index = summary_html.index('class="hero-copy"')
-        stance_index = summary_html.index('class="stance-panel"')
+        action_index = summary_html.index('id="portfolioOverviewPanel"')
+        stance_index = summary_html.index('class="stance-panel summary-decision-strip"')
+        market_details_index = summary_html.index('class="summary-market-details diagnostic-details"')
         tiles_index = summary_html.index('id="heroTiles"')
         scorecard_start = html.index('<section id="scorecard"')
         scorecard_end = html.index('<section id="policy"')
         scorecard_html = html[scorecard_start:scorecard_end]
-        # Reordered hierarchy (source order drives the single-column hero now that the CSS
-        # `order` overrides are gone): narrative headline -> stance strip -> key yields ->
-        # Conditions Score metric panel.
-        self.assertLess(hero_copy_index, stance_index)
-        self.assertLess(stance_index, tiles_index)
-        self.assertLess(tiles_index, macro_index)
+        # The summary now moves from context to action, then compact decision readouts. Raw
+        # yield tiles are progressive disclosure instead of competing with the main action.
+        self.assertLess(hero_copy_index, action_index)
+        self.assertLess(action_index, stance_index)
+        self.assertLess(stance_index, macro_index)
+        self.assertLess(macro_index, market_details_index)
+        self.assertLess(market_details_index, tiles_index)
         self.assertNotIn('macro-liquidity-topline summary-macro-liquidity', scorecard_html)
         self.assertIn(".macro-liquidity-topline", css)
         self.assertIn(".summary-macro-liquidity", css)
+        self.assertIn(".summary-action-panel", css)
+        self.assertIn(".summary-decision-strip", css)
+        self.assertIn("<h2>当前行动 · Portfolio Action</h2>", summary_html)
+        self.assertIn("<h2>宏观环境综合评分 · Conditions Score</h2>", summary_html)
         # The headline stance strip surfaces the equity position alongside duration/curve.
         self.assertIn('id="equityBandStance"', html)
 
@@ -468,6 +553,176 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn(".bhadial-gap-list", css)
         self.assertRegex(css, re.compile(r"@media\s*\(max-width:\s*640px\)[\s\S]*\.factor-row\s*\{[\s\S]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+112px", re.DOTALL))
         self.assertRegex(css, re.compile(r"@media\s*\(max-width:\s*640px\)[\s\S]*\.factor-note\s*\{[\s\S]*-webkit-line-clamp:\s*2", re.DOTALL))
+
+    def test_scorecard_leads_with_drivers_and_folds_research_editor(self):
+        html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
+        css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
+
+        scorecard_start = html.index('<section id="scorecard"')
+        scorecard_end = html.index('<section id="policy"')
+        scorecard = html[scorecard_start:scorecard_end]
+        driver_index = scorecard.index('id="factorDrivers"')
+        research_index = scorecard.index('class="diagnostic-details scorecard-research-details"')
+        groups_index = scorecard.index('id="scorecardGroups"')
+        percentile_index = scorecard.index('id="percentileTrendChart"')
+        forward_index = scorecard.index('id="macroLiquidityEquityLead"')
+        self.assertLess(driver_index, research_index)
+        self.assertLess(research_index, groups_index)
+        self.assertLess(groups_index, percentile_index)
+        self.assertLess(percentile_index, forward_index)
+        self.assertNotIn('scorecard-research-details" open', scorecard)
+        self.assertIn(".scorecard-driver-layout", css)
+        self.assertIn(".scorecard-research-body", css)
+        self.assertRegex(css, re.compile(r"@media \(max-width: 640px\).*?\.section-band\s*\{[^}]*scroll-margin-top:\s*142px", re.DOTALL))
+
+    def test_scorecard_removes_duplicate_stance_cards_and_names_score_controls(self):
+        html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
+        css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
+        scorecard = html[html.index('<section id="scorecard"'):html.index('<section id="policy"')]
+
+        self.assertNotIn('class="score-summary"', scorecard)
+        self.assertIn('class="scorecard-current-read"', scorecard)
+        research_index = scorecard.index('class="diagnostic-details scorecard-research-details"')
+        scale_index = scorecard.index('class="score-scale"')
+        self.assertLess(research_index, scale_index)
+        self.assertIn('role="group" aria-label=', app_js)
+        self.assertIn('aria-pressed="${selected ? "true" : "false"}"', app_js)
+        self.assertIn('t("score.setAria"', app_js)
+        self.assertRegex(css, re.compile(r"\.score-buttons button\s*\{[^}]*min-width:\s*44px;[^}]*height:\s*44px", re.DOTALL))
+        self.assertIn(".module-pulse-grid", css)
+        self.assertIn(".driver-rank", css)
+
+    def test_forward_signals_lead_with_three_action_cards_and_fold_details(self):
+        html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
+        css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
+
+        panel_start = html.index('id="macroLiquidityEquityLead"')
+        panel_end = html.index('id="signalValidationPanel"')
+        panel = html[panel_start:panel_end]
+        cards_index = panel.index('id="forwardSignalCards"')
+        short_index = panel.index('id="equityShortTermRisk"')
+        spy_index = panel.index('id="spyEarlyWarning"')
+        lppl_index = panel.index('id="globalLpplRisk"')
+        self.assertLess(cards_index, short_index)
+        self.assertLess(short_index, spy_index)
+        self.assertLess(spy_index, lppl_index)
+        self.assertEqual(panel.count('class="diagnostic-details forward-signal-detail"'), 3)
+        self.assertIn("function renderForwardSignalCards()", app_js)
+        self.assertIn('state.portfolioOverview || DEFAULT_DATA.portfolioOverview', app_js)
+        self.assertIn("forwardSignalEvidenceText", app_js)
+        self.assertIn(".forward-signal-cards", css)
+        self.assertIn(".forward-signal-detail-list", css)
+
+    def test_curve_and_policy_lead_with_decision_snapshots_and_fold_research_details(self):
+        html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
+        css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
+
+        curve_start = html.index('<section id="curve"')
+        curve_end = html.index('<section id="decomposition"')
+        curve = html[curve_start:curve_end]
+        self.assertLess(curve.index('id="curveDecisionCards"'), curve.index('id="curveChart"'))
+        self.assertLess(curve.index('id="curveDecisionRead"'), curve.index('id="curveTable"'))
+        self.assertEqual(curve.count('class="diagnostic-details decision-detail"'), 1)
+        self.assertNotIn('decision-detail" open', curve)
+
+        policy_start = html.index('<section id="policy"')
+        policy_end = html.index('<section id="supply"')
+        policy = html[policy_start:policy_end]
+        self.assertLess(policy.index('id="policyDecisionCards"'), policy.index('id="policyCards"'))
+        self.assertLess(policy.index('id="policyDecisionRead"'), policy.index('id="fedPathChart"'))
+        self.assertEqual(policy.count('class="diagnostic-details decision-detail"'), 2)
+        self.assertNotIn('decision-detail" open', policy)
+
+        self.assertIn("function renderCurveDecisionSnapshot()", app_js)
+        self.assertIn("function renderPolicyDecisionSnapshot()", app_js)
+        self.assertIn("function decisionSnapshotCard", app_js)
+        self.assertIn(".decision-snapshot-cards", css)
+        self.assertIn(".decision-snapshot-read", css)
+        self.assertIn(".decision-detail-list", css)
+
+    def test_remaining_research_sections_use_action_snapshots_and_fold_details(self):
+        html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
+
+        sections = (
+            ("supply", "positioning", "supplyDecisionCards", "auctionTable", 1),
+            ("positioning", "crossmarket", "positioningDecisionCards", "cftcList", 1),
+            ("crossmarket", "regions", "crossDecisionCards", "globalYields", 2),
+            ("events", "views", "eventsDecisionCards", "eventTimeline", 2),
+        )
+        for section_id, next_id, cards_id, detail_id, detail_count in sections:
+            with self.subTest(section=section_id):
+                start = html.index(f'<section id="{section_id}"')
+                end = html.index(f'<section id="{next_id}"')
+                section = html[start:end]
+                self.assertLess(section.index(f'id="{cards_id}"'), section.index(f'id="{detail_id}"'))
+                self.assertEqual(section.count('class="diagnostic-details decision-detail"'), detail_count)
+                self.assertNotIn('decision-detail" open', section)
+
+        for function_name in (
+            "renderSupplyDecisionSnapshot",
+            "renderPositioningDecisionSnapshot",
+            "renderCrossMarketDecisionSnapshot",
+            "renderEventsDecisionSnapshot",
+        ):
+            self.assertIn(f"function {function_name}()", app_js)
+        self.assertIn("Stooq XAUUSD 暂缺有效报价", app_js)
+
+    def test_investment_views_render_ranked_decision_rows_with_editable_details(self):
+        html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
+        css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
+
+        views_start = html.index('<section id="views"')
+        views_end = html.index('</main>')
+        views = html[views_start:views_end]
+        self.assertIn('id="ideaCards" class="idea-decision-list"', views)
+        self.assertIn('class="diagnostic-details decision-detail investment-risk-detail"', views)
+        self.assertNotIn('investment-risk-detail" open', views)
+        self.assertIn("function ideaDecisionFields", app_js)
+        self.assertIn("function ideaDecisionFallback", app_js)
+        self.assertIn('class="idea-decision-row${', app_js)
+        self.assertIn('class="idea-decision-gate trigger"', app_js)
+        self.assertIn('class="idea-decision-gate invalidation"', app_js)
+        self.assertIn('contenteditable="true" role="textbox" aria-multiline="true"', app_js)
+        self.assertIn('data-idea="${index}"', app_js)
+        self.assertIn(".idea-decision-summary", css)
+        self.assertIn(".idea-decision-body", css)
+        self.assertIn(".idea-decision-gate.invalidation", css)
+
+    def test_investment_views_progressively_disclose_and_split_evidence_layers(self):
+        app_js = FRONTEND_JS
+        css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn("const featured = entries.slice(0, 3);", app_js)
+        self.assertIn("const additional = entries.slice(3);", app_js)
+        self.assertIn('class="idea-more-details diagnostic-details"', app_js)
+        self.assertIn("function ideaEvidenceLayers(idea)", app_js)
+        self.assertIn("function renderIdeaEvidenceStrip(evidence)", app_js)
+        self.assertIn('t("evidence.model")', app_js)
+        self.assertIn('t("evidence.history")', app_js)
+        self.assertIn('t("evidence.execution")', app_js)
+        self.assertIn(".idea-evidence-strip", css)
+        self.assertIn(".idea-evidence-compact", css)
+        self.assertIn(".idea-decision-row.primary-view", css)
+
+    def test_small_text_tokens_meet_aa_contrast_baseline(self):
+        css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
+
+        # These tokens are used by 9.5-12px metadata across the dashboard. The selected
+        # values all exceed 4.5:1 against white, --panel-2 and --bg.
+        for declaration in (
+            "--faint: #6f6b61;",
+            "--accent: #805400;",
+            "--bull: #167048;",
+            "--neutral: #62655c;",
+        ):
+            self.assertIn(declaration, css)
+        self.assertNotIn(".portfolio-overview-layer.tier-unverified { opacity: 0.72; }", css)
+        self.assertNotIn(".global-lppl-index-card.missing {\n  opacity: 0.72;", css)
 
     def test_source_status_modal_exposes_data_coverage(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")

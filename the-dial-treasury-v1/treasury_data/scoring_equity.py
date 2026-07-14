@@ -1,17 +1,36 @@
-"""Equity short-term risk domain extracted from build_dashboard.py (behavior-unchanged,
-2026-06-19 全面重构 Phase 1). 0-100 short-horizon equity risk index from replayable OHLCV factors
-+ backtest/calibration. Depends on lower layers + signal_validation.SortedSeries.
-Re-exported via `from .scoring_equity import *`."""
+"""Short-horizon equity risk scoring from replayable OHLCV factors and backtests."""
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from statistics import median
 from typing import Any
 
 from .sources import CalendarEvent, MarketDailyBar, OptionOpenInterestSnapshot, SeriesPoint, TimeSeries
-from .dashboard_core import *  # noqa: F401,F403
-from .series_math import *  # noqa: F401,F403
-from .signal_validation import SortedSeries
+from .dashboard_core import (
+    average_optional,
+    bounded_score,
+    format_optional_number,
+    format_optional_pct,
+    format_optional_percent_value,
+    format_signed_pct,
+    optional_float,
+    pct_metric,
+    risk_linear,
+)
+from .series_math import (
+    bar_at_or_before,
+    bar_index_at_or_before,
+    close_location_value,
+    drawdown_from_recent_high,
+    high_to_low_drawdown_in_window,
+    moving_average_gap,
+    one_day_return,
+    rebound_from_recent_low,
+    trailing_return,
+    volume_percentile_at,
+)
 
 
 EQUITY_RISK_SYMBOLS: dict[str, str] = {
@@ -44,6 +63,11 @@ EQUITY_RISK_CORE_SYMBOLS = {"SPY", "QQQ", "SMH", "XLK", "TLT", "RSP", "IWM"}
 EQUITY_RISK_HOT_STOCKS = ["NVDA", "AVGO", "AMD", "TSLA", "META", "MSFT", "AAPL", "AMZN", "GOOGL"]
 
 
+PARKINSON_ESTIMATOR_LEGACY_MEAN = "legacyMean"
+PARKINSON_ESTIMATOR_STANDARD_RMS = "standardRms"
+PARKINSON_ESTIMATORS = {PARKINSON_ESTIMATOR_LEGACY_MEAN, PARKINSON_ESTIMATOR_STANDARD_RMS}
+
+
 # 2026-06-16 评审结论: 这三项(optionOI=0/audit-only, eventRisk 0.01, macroOverlay 0.03)并非"冗余/噪声",
 # 而是OOS校准时就刻意保留的低权重"上下文"项, 且高风险regime边界(score>=75)是在含这些项的标度上经OOS审计
 # 锚定的。实测将其归零会把4个"无催化确认"的良性情景推过75(误报回归), 故【保留原权重】, 不在本次精简中动它们;
@@ -59,6 +83,49 @@ EQUITY_RISK_COMPONENT_WEIGHTS: dict[str, float] = {
     "eventRisk": 0.01,
     "optionOI": 0.00,
 }
+
+# Replay/backtest scores must use a stable feature set.  The longest live core
+# input is the 22-session Parkinson window calibrated over 65 realized-vol
+# observations, which needs 86 sessions in total.
+EQUITY_RISK_REPLAY_WARMUP_SESSIONS = 86
+EQUITY_RISK_REPLAY_CORE_COMPONENTS = {
+    "volTargetPressure",
+    "qqqTltRotation",
+    "marketFlow",
+    "sectorRotation",
+    "hotStockReversal",
+    "turnover",
+}
+
+
+@dataclass(frozen=True)
+class EquityAdjustmentContext:
+    high_component_count: int
+    market_score: float
+    sector_score: float
+    hot_stock_score: float
+    turnover_score: float
+    vol_target_score: float
+    qqq_tlt_score: float
+    event_score: float
+    macro_score: float
+    has_event_evidence: bool
+    has_macro_evidence: bool
+    downtrend_score: float
+    downtrend_failed_rebound: float
+    downtrend_relief_rally_trap: float
+    downtrend_sell_pressure: float
+    defensive_gap: float | None
+    spy20_return: float | None
+    spy63_return: float | None
+    qqq63_return: float | None
+    smh63_return: float | None
+    smh_rsp_gap: float | None
+    heavy_reversal_count: float
+    market_volume_percentile: float | None
+    turnover_volume_percentile: float | None
+    close_location: float | None
+    spy_day_return: float | None
 
 
 def build_equity_short_term_risk_index(
@@ -92,12 +159,23 @@ def build_equity_short_term_risk_index(
         option_open_interest=option_open_interest,
     )
     backtest = build_equity_short_term_risk_backtest(trend.get("points", []), spy_bars)
+    volatility_estimator_audit = build_equity_volatility_estimator_audit(
+        bars_by_symbol,
+        target=target,
+        production_signal=signal,
+        production_backtest=backtest,
+        macro_liquidity_equity=macro_liquidity_equity or {},
+        spy_early_warning=spy_early_warning or {},
+        calendar_events=calendar_events or [],
+        option_open_interest=option_open_interest,
+    )
     next_shock = equity_next_session_shock(spy_bars, target)
     signal.update(
         {
             "title": "短期股市风险预警",
             "trend": trend,
             "backtest": backtest,
+            "volatilityEstimatorAudit": volatility_estimator_audit,
             "weightCalibration": equity_weight_calibration_summary(
                 signal.get("components", []) if isinstance(signal.get("components"), list) else [],
                 backtest.get("componentDiagnostics", []) if isinstance(backtest.get("componentDiagnostics"), list) else [],
@@ -106,7 +184,7 @@ def build_equity_short_term_risk_index(
             "lookAheadGuard": {
                 "dataThrough": target.isoformat(),
                 "scoreInputs": "Only same-day or earlier OHLCV, official event calendar, existing macro factors, and option OI snapshots dated on/before the signal date are scored.",
-                "auditOnly": "nextSessionShock is shown to audit the 2026-06-04 pre-close signal and is not used in the score.",
+                "auditOnly": "Post-signal and prior-session shock diagnostics are audit-only and never choose or replace the current score date.",
             },
             "dataCoverage": equity_risk_data_coverage(bars_by_symbol, option_open_interest, target),
         }
@@ -115,8 +193,27 @@ def build_equity_short_term_risk_index(
         signal["detectedPostSignalShock"] = {
             "date": shock.date.isoformat(),
             "returnPct": round(100 * one_day_return(spy_bars, shock.date), 2),
-            "note": "latest SPY bar is a material next-session drawdown, so the panel highlights the prior-session warning state.",
+            "note": "The latest SPY bar is a material drawdown; it remains the current score date rather than outcome-conditioning the panel on the prior session.",
         }
+        prior_date = spy_bars[-2].date if len(spy_bars) >= 2 else None
+        if prior_date is not None:
+            prior_signal = equity_short_term_signal_at(
+                bars_by_symbol,
+                prior_date,
+                macro_liquidity_equity=macro_liquidity_equity or {},
+                spy_early_warning=spy_early_warning or {},
+                calendar_events=calendar_events or [],
+                option_open_interest=option_open_interest,
+            )
+            if prior_signal.get("available"):
+                signal["priorSessionAudit"] = {
+                    "asOf": prior_signal.get("asOf"),
+                    "score": prior_signal.get("score"),
+                    "regime": prior_signal.get("regime"),
+                    "regimeCn": prior_signal.get("regimeCn"),
+                    "allocation": prior_signal.get("allocation"),
+                    "auditOnly": True,
+                }
     return signal
 
 
@@ -126,6 +223,8 @@ def unavailable_equity_short_term_risk(reason: str) -> dict[str, Any]:
         "title": "短期股市风险预警",
         "score": None,
         "baseScore": None,
+        "scoreAdjustments": {},
+        "volatilityEstimatorAudit": {},
         "regime": "Unavailable",
         "regimeCn": "不可用",
         "asOf": "",
@@ -178,9 +277,7 @@ def normalize_market_bars(market_bars: dict[str, list[MarketDailyBar]]) -> dict[
 def choose_equity_risk_signal_date(spy_bars: list[MarketDailyBar]) -> tuple[date, MarketDailyBar | None]:
     latest = spy_bars[-1]
     latest_return = one_day_return(spy_bars, latest.date)
-    if latest_return <= -0.02 and len(spy_bars) >= 2:
-        return spy_bars[-2].date, latest
-    return latest.date, None
+    return latest.date, latest if latest_return is not None and latest_return <= -0.02 else None
 
 
 def equity_short_term_signal_at(
@@ -192,9 +289,15 @@ def equity_short_term_signal_at(
     calendar_events: list[CalendarEvent],
     option_open_interest: OptionOpenInterestSnapshot | None,
     include_macro_overlay: bool = True,
+    parkinson_estimator: str = PARKINSON_ESTIMATOR_LEGACY_MEAN,
 ) -> dict[str, Any]:
     components = [
-        equity_vol_target_pressure_component(bars_by_symbol, target, weight=EQUITY_RISK_COMPONENT_WEIGHTS["volTargetPressure"]),
+        equity_vol_target_pressure_component(
+            bars_by_symbol,
+            target,
+            weight=EQUITY_RISK_COMPONENT_WEIGHTS["volTargetPressure"],
+            estimator=parkinson_estimator,
+        ),
         equity_qqq_tlt_rotation_component(bars_by_symbol, target, weight=EQUITY_RISK_COMPONENT_WEIGHTS["qqqTltRotation"]),
         equity_market_flow_component(bars_by_symbol, target, weight=EQUITY_RISK_COMPONENT_WEIGHTS["marketFlow"]),
         equity_sector_rotation_component(bars_by_symbol, target, weight=EQUITY_RISK_COMPONENT_WEIGHTS["sectorRotation"]),
@@ -224,10 +327,8 @@ def equity_short_term_signal_at(
         return unavailable_equity_short_term_risk("可用短周期股市风险分项不足。")
     weight_total = sum(float(component["weight"]) for component in observed)
     base_score = sum(float(component["score"]) * float(component["weight"]) for component in observed) / weight_total
-    amplifier = equity_convexity_amplifier(observed)
-    dampener = equity_noise_dampener(observed)
-    score_floor = equity_convexity_score_floor(observed)
-    score = bounded_score(max(base_score + amplifier + dampener, score_floor))
+    score_adjustments = equity_score_adjustments(observed, base_score=base_score)
+    score = float(score_adjustments["finalScore"])
     allocation = equity_short_term_risk_allocation(score)
     drivers = equity_short_term_risk_drivers(observed)
     spy_bar = bar_at_or_before(bars_by_symbol.get("SPY", []), target)
@@ -239,6 +340,7 @@ def equity_short_term_signal_at(
         "available": True,
         "score": round(score, 1),
         "baseScore": round(base_score, 1),
+        "scoreAdjustments": score_adjustments,
         "regime": allocation["regime"],
         "regimeCn": allocation["regimeCn"],
         "asOf": target.isoformat(),
@@ -271,19 +373,25 @@ def equity_component_scores_payload(components: list[dict[str, Any]]) -> dict[st
     return payload
 
 
-def equity_vol_target_pressure_component(bars_by_symbol: dict[str, list[MarketDailyBar]], target: date, *, weight: float) -> dict[str, Any]:
+def equity_vol_target_pressure_component(
+    bars_by_symbol: dict[str, list[MarketDailyBar]],
+    target: date,
+    *,
+    weight: float,
+    estimator: str = PARKINSON_ESTIMATOR_LEGACY_MEAN,
+) -> dict[str, Any]:
     qqq_bars = bars_by_symbol.get("QQQ", [])
     spy_bars = bars_by_symbol.get("SPY", [])
-    qqq_vol_22 = annualized_parkinson_vol(qqq_bars, target, 22)
-    spy_vol_22 = annualized_parkinson_vol(spy_bars, target, 22)
+    qqq_vol_22 = annualized_parkinson_vol(qqq_bars, target, 22, estimator=estimator)
+    spy_vol_22 = annualized_parkinson_vol(spy_bars, target, 22, estimator=estimator)
     if qqq_vol_22 is None or spy_vol_22 is None:
         return unavailable_equity_component("volTargetPressure", "多尺度波动目标压力", weight, "QQQ/SPY 22日高低价波动样本不足")
-    qqq_vol_3 = annualized_parkinson_vol(qqq_bars, target, 3)
-    qqq_vol_5 = annualized_parkinson_vol(qqq_bars, target, 5)
-    spy_vol_3 = annualized_parkinson_vol(spy_bars, target, 3)
-    spy_vol_5 = annualized_parkinson_vol(spy_bars, target, 5)
-    qqq_target = adaptive_parkinson_target_vol(qqq_bars, target) or 0.12
-    spy_target = adaptive_parkinson_target_vol(spy_bars, target) or 0.12
+    qqq_vol_3 = annualized_parkinson_vol(qqq_bars, target, 3, estimator=estimator)
+    qqq_vol_5 = annualized_parkinson_vol(qqq_bars, target, 5, estimator=estimator)
+    spy_vol_3 = annualized_parkinson_vol(spy_bars, target, 3, estimator=estimator)
+    spy_vol_5 = annualized_parkinson_vol(spy_bars, target, 5, estimator=estimator)
+    qqq_target = adaptive_parkinson_target_vol(qqq_bars, target, estimator=estimator) or 0.12
+    spy_target = adaptive_parkinson_target_vol(spy_bars, target, estimator=estimator) or 0.12
     qqq_pressure = qqq_vol_22 / max(qqq_target, 1e-6)
     spy_pressure = spy_vol_22 / max(spy_target, 1e-6)
     burst_values = [
@@ -324,6 +432,7 @@ def equity_vol_target_pressure_component(bars_by_symbol: dict[str, list[MarketDa
         f"QQQ 22D Parkinson vol {format_optional_percent_value(pct_metric(qqq_vol_22))} vs target {format_optional_percent_value(pct_metric(qqq_target))}; 3/5/22D burst {burst_ratio:.2f}x",
         drivers=drivers,
         metrics={
+            "estimator": estimator,
             "qqqParkinsonVol3d": pct_metric(qqq_vol_3),
             "qqqParkinsonVol5d": pct_metric(qqq_vol_5),
             "qqqParkinsonVol22d": pct_metric(qqq_vol_22),
@@ -405,7 +514,9 @@ def equity_market_flow_component(bars_by_symbol: dict[str, list[MarketDailyBar]]
     spy_20 = trailing_return(bars_by_symbol.get("SPY", []), target, 20)
     qqq_63 = trailing_return(bars_by_symbol.get("QQQ", []), target, 63)
     smh_63 = trailing_return(bars_by_symbol.get("SMH", []), target, 63)
-    values = [value for value in (spy_63, qqq_63, smh_63) if value is not None]
+    # The downside/fragility sleeve is a genuine 20-day factor. Do not suppress it
+    # merely because the longer 63-day extension sleeve has not accumulated yet.
+    values = [value for value in (spy_20, spy_63, qqq_63, smh_63) if value is not None]
     if not values:
         return unavailable_equity_component("marketFlow", "股市资金/趋势", weight, "SPY/QQQ/SMH日线不足")
     spy_score = risk_linear(spy_63, 0.04, 0.12) if spy_63 is not None else 50.0
@@ -757,7 +868,14 @@ def equity_macro_overlay_component(
     spy_score = optional_float(spy_early_warning.get("score"))
     current_signal = macro_liquidity_equity.get("currentSignal", {}) if isinstance(macro_liquidity_equity, dict) else {}
     score3m_change = optional_float(current_signal.get("score3mChange")) if isinstance(current_signal, dict) else None
-    raw_score = spy_score if spy_score is not None else 45.0
+    if spy_score is None and score3m_change is None:
+        return unavailable_equity_component(
+            "macroOverlay",
+            "已有宏观因子叠加",
+            weight,
+            "缺少同日SPY预警或宏观评分变化,未知状态不作为低风险确认。",
+        )
+    raw_score = spy_score if spy_score is not None else 50.0
     score = raw_score
     if score3m_change is not None and score3m_change > 6:
         score = max(score, 52.0)
@@ -1144,6 +1262,8 @@ def equity_weight_calibration_summary(
                 "historicalReplay": replayable,
                 "diagnosticDecision": decision,
                 "diagnosticDecisionCn": str(diagnostic.get("decisionCn") or calibrated_role_cn) if isinstance(diagnostic, dict) else calibrated_role_cn,
+                "diagnosticSampleRole": str(diagnostic.get("sampleRole") or "unavailable") if isinstance(diagnostic, dict) else "unavailable",
+                "diagnosticProductionUse": bool(diagnostic.get("productionUse")) if isinstance(diagnostic, dict) else False,
                 "calibratedRole": calibrated_role,
                 "calibratedRoleCn": calibrated_role_cn,
                 "precision": round(precision, 1) if precision is not None else None,
@@ -1164,15 +1284,18 @@ def equity_weight_calibration_summary(
         reverse=True,
     )
     summary = (
-        f"按历史分项诊断重配: 验证保留{validated_weight / denominator * 100:.1f}%权重,"
+        f"只读历史审计映射: 验证保留{validated_weight / denominator * 100:.1f}%配置权重,"
         f"降权/审计{downweighted_weight / denominator * 100:.1f}%,"
-        f"背景{context_weight / denominator * 100:.1f}%。"
+        f"背景{context_weight / denominator * 100:.1f}%; 本次审计不动态改写生产权重。"
     )
     if downweighted:
         summary += " 最大降权: " + "、".join(str(row.get("label") or row.get("component")) for row in downweighted[:2]) + "。"
     return {
         "available": bool(rows),
-        "basis": "componentDiagnostics from the current historical replay backtest; low-replay or weak standalone factors are kept low-weight instead of dominating the score.",
+        "basis": "Read-only componentDiagnostics from the walk-forward OOS slice when available. Configured production weights remain fixed and are not recalibrated from this same backtest.",
+        "productionWeightsChanged": False,
+        "productionUse": False,
+        "validationStatus": "research-validation",
         "summary": summary,
         "validatedWeightPct": round(validated_weight / denominator * 100, 1),
         "downweightedWeightPct": round(downweighted_weight / denominator * 100, 1),
@@ -1223,285 +1346,296 @@ def equity_short_term_risk_drivers(components: list[dict[str, Any]]) -> list[dic
     return sorted(drivers, key=lambda item: optional_float(item.get("riskScore")) or 0.0, reverse=True)[:6]
 
 
-def equity_convexity_amplifier(components: list[dict[str, Any]]) -> float:
-    high_components = [component for component in components if optional_float(component.get("score")) is not None and float(component["score"]) >= 75]
-    amplifier = 0.0
-    if len(high_components) >= 4:
-        amplifier += 5.0
-    elif len(high_components) >= 3:
-        amplifier += 3.0
-    downtrend_score = 0.0
-    downtrend_failed_rebound = 0.0
-    hot_stock_score = 0.0
-    market_flow_score = 0.0
-    sector_score = 0.0
-    qqq_tlt_score = 0.0
-    vol_target_score = 0.0
-    turnover_score = 0.0
-    event_score = 0.0
-    spy20_return = None
-    for component in components:
-        key = component.get("key")
-        if key == "marketFlow":
-            market_flow_score = optional_float(component.get("score")) or 0.0
-            metrics = component.get("metrics") if isinstance(component.get("metrics"), dict) else {}
-            downtrend_score = optional_float(metrics.get("downtrendFragilityScore")) or 0.0
-            downtrend_failed_rebound = optional_float(metrics.get("downtrendFailedReboundScore")) or 0.0
-            spy20_return = optional_float(metrics.get("spy20dReturn"))
-        elif key == "hotStockReversal":
-            hot_stock_score = optional_float(component.get("score")) or 0.0
-        elif key == "sectorRotation":
-            sector_score = optional_float(component.get("score")) or 0.0
-        elif key == "qqqTltRotation":
-            qqq_tlt_score = optional_float(component.get("score")) or 0.0
-        elif key == "volTargetPressure":
-            vol_target_score = optional_float(component.get("score")) or 0.0
-        elif key == "turnover":
-            turnover_score = optional_float(component.get("score")) or 0.0
-        elif key == "eventRisk":
-            event_score = optional_float(component.get("score")) or 0.0
-    if (
-        sector_score >= 85
-        and hot_stock_score >= 85
-        and market_flow_score >= 70
-        and max(qqq_tlt_score, vol_target_score) >= 75
-    ):
-        amplifier += 4.0
-    if (
-        sector_score >= 90
-        and hot_stock_score >= 90
-        and market_flow_score >= 80
-        and qqq_tlt_score >= 80
-        and event_score >= 78
-    ):
-        amplifier += 4.0
-    if (
-        sector_score >= 95
-        and hot_stock_score >= 95
-        and market_flow_score >= 88
-        and qqq_tlt_score >= 75
-        and turnover_score >= 75
-    ):
-        amplifier += 14.0
-    if downtrend_score >= 75 and max(hot_stock_score, turnover_score) >= 70:
-        amplifier += 8.0
-    elif downtrend_score >= 75:
-        amplifier += 5.0
-    if (
-        downtrend_score >= 85
-        and hot_stock_score >= 90
-        and turnover_score >= 80
-        and (spy20_return is None or spy20_return <= 0.0)
-    ):
-        amplifier += 2.0
-    if downtrend_score >= 85 and downtrend_failed_rebound > 0:
-        amplifier += 10.0
-    return amplifier
-
-
-def equity_noise_dampener(components: list[dict[str, Any]]) -> float:
+def equity_adjustment_context(components: list[dict[str, Any]]) -> EquityAdjustmentContext:
     scores: dict[str, float] = {}
-    market_metrics: dict[str, Any] = {}
-    sector_metrics: dict[str, Any] = {}
-    hot_metrics: dict[str, Any] = {}
-    turnover_metrics: dict[str, Any] = {}
+    metrics_by_key: dict[str, dict[str, Any]] = {}
     for component in components:
         key = str(component.get("key") or "")
         score = optional_float(component.get("score"))
-        if score is not None:
+        if key and score is not None:
             scores[key] = score
-        if key == "marketFlow" and isinstance(component.get("metrics"), dict):
-            market_metrics = component["metrics"]
-        elif key == "sectorRotation" and isinstance(component.get("metrics"), dict):
-            sector_metrics = component["metrics"]
-        elif key == "hotStockReversal" and isinstance(component.get("metrics"), dict):
-            hot_metrics = component["metrics"]
-        elif key == "turnover" and isinstance(component.get("metrics"), dict):
-            turnover_metrics = component["metrics"]
-    market_score = scores.get("marketFlow", 0.0)
-    sector_score = scores.get("sectorRotation", 0.0)
-    hot_stock_score = scores.get("hotStockReversal", 0.0)
-    turnover_score = scores.get("turnover", 0.0)
-    vol_target_score = scores.get("volTargetPressure", 0.0)
-    qqq_tlt_score = scores.get("qqqTltRotation", 0.0)
-    event_score = scores.get("eventRisk", 0.0)
-    macro_score = scores.get("macroOverlay", 0.0)
-    downtrend_score = optional_float(market_metrics.get("downtrendFragilityScore")) or 0.0
-    downtrend_sell_pressure = optional_float(market_metrics.get("downtrendSellPressureScore")) or 0.0
-    defensive_gap = optional_float(market_metrics.get("defensiveGap20d"))
-    spy20_return = optional_float(market_metrics.get("spy20dReturn"))
-    spy63_return = optional_float(market_metrics.get("spy63dReturn"))
-    qqq63_return = optional_float(market_metrics.get("qqq63dReturn"))
-    smh63_return = optional_float(market_metrics.get("smh63dReturn"))
-    smh_rsp_gap = optional_float(sector_metrics.get("smhRspGap"))
-    heavy_reversal_count = optional_float(hot_metrics.get("heavyReversalCount")) or 0.0
-    volume_pct = optional_float(turnover_metrics.get("volumePercentile"))
-    close_location = optional_float(turnover_metrics.get("closeLocation"))
-    spy_day_return = optional_float(turnover_metrics.get("spyDayReturn"))
+        metrics = component.get("metrics")
+        if key and isinstance(metrics, dict):
+            metrics_by_key[key] = metrics
+    market_metrics = metrics_by_key.get("marketFlow", {})
+    sector_metrics = metrics_by_key.get("sectorRotation", {})
+    hot_metrics = metrics_by_key.get("hotStockReversal", {})
+    turnover_metrics = metrics_by_key.get("turnover", {})
+    return EquityAdjustmentContext(
+        high_component_count=sum(1 for score in scores.values() if score >= 75),
+        market_score=scores.get("marketFlow", 0.0),
+        sector_score=scores.get("sectorRotation", 0.0),
+        hot_stock_score=scores.get("hotStockReversal", 0.0),
+        turnover_score=scores.get("turnover", 0.0),
+        vol_target_score=scores.get("volTargetPressure", 0.0),
+        qqq_tlt_score=scores.get("qqqTltRotation", 0.0),
+        event_score=scores.get("eventRisk", 0.0),
+        macro_score=scores.get("macroOverlay", 0.0),
+        has_event_evidence="eventRisk" in scores,
+        has_macro_evidence="macroOverlay" in scores,
+        downtrend_score=optional_float(market_metrics.get("downtrendFragilityScore")) or 0.0,
+        downtrend_failed_rebound=optional_float(market_metrics.get("downtrendFailedReboundScore")) or 0.0,
+        downtrend_relief_rally_trap=optional_float(market_metrics.get("downtrendReliefRallyTrapScore")) or 0.0,
+        downtrend_sell_pressure=optional_float(market_metrics.get("downtrendSellPressureScore")) or 0.0,
+        defensive_gap=optional_float(market_metrics.get("defensiveGap20d")),
+        spy20_return=optional_float(market_metrics.get("spy20dReturn")),
+        spy63_return=optional_float(market_metrics.get("spy63dReturn")),
+        qqq63_return=optional_float(market_metrics.get("qqq63dReturn")),
+        smh63_return=optional_float(market_metrics.get("smh63dReturn")),
+        smh_rsp_gap=optional_float(sector_metrics.get("smhRspGap")),
+        heavy_reversal_count=optional_float(hot_metrics.get("heavyReversalCount")) or 0.0,
+        market_volume_percentile=optional_float(market_metrics.get("spyVolumePercentile")),
+        turnover_volume_percentile=optional_float(turnover_metrics.get("volumePercentile")),
+        close_location=optional_float(turnover_metrics.get("closeLocation")),
+        spy_day_return=optional_float(turnover_metrics.get("spyDayReturn")),
+    )
+
+
+def equity_adjustment_rule(key: str, label: str, kind: str, value: float) -> dict[str, Any]:
+    value_key = {"amplifier": "scoreBoost", "dampener": "scoreOffset", "floor": "scoreFloor"}[kind]
+    return {"key": key, "label": label, "kind": kind, value_key: round(value, 1)}
+
+
+def equity_adjustment_result(value: float, rules: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"value": round(value, 1), "rules": rules}
+
+
+def equity_convexity_amplifier_result(context: EquityAdjustmentContext) -> dict[str, Any]:
+    rules: list[dict[str, Any]] = []
+    if context.high_component_count >= 4:
+        rules.append(equity_adjustment_rule("broadHighRiskBreadth", "多因子高风险共振", "amplifier", 5.0))
+    elif context.high_component_count >= 3:
+        rules.append(equity_adjustment_rule("highRiskBreadth", "三因子高风险共振", "amplifier", 3.0))
     if (
-        sector_score >= 85
-        and hot_stock_score >= 85
-        and market_score >= 75
-        and qqq_tlt_score >= 75
-        and vol_target_score < 50
-        and downtrend_score < 50
-        and event_score < 60
-        and macro_score < 60
+        context.sector_score >= 85
+        and context.hot_stock_score >= 85
+        and context.market_score >= 70
+        and max(context.qqq_tlt_score, context.vol_target_score) >= 75
     ):
-        return -14.0
+        rules.append(equity_adjustment_rule("confirmedRotationBreak", "轮动与波动共同确认", "amplifier", 4.0))
     if (
-        sector_score < 50
-        and market_score >= 85
-        and hot_stock_score >= 85
-        and max(vol_target_score, qqq_tlt_score) >= 85
-        and turnover_score >= 75
-        and event_score < 60
-        and macro_score < 60
+        context.sector_score >= 90
+        and context.hot_stock_score >= 90
+        and context.market_score >= 80
+        and context.qqq_tlt_score >= 80
+        and context.has_event_evidence
+        and context.event_score >= 78
     ):
-        return -25.0
+        rules.append(equity_adjustment_rule("eventConfirmedRotation", "事件窗口确认轮动压力", "amplifier", 4.0))
     if (
-        market_score >= 85
-        and hot_stock_score >= 85
-        and downtrend_score < 50
-        and event_score < 60
-        and macro_score < 60
+        context.sector_score >= 95
+        and context.hot_stock_score >= 95
+        and context.market_score >= 88
+        and context.qqq_tlt_score >= 75
+        and context.turnover_score >= 75
     ):
-        return -8.0
+        rules.append(equity_adjustment_rule("broadCapitulation", "广泛抛压共振", "amplifier", 14.0))
+    if context.downtrend_score >= 75 and max(context.hot_stock_score, context.turnover_score) >= 70:
+        rules.append(equity_adjustment_rule("confirmedDowntrend", "趋势破位获得抛压确认", "amplifier", 8.0))
+    elif context.downtrend_score >= 75:
+        rules.append(equity_adjustment_rule("downtrendBreak", "趋势破位", "amplifier", 5.0))
     if (
-        downtrend_score >= 75
-        and downtrend_sell_pressure >= 78
-        and hot_stock_score >= 85
-        and heavy_reversal_count <= 2
-        and turnover_score >= 80
-        and volume_pct is not None
-        and volume_pct >= 85
-        and close_location is not None
-        and close_location <= 0.20
-        and spy_day_return is not None
-        and spy_day_return <= -0.8
-        and defensive_gap is not None
-        and defensive_gap >= 5.0
-        and smh_rsp_gap is not None
-        and smh_rsp_gap >= 8.0
-        and event_score < 60
-        and macro_score < 60
+        context.downtrend_score >= 85
+        and context.hot_stock_score >= 90
+        and context.turnover_score >= 80
+        and (context.spy20_return is None or context.spy20_return <= 0.0)
     ):
-        return -18.0
+        rules.append(equity_adjustment_rule("broadSelloff", "热点与成交确认广泛抛售", "amplifier", 2.0))
+    if context.downtrend_score >= 85 and context.downtrend_failed_rebound > 0:
+        rules.append(equity_adjustment_rule("failedRebound", "破位后反弹失败", "amplifier", 10.0))
+    return equity_adjustment_result(sum(float(rule["scoreBoost"]) for rule in rules), rules)
+
+
+def equity_convexity_amplifier(components: list[dict[str, Any]]) -> float:
+    result = equity_convexity_amplifier_result(equity_adjustment_context(components))
+    return float(result["value"])
+
+
+def equity_noise_dampener_result(context: EquityAdjustmentContext) -> dict[str, Any]:
+    def dampen(key: str, label: str, offset: float) -> dict[str, Any]:
+        rule = equity_adjustment_rule(key, label, "dampener", offset)
+        return equity_adjustment_result(offset, [rule])
+
+    low_event_evidence = context.has_event_evidence and context.event_score < 60
+    low_macro_evidence = context.has_macro_evidence and context.macro_score < 60
+    low_catalyst_evidence = low_event_evidence and low_macro_evidence
+
     if (
-        market_score < 75
-        and downtrend_score < 50
-        and sector_score >= 80
-        and hot_stock_score >= 90
-        and turnover_score >= 75
-        and event_score < 60
-        and macro_score < 60
+        context.sector_score >= 85
+        and context.hot_stock_score >= 85
+        and context.market_score >= 75
+        and context.qqq_tlt_score >= 75
+        and context.vol_target_score < 50
+        and context.downtrend_score < 50
+        and low_catalyst_evidence
     ):
-        return -18.0
+        return dampen("rotationWithoutVolConfirmation", "轮动缺少波动与趋势确认", -14.0)
     if (
-        downtrend_sell_pressure >= 78
-        and hot_stock_score >= 85
-        and turnover_score >= 80
-        and qqq_tlt_score < 60
-        and vol_target_score < 70
-        and sector_score < 70
-        and spy63_return is not None
-        and spy63_return > -2.0
-        and qqq63_return is not None
-        and qqq63_return > -3.0
-        and smh63_return is not None
-        and smh63_return > -3.0
-        and event_score < 60
-        and macro_score < 60
+        context.sector_score < 50
+        and context.market_score >= 85
+        and context.hot_stock_score >= 85
+        and max(context.vol_target_score, context.qqq_tlt_score) >= 85
+        and context.turnover_score >= 75
+        and low_catalyst_evidence
     ):
-        return -18.0
+        return dampen("narrowStressWithoutBreadth", "高压但缺少板块广度", -25.0)
     if (
-        downtrend_sell_pressure >= 78
-        and hot_stock_score >= 85
-        and turnover_score >= 80
-        and spy_day_return is not None
-        and spy_day_return > -1.0
-        and event_score < 60
-        and macro_score < 60
+        context.market_score >= 85
+        and context.hot_stock_score >= 85
+        and context.downtrend_score < 50
+        and low_catalyst_evidence
     ):
-        return -14.0
+        return dampen("extensionWithoutCatalyst", "上涨扩张缺少破位与催化确认", -8.0)
     if (
-        downtrend_sell_pressure >= 78
-        and spy20_return is not None
-        and spy20_return > 0.0
-        and smh63_return is not None
-        and smh63_return <= -10.0
-        and event_score < 60
-        and macro_score < 60
+        context.downtrend_score >= 75
+        and context.downtrend_sell_pressure >= 78
+        and context.hot_stock_score >= 85
+        and context.heavy_reversal_count <= 2
+        and context.turnover_score >= 80
+        and context.turnover_volume_percentile is not None
+        and context.turnover_volume_percentile >= 85
+        and context.close_location is not None
+        and context.close_location <= 0.20
+        and context.spy_day_return is not None
+        and context.spy_day_return <= -0.8
+        and context.defensive_gap is not None
+        and context.defensive_gap >= 5.0
+        and context.smh_rsp_gap is not None
+        and context.smh_rsp_gap >= 8.0
+        and low_catalyst_evidence
     ):
-        return -18.0
+        return dampen("capitulationWashout", "放量低收后的宣泄性抛售", -18.0)
     if (
-        downtrend_sell_pressure >= 78
-        and heavy_reversal_count <= 1
-        and defensive_gap is not None
-        and defensive_gap <= 3.0
-        and smh_rsp_gap is not None
-        and smh_rsp_gap <= 0.0
-        and smh63_return is not None
-        and smh63_return <= 5.0
-        and event_score < 60
-        and macro_score < 60
+        context.market_score < 75
+        and context.downtrend_score < 50
+        and context.sector_score >= 80
+        and context.hot_stock_score >= 90
+        and context.turnover_score >= 75
+        and low_catalyst_evidence
     ):
-        return -18.0
+        return dampen("hotRotationWithoutMarketFlow", "热点回落缺少大盘趋势确认", -18.0)
     if (
-        event_score >= 78
-        and market_score < 75
-        and downtrend_score < 50
-        and turnover_score < 80
-        and heavy_reversal_count <= 1
+        context.downtrend_sell_pressure >= 78
+        and context.hot_stock_score >= 85
+        and context.turnover_score >= 80
+        and context.qqq_tlt_score < 60
+        and context.vol_target_score < 70
+        and context.sector_score < 70
+        and context.spy63_return is not None
+        and context.spy63_return > -2.0
+        and context.qqq63_return is not None
+        and context.qqq63_return > -3.0
+        and context.smh63_return is not None
+        and context.smh63_return > -3.0
+        and low_catalyst_evidence
     ):
-        return -14.0
+        return dampen("aftershockWithoutBroadStress", "短线余震缺少中期扩散", -18.0)
     if (
-        downtrend_score >= 80
-        and downtrend_sell_pressure <= 5
-        and hot_stock_score >= 80
-        and turnover_score >= 80
-        and volume_pct is not None
-        and volume_pct >= 85
-        and close_location is not None
-        and close_location <= 0.40
-        and spy_day_return is not None
-        and spy_day_return > -0.8
-        and defensive_gap is not None
-        and defensive_gap >= 12.0
-        and smh_rsp_gap is not None
-        and smh_rsp_gap <= 0.0
-        and event_score < 60
-        and macro_score < 60
+        context.downtrend_sell_pressure >= 78
+        and context.hot_stock_score >= 85
+        and context.turnover_score >= 80
+        and context.spy_day_return is not None
+        and context.spy_day_return > -1.0
+        and low_catalyst_evidence
     ):
-        return -14.0
-    return 0.0
+        return dampen("shallowDistribution", "浅跌分配缺少催化确认", -14.0)
+    if (
+        context.downtrend_sell_pressure >= 78
+        and context.spy20_return is not None
+        and context.spy20_return > 0.0
+        and context.smh63_return is not None
+        and context.smh63_return <= -10.0
+        and low_catalyst_evidence
+    ):
+        return dampen("sectorSpecificSemiconductorSlump", "半导体下跌未扩散至SPY", -18.0)
+    if (
+        context.downtrend_sell_pressure >= 78
+        and context.heavy_reversal_count <= 1
+        and context.defensive_gap is not None
+        and context.defensive_gap <= 3.0
+        and context.smh_rsp_gap is not None
+        and context.smh_rsp_gap <= 0.0
+        and context.smh63_return is not None
+        and context.smh63_return <= 5.0
+        and low_catalyst_evidence
+    ):
+        return dampen("lightHotDamageWithoutBreadth", "热点受损较轻且缺少防御扩散", -18.0)
+    if (
+        context.has_event_evidence
+        and context.event_score >= 78
+        and context.market_score < 75
+        and context.downtrend_score < 50
+        and context.turnover_score < 80
+        and context.heavy_reversal_count <= 1
+    ):
+        return dampen("eventWatchWithoutMarketConfirmation", "事件窗口缺少市场确认", -14.0)
+    if (
+        context.downtrend_score >= 80
+        and context.downtrend_sell_pressure <= 5
+        and context.hot_stock_score >= 80
+        and context.turnover_score >= 80
+        and context.turnover_volume_percentile is not None
+        and context.turnover_volume_percentile >= 85
+        and context.close_location is not None
+        and context.close_location <= 0.40
+        and context.spy_day_return is not None
+        and context.spy_day_return > -0.8
+        and context.defensive_gap is not None
+        and context.defensive_gap >= 12.0
+        and context.smh_rsp_gap is not None
+        and context.smh_rsp_gap <= 0.0
+        and low_catalyst_evidence
+    ):
+        return dampen("repairRallyAfterWashout", "深跌后的修复性反弹", -14.0)
+    return equity_adjustment_result(0.0, [])
+
+
+def equity_noise_dampener(components: list[dict[str, Any]]) -> float:
+    result = equity_noise_dampener_result(equity_adjustment_context(components))
+    return float(result["value"])
+
+
+def equity_convexity_score_floor_result(context: EquityAdjustmentContext) -> dict[str, Any]:
+    low_volume_unresolved = (
+        context.market_volume_percentile is not None
+        and context.market_volume_percentile <= 55.0
+        and context.defensive_gap is not None
+        and context.defensive_gap <= 4.0
+    )
+    if context.downtrend_relief_rally_trap >= 90 and low_volume_unresolved:
+        rule = equity_adjustment_rule("unresolvedReliefTrap", "低量弱反弹风险下限", "floor", 75.0)
+        return equity_adjustment_result(75.0, [rule])
+    if context.downtrend_relief_rally_trap >= 78:
+        rule = equity_adjustment_rule("severeReliefTrap", "严重弱反弹风险下限", "floor", 68.0)
+        return equity_adjustment_result(68.0, [rule])
+    if context.downtrend_relief_rally_trap >= 68:
+        rule = equity_adjustment_rule("reliefTrap", "弱反弹风险下限", "floor", 60.0)
+        return equity_adjustment_result(60.0, [rule])
+    return equity_adjustment_result(0.0, [])
 
 
 def equity_convexity_score_floor(components: list[dict[str, Any]]) -> float:
-    relief_trap_score = 0.0
-    volume_pct = None
-    defensive_gap = None
-    for component in components:
-        if component.get("key") != "marketFlow":
-            continue
-        metrics = component.get("metrics") if isinstance(component.get("metrics"), dict) else {}
-        relief_trap_score = optional_float(metrics.get("downtrendReliefRallyTrapScore")) or 0.0
-        volume_pct = optional_float(metrics.get("spyVolumePercentile"))
-        defensive_gap = optional_float(metrics.get("defensiveGap20d"))
-        break
-    low_volume_unresolved = (
-        volume_pct is not None
-        and volume_pct <= 55.0
-        and defensive_gap is not None
-        and defensive_gap <= 4.0
-    )
-    if relief_trap_score >= 90 and low_volume_unresolved:
-        return 75.0
-    if relief_trap_score >= 78:
-        return 68.0
-    if relief_trap_score >= 68:
-        return 60.0
-    return 0.0
+    result = equity_convexity_score_floor_result(equity_adjustment_context(components))
+    return float(result["value"])
+
+
+def equity_score_adjustments(components: list[dict[str, Any]], *, base_score: float) -> dict[str, Any]:
+    context = equity_adjustment_context(components)
+    amplifier = equity_convexity_amplifier_result(context)
+    dampener = equity_noise_dampener_result(context)
+    score_floor = equity_convexity_score_floor_result(context)
+    adjusted_before_floor = base_score + float(amplifier["value"]) + float(dampener["value"])
+    final_score = bounded_score(max(adjusted_before_floor, float(score_floor["value"])))
+    return {
+        "baseScore": round(base_score, 1),
+        "amplifier": float(amplifier["value"]),
+        "dampener": float(dampener["value"]),
+        "scoreFloor": float(score_floor["value"]),
+        "adjustedBeforeFloor": round(adjusted_before_floor, 1),
+        "floorApplied": float(score_floor["value"]) > adjusted_before_floor,
+        "finalScore": round(final_score, 1),
+        "rules": [*amplifier["rules"], *dampener["rules"], *score_floor["rules"]],
+    }
 
 
 def equity_short_term_risk_allocation(score: float) -> dict[str, Any]:
@@ -1562,14 +1696,19 @@ def build_equity_short_term_risk_trend(
     spy_early_warning: dict[str, Any],
     calendar_events: list[CalendarEvent],
     option_open_interest: OptionOpenInterestSnapshot | None,
+    parkinson_estimator: str = PARKINSON_ESTIMATOR_LEGACY_MEAN,
 ) -> dict[str, Any]:
     spy_bars = bars_by_symbol.get("SPY", [])
-    if len(spy_bars) < 20:
-        return {"available": False, "points": [], "summary": "SPY日线样本不足"}
+    if len(spy_bars) < EQUITY_RISK_REPLAY_WARMUP_SESSIONS:
+        return {
+            "available": False,
+            "points": [],
+            "warmupSessions": EQUITY_RISK_REPLAY_WARMUP_SESSIONS,
+            "summary": "SPY日线尚未满足稳定特征回放的86个交易日预热期",
+        }
     points: list[dict[str, Any]] = []
-    for bar in spy_bars:
-        if len([item for item in spy_bars if item.date <= bar.date]) < 20:
-            continue
+    excluded_incomplete_core = 0
+    for bar in spy_bars[EQUITY_RISK_REPLAY_WARMUP_SESSIONS - 1:]:
         snapshot = equity_short_term_signal_at(
             bars_by_symbol,
             bar.date,
@@ -1578,10 +1717,17 @@ def build_equity_short_term_risk_trend(
             calendar_events=calendar_events,
             option_open_interest=option_open_interest,
             include_macro_overlay=False,
+            parkinson_estimator=parkinson_estimator,
         )
         if not snapshot.get("available"):
             continue
         allocation = snapshot.get("allocation") if isinstance(snapshot.get("allocation"), dict) else {}
+        component_scores = equity_component_scores_payload(
+            snapshot.get("components", []) if isinstance(snapshot.get("components"), list) else []
+        )
+        if not EQUITY_RISK_REPLAY_CORE_COMPONENTS.issubset(component_scores):
+            excluded_incomplete_core += 1
+            continue
         points.append(
             {
                 "date": bar.date.isoformat(),
@@ -1591,12 +1737,17 @@ def build_equity_short_term_risk_trend(
                 "spyClose": round(bar.close, 2),
                 "spyDayReturn": pct_metric(one_day_return(spy_bars, bar.date)),
                 "stance": str(allocation.get("stance") or ""),
-                "componentScores": equity_component_scores_payload(
-                    snapshot.get("components", []) if isinstance(snapshot.get("components"), list) else []
-                ),
+                "componentScores": component_scores,
             }
         )
-    return {"available": bool(points), "summary": "短周期股市风险日度回放; 高分表示未来1-10个交易日回撤风险升高。", "points": points}
+    return {
+        "available": bool(points),
+        "warmupSessions": EQUITY_RISK_REPLAY_WARMUP_SESSIONS,
+        "requiredCoreComponents": sorted(EQUITY_RISK_REPLAY_CORE_COMPONENTS),
+        "excludedIncompleteCoreSnapshots": excluded_incomplete_core,
+        "summary": "短周期股市风险日度回放; 仅保留完成86日预热且六个核心分项齐备的同口径评分。",
+        "points": points,
+    }
 
 
 def build_equity_short_term_risk_backtest(
@@ -1665,9 +1816,10 @@ def build_equity_short_term_risk_backtest(
             observation[f"forward{target_horizon}d"] = equity_forward_return_pct(clean_bars, index, target_horizon)
             max_drawdown = equity_forward_max_drawdown_pct(clean_bars, index, target_horizon)
             observation[f"maxDrawdown{target_horizon}d"] = max_drawdown
-            observation[f"drawdownEvent{target_horizon}d"] = bool(
-                max_drawdown is not None
-                and float(max_drawdown) <= drawdown_threshold_pct
+            observation[f"drawdownEvent{target_horizon}d"] = (
+                float(max_drawdown) <= drawdown_threshold_pct
+                if max_drawdown is not None
+                else None
             )
             observation[f"drawdownLeadDays{target_horizon}d"] = equity_forward_drawdown_lead_days(
                 clean_bars,
@@ -1675,7 +1827,13 @@ def build_equity_short_term_risk_backtest(
                 target_horizon,
                 drawdown_threshold_pct,
             )
+            observation[f"labelEndDate{target_horizon}d"] = (
+                clean_bars[index + target_horizon].date.isoformat()
+                if index + target_horizon < len(clean_bars)
+                else None
+            )
         observations.append(observation)
+    observations.sort(key=lambda row: str(row.get("date") or ""))
     if not observations:
         return {
             "available": False,
@@ -1701,16 +1859,45 @@ def build_equity_short_term_risk_backtest(
         ("Caution", "警戒", 60.0, 75.0),
         ("Strong Alert", "强告警", 75.0, 100.0001),
     ]
+    preferred_observations = [
+        row
+        for row in observations
+        if optional_float(row.get(f"maxDrawdown{preferred_horizon}d")) is not None
+    ]
+    if not preferred_observations:
+        return {
+            "available": False,
+            "summary": f"风险回放没有完整的{preferred_horizon}交易日前瞻窗口。",
+            "sampleSize": 0,
+            "scoreBuckets": [],
+            "thresholdTests": [],
+            "horizonTests": [],
+            "tieredThresholdTests": [],
+            "calibrationGrid": [],
+            "recommendedCautionThreshold": {},
+            "precisionThresholdTests": [],
+            "highPrecisionThresholdTest": {},
+            "componentDiagnostics": [],
+            "preferredThresholdTest": {},
+            "alertClusterTest": {},
+            "regressionTests": [],
+            "worstWindows": [],
+            "alertWindows": [],
+        }
     score_buckets = [
         equity_backtest_bucket(label, label_cn, low, high, observations, drawdown_threshold_pct)
         for label, label_cn, low, high in buckets
     ]
     threshold_tests = [
-        equity_backtest_threshold_test(threshold, observations, drawdown_threshold_pct, horizon=horizon)
+        equity_descriptive_test_row(
+            equity_backtest_threshold_test(threshold, observations, drawdown_threshold_pct, horizon=horizon)
+        )
         for threshold in (40, 60, 75)
     ]
     horizon_tests = [
-        equity_backtest_threshold_test(threshold, observations, drawdown_threshold_pct, horizon=target_horizon)
+        equity_descriptive_test_row(
+            equity_backtest_threshold_test(threshold, observations, drawdown_threshold_pct, horizon=target_horizon)
+        )
         for target_horizon in (5, horizon, preferred_horizon)
         for threshold in (40, 60, 75)
     ]
@@ -1722,20 +1909,41 @@ def build_equity_short_term_risk_backtest(
         equity_backtest_threshold_test(threshold, observations, drawdown_threshold_pct, horizon=preferred_horizon)
         for threshold in (75, 78, 80, 82, 85, 88, 90)
     ]
-    component_diagnostics = equity_backtest_component_diagnostics(
-        observations,
-        drawdown_threshold_pct,
-        horizon=preferred_horizon,
-    )
     tiered_threshold_tests = equity_backtest_tiered_threshold_tests(horizon_tests, horizon=preferred_horizon)
-    recommended_caution_threshold = equity_recommended_caution_threshold(calibration_grid)
-    high_precision_threshold_test = equity_high_precision_threshold(precision_threshold_tests)
     walk_forward = equity_walk_forward_backtest(
         observations,
         drawdown_threshold_pct,
         horizon=preferred_horizon,
     )
+    recommended_caution_threshold = equity_walk_forward_recommendation(
+        walk_forward,
+        key="recommendedCautionThreshold",
+        label="推荐观察阈值",
+        label_en="Recommended Caution Threshold",
+    )
+    high_precision_threshold_test = equity_walk_forward_recommendation(
+        walk_forward,
+        key="highPrecisionThresholdTest",
+        label="高精度强告警阈值",
+        label_en="High-Precision Strong Alert Threshold",
+    )
     out_of_sample_threshold_tests = walk_forward.get("thresholdTests", []) if isinstance(walk_forward, dict) else []
+    split_date = str(walk_forward.get("splitDate") or "") if isinstance(walk_forward, dict) else ""
+    component_scope = [
+        row
+        for row in preferred_observations
+        if split_date and str(row.get("date") or "") >= split_date
+    ]
+    component_sample_role = "walkForwardOos" if component_scope else "descriptiveFullSample"
+    if not component_scope:
+        component_scope = preferred_observations
+    component_diagnostics = equity_backtest_component_diagnostics(
+        component_scope,
+        drawdown_threshold_pct,
+        horizon=preferred_horizon,
+        sample_role=component_sample_role,
+        production_use=False,
+    )
     preferred_threshold_test = next(
         (item for item in horizon_tests if item["threshold"] == 75 and item["horizon"] == preferred_horizon),
         {},
@@ -1750,15 +1958,15 @@ def build_equity_short_term_risk_backtest(
     worst_windows = [
         equity_backtest_window_payload(row)
         for row in sorted(
-            observations,
+            preferred_observations,
             key=lambda item: optional_float(item.get(f"maxDrawdown{preferred_horizon}d")) if optional_float(item.get(f"maxDrawdown{preferred_horizon}d")) is not None else 999.0,
         )[:6]
     ]
-    top_signals = [equity_backtest_window_payload(row) for row in sorted(observations, key=lambda item: float(item["score"]), reverse=True)[:6]]
+    top_signals = [equity_backtest_window_payload(row) for row in sorted(preferred_observations, key=lambda item: float(item["score"]), reverse=True)[:6]]
     alert_windows = [
         equity_backtest_alert_window_payload(row, horizon=preferred_horizon, threshold=75)
         for row in sorted(
-            [row for row in observations if float(row["score"]) >= 75],
+            [row for row in preferred_observations if float(row["score"]) >= 75],
             key=lambda item: (-float(item["score"]), str(item.get("date") or "")),
         )[:80]
     ]
@@ -1767,7 +1975,7 @@ def build_equity_short_term_risk_backtest(
     precision = preferred_threshold_test.get("precision")
     avg_strong_drawdown = strong_bucket.get(f"avgMaxDrawdown{preferred_horizon}d")
     summary = (
-        f"历史回放样本{len(observations)}个交易日; score>=75告警{preferred_threshold_test.get('alertDays', 0)}次,"
+        f"历史回放完整{preferred_horizon}日标签{len(preferred_observations)}个; score>=75告警{preferred_threshold_test.get('alertDays', 0)}次,"
         f"{preferred_horizon}日内<-2%回撤命中率{format_optional_percent_value(precision)},"
         f"命中平均提前{format_optional_number(preferred_threshold_test.get('avgDrawdownLeadDaysWhenHit'))}个交易日,"
         f"告警簇命中率{format_optional_percent_value(alert_cluster_test.get('precision'))};"
@@ -1777,8 +1985,10 @@ def build_equity_short_term_risk_backtest(
         "available": True,
         "target": f"1-{preferred_horizon} trading-day SPY drawdown warning",
         "method": f"For each historical equityShortTermRisk score, measure forward 1D/5D/{horizon}D/{preferred_horizon}D SPY return and the worst next-{preferred_horizon}-trading-day SPY drawdown from same-day close. The next-day audit is never used in the score; the preferred accuracy view allows signals to be two or three days early before a drawdown window.",
-        "sampleSize": len(observations),
-        "dateRange": {"start": observations[0]["date"], "end": observations[-1]["date"]},
+        "sampleSize": len(preferred_observations),
+        "trendObservationCount": len(observations),
+        "excludedIncompleteTailCount": len(observations) - len(preferred_observations),
+        "dateRange": {"start": preferred_observations[0]["date"], "end": preferred_observations[-1]["date"]},
         "drawdownEvent": f"next {preferred_horizon} trading days max drawdown <= {drawdown_threshold_pct:.1f}%",
         "preferredHorizon": preferred_horizon,
         "summary": summary,
@@ -1786,9 +1996,9 @@ def build_equity_short_term_risk_backtest(
         "thresholdTests": threshold_tests,
         "horizonTests": horizon_tests,
         "tieredThresholdTests": tiered_threshold_tests,
-        "calibrationGrid": calibration_grid,
+        "calibrationGrid": [equity_descriptive_test_row(row) for row in calibration_grid],
         "recommendedCautionThreshold": recommended_caution_threshold,
-        "precisionThresholdTests": precision_threshold_tests,
+        "precisionThresholdTests": [equity_descriptive_test_row(row) for row in precision_threshold_tests],
         "highPrecisionThresholdTest": high_precision_threshold_test,
         "walkForward": walk_forward,
         "outOfSampleThresholdTests": out_of_sample_threshold_tests,
@@ -1802,26 +2012,199 @@ def build_equity_short_term_risk_backtest(
         "caveats": [
             "Nasdaq daily OHLCV supports historical replay for price, volume, sector rotation, and hot-stock reversal factors.",
             "Historical replay excludes the current macroOverlay snapshot to avoid contaminating past scores with today's macro state.",
-            "Threshold guidance includes a 70/30 chronological walk-forward view plus precision lift versus the unconditional drawdown base rate.",
+            "Threshold recommendations are selected only on the purged 70% calibration slice and evaluated once on the final 30%; full-sample threshold grids are descriptive and never production inputs.",
+            "Component diagnostics use the walk-forward OOS slice when available and remain read-only research evidence; they do not mutate configured production weights.",
+            f"The final {len(observations) - len(preferred_observations)} rows without a complete {preferred_horizon}-session outcome window are excluded from all preferred-horizon denominators.",
             "Free Cboe option OI and broad news feeds are current snapshots or curated feeds, so full historical option/news backfills are excluded unless an archived feed is added.",
             "This is a risk-control backtest, not a standalone return forecast or personal investment recommendation.",
         ],
     }
 
 
-def equity_forward_return_pct(bars: list[MarketDailyBar], index: int, days: int) -> float | None:
-    if index < 0 or index >= len(bars) - 1:
+def build_equity_volatility_estimator_audit(
+    bars_by_symbol: dict[str, list[MarketDailyBar]],
+    *,
+    target: date,
+    production_signal: dict[str, Any],
+    production_backtest: dict[str, Any],
+    macro_liquidity_equity: dict[str, Any],
+    spy_early_warning: dict[str, Any],
+    calendar_events: list[CalendarEvent],
+    option_open_interest: OptionOpenInterestSnapshot | None,
+) -> dict[str, Any]:
+    candidate_signal = equity_short_term_signal_at(
+        bars_by_symbol,
+        target,
+        macro_liquidity_equity=macro_liquidity_equity,
+        spy_early_warning=spy_early_warning,
+        calendar_events=calendar_events,
+        option_open_interest=option_open_interest,
+        parkinson_estimator=PARKINSON_ESTIMATOR_STANDARD_RMS,
+    )
+    candidate_trend = build_equity_short_term_risk_trend(
+        bars_by_symbol,
+        macro_liquidity_equity=macro_liquidity_equity,
+        spy_early_warning=spy_early_warning,
+        calendar_events=calendar_events,
+        option_open_interest=option_open_interest,
+        parkinson_estimator=PARKINSON_ESTIMATOR_STANDARD_RMS,
+    )
+    candidate_backtest = build_equity_short_term_risk_backtest(
+        candidate_trend.get("points", []) if isinstance(candidate_trend, dict) else [],
+        bars_by_symbol.get("SPY", []),
+    )
+    if not candidate_signal.get("available") or not candidate_backtest.get("available"):
+        return {
+            "available": False,
+            "productionEstimator": PARKINSON_ESTIMATOR_LEGACY_MEAN,
+            "candidateEstimator": PARKINSON_ESTIMATOR_STANDARD_RMS,
+            "productionUnchanged": True,
+            "summary": "标准RMS候选缺少足够历史样本,继续保留当前生产口径。",
+        }
+    production_current = equity_estimator_current_metrics(production_signal)
+    candidate_current = equity_estimator_current_metrics(candidate_signal)
+    production_metrics = equity_estimator_backtest_metrics(production_backtest)
+    candidate_metrics = equity_estimator_backtest_metrics(candidate_backtest)
+    verdict = equity_estimator_audit_verdict(production_metrics, candidate_metrics)
+    return {
+        "available": True,
+        "productionEstimator": PARKINSON_ESTIMATOR_LEGACY_MEAN,
+        "candidateEstimator": PARKINSON_ESTIMATOR_STANDARD_RMS,
+        "productionUnchanged": True,
+        "method": "Replay the same OHLCV history, factor weights, score thresholds, and 15D drawdown labels; change only Parkinson window aggregation from arithmetic mean to root-mean-square.",
+        "current": {
+            "production": production_current,
+            "candidate": candidate_current,
+            "riskScoreDelta": equity_metric_delta(candidate_current.get("riskScore"), production_current.get("riskScore")),
+            "volComponentScoreDelta": equity_metric_delta(candidate_current.get("volComponentScore"), production_current.get("volComponentScore")),
+        },
+        "backtest": {
+            "production": production_metrics,
+            "candidate": candidate_metrics,
+            "fullPrecisionDelta": equity_metric_delta(candidate_metrics.get("precision"), production_metrics.get("precision")),
+            "oosPrecisionDelta": equity_metric_delta(candidate_metrics.get("oosPrecision"), production_metrics.get("oosPrecision")),
+            "oosLiftDelta": equity_metric_delta(candidate_metrics.get("oosLiftVsBaseRate"), production_metrics.get("oosLiftVsBaseRate")),
+            "oosFalsePositiveDelta": equity_metric_delta(candidate_metrics.get("oosFalsePositives"), production_metrics.get("oosFalsePositives")),
+        },
+        "verdict": verdict["verdict"],
+        "verdictCn": verdict["verdictCn"],
+        "recommendedAction": verdict["recommendedAction"],
+        "summary": verdict["summary"],
+    }
+
+
+def equity_estimator_current_metrics(signal: dict[str, Any]) -> dict[str, Any]:
+    components = signal.get("components") if isinstance(signal.get("components"), list) else []
+    volatility = next(
+        (component for component in components if isinstance(component, dict) and component.get("key") == "volTargetPressure"),
+        {},
+    )
+    metrics = volatility.get("metrics") if isinstance(volatility.get("metrics"), dict) else {}
+    return {
+        "riskScore": optional_float(signal.get("score")),
+        "baseScore": optional_float(signal.get("baseScore")),
+        "volComponentScore": optional_float(volatility.get("score")),
+        "qqqVol22d": optional_float(metrics.get("qqqParkinsonVol22d")),
+        "spyVol22d": optional_float(metrics.get("spyParkinsonVol22d")),
+        "qqqTargetVol": optional_float(metrics.get("qqqTargetVol")),
+        "spyTargetVol": optional_float(metrics.get("spyTargetVol")),
+        "multiScaleBurstRatio": optional_float(metrics.get("multiScaleBurstRatio")),
+    }
+
+
+def equity_estimator_backtest_metrics(backtest: dict[str, Any]) -> dict[str, Any]:
+    preferred = backtest.get("preferredThresholdTest") if isinstance(backtest.get("preferredThresholdTest"), dict) else {}
+    oos_tests = backtest.get("outOfSampleThresholdTests") if isinstance(backtest.get("outOfSampleThresholdTests"), list) else []
+    oos = next(
+        (row for row in oos_tests if isinstance(row, dict) and int(row.get("threshold") or -1) == 75),
+        {},
+    )
+    diagnostics = backtest.get("componentDiagnostics") if isinstance(backtest.get("componentDiagnostics"), list) else []
+    volatility = next(
+        (row for row in diagnostics if isinstance(row, dict) and row.get("component") == "volTargetPressure"),
+        {},
+    )
+    return {
+        "sampleSize": backtest.get("sampleSize"),
+        "threshold": 75,
+        "horizon": preferred.get("horizon") or backtest.get("preferredHorizon"),
+        "alertDays": preferred.get("alertDays"),
+        "precision": preferred.get("precision"),
+        "recall": preferred.get("recall"),
+        "falsePositives": preferred.get("falsePositives"),
+        "liftVsBaseRate": preferred.get("liftVsBaseRate"),
+        "avgDrawdownLeadDaysWhenHit": preferred.get("avgDrawdownLeadDaysWhenHit"),
+        "oosAlertDays": oos.get("alertDays"),
+        "oosPrecision": oos.get("precision"),
+        "oosRecall": oos.get("recall"),
+        "oosFalsePositives": oos.get("falsePositives"),
+        "oosLiftVsBaseRate": oos.get("liftVsBaseRate"),
+        "volComponentPrecision": volatility.get("precision"),
+        "volComponentRecall": volatility.get("recall"),
+        "volComponentFalsePositives": volatility.get("falsePositives"),
+    }
+
+
+def equity_estimator_audit_verdict(
+    production: dict[str, Any],
+    candidate: dict[str, Any],
+) -> dict[str, str]:
+    candidate_oos_alerts = int(optional_float(candidate.get("oosAlertDays")) or 0)
+    production_oos_precision = optional_float(production.get("oosPrecision"))
+    candidate_oos_precision = optional_float(candidate.get("oosPrecision"))
+    production_oos_lift = optional_float(production.get("oosLiftVsBaseRate"))
+    candidate_oos_lift = optional_float(candidate.get("oosLiftVsBaseRate"))
+    production_full_precision = optional_float(production.get("precision"))
+    candidate_full_precision = optional_float(candidate.get("precision"))
+    production_oos_false = optional_float(production.get("oosFalsePositives"))
+    candidate_oos_false = optional_float(candidate.get("oosFalsePositives"))
+    if candidate_oos_alerts < 5 or candidate_oos_precision is None or candidate_oos_lift is None:
+        return {
+            "verdict": "insufficientEvidence",
+            "verdictCn": "证据不足",
+            "recommendedAction": "retainProduction",
+            "summary": "标准RMS候选的OOS告警不足5次或指标不可用,暂不切换生产口径。",
+        }
+    precision_improved = production_oos_precision is None or candidate_oos_precision >= production_oos_precision + 2.0
+    lift_not_worse = production_oos_lift is None or candidate_oos_lift >= production_oos_lift
+    full_not_worse = production_full_precision is None or candidate_full_precision is not None and candidate_full_precision >= production_full_precision - 2.0
+    false_not_worse = production_oos_false is None or candidate_oos_false is not None and candidate_oos_false <= production_oos_false
+    if precision_improved and lift_not_worse and full_not_worse and false_not_worse:
+        return {
+            "verdict": "candidatePromising",
+            "verdictCn": "候选更优",
+            "recommendedAction": "keepShadowTesting",
+            "summary": "标准RMS候选改善OOS精确率且未明显损害完整样本表现,继续影子验证后再考虑切换。",
+        }
+    return {
+        "verdict": "retainLegacy",
+        "verdictCn": "保留现口径",
+        "recommendedAction": "retainProduction",
+        "summary": "标准RMS候选未同时改善OOS精确率、lift与误报,继续保留当前算术平均口径。",
+    }
+
+
+def equity_metric_delta(candidate: Any, production: Any) -> float | None:
+    candidate_value = optional_float(candidate)
+    production_value = optional_float(production)
+    if candidate_value is None or production_value is None:
         return None
-    end_index = min(len(bars) - 1, index + days)
-    if end_index <= index or bars[index].close <= 0:
+    return round(candidate_value - production_value, 2)
+
+
+def equity_forward_return_pct(bars: list[MarketDailyBar], index: int, days: int) -> float | None:
+    if days < 1 or index < 0 or index + days >= len(bars):
+        return None
+    end_index = index + days
+    if bars[index].close <= 0:
         return None
     return pct_metric(bars[end_index].close / bars[index].close - 1)
 
 
 def equity_forward_max_drawdown_pct(bars: list[MarketDailyBar], index: int, days: int) -> float | None:
-    if index < 0 or index >= len(bars) - 1 or bars[index].close <= 0:
+    if days < 1 or index < 0 or index + days >= len(bars) or bars[index].close <= 0:
         return None
-    end_index = min(len(bars) - 1, index + days)
+    end_index = index + days
     future_lows = [bar.low for bar in bars[index + 1: end_index + 1] if bar.low > 0]
     if not future_lows:
         return None
@@ -1834,9 +2217,9 @@ def equity_forward_drawdown_lead_days(
     days: int,
     drawdown_threshold_pct: float,
 ) -> int | None:
-    if index < 0 or index >= len(bars) - 1 or bars[index].close <= 0:
+    if days < 1 or index < 0 or index + days >= len(bars) or bars[index].close <= 0:
         return None
-    end_index = min(len(bars) - 1, index + days)
+    end_index = index + days
     for lead_days, bar in enumerate(bars[index + 1: end_index + 1], start=1):
         if bar.low > 0 and pct_metric(bar.low / bars[index].close - 1) <= drawdown_threshold_pct:
             return lead_days
@@ -1852,6 +2235,8 @@ def equity_backtest_bucket(
     drawdown_threshold_pct: float,
 ) -> dict[str, Any]:
     members = [row for row in observations if low <= float(row["score"]) < high]
+    members_10d = [row for row in members if optional_float(row.get("maxDrawdown10d")) is not None]
+    members_15d = [row for row in members if optional_float(row.get("maxDrawdown15d")) is not None]
     return {
         "label": label,
         "labelCn": label_cn,
@@ -1865,8 +2250,8 @@ def equity_backtest_bucket(
         "avgMaxDrawdown5d": equity_average_metric(members, "maxDrawdown5d"),
         "avgMaxDrawdown10d": equity_average_metric(members, "maxDrawdown10d"),
         "avgMaxDrawdown15d": equity_average_metric(members, "maxDrawdown15d"),
-        "drawdownHitRate10d": equity_rate_pct(sum(1 for row in members if row.get("drawdownEvent10d")), len(members)),
-        "drawdownHitRate15d": equity_rate_pct(sum(1 for row in members if row.get("drawdownEvent15d")), len(members)),
+        "drawdownHitRate10d": equity_rate_pct(sum(1 for row in members_10d if row.get("drawdownEvent10d")), len(members_10d)),
+        "drawdownHitRate15d": equity_rate_pct(sum(1 for row in members_15d if row.get("drawdownEvent15d")), len(members_15d)),
         "drawdownThreshold": drawdown_threshold_pct,
         "worstForward10d": equity_min_metric(members, "forward10d"),
         "worstMaxDrawdown10d": equity_min_metric(members, "maxDrawdown10d"),
@@ -1886,8 +2271,9 @@ def equity_backtest_threshold_test(
     forward_key = f"forward{horizon}d"
     drawdown_key = f"maxDrawdown{horizon}d"
     lead_key = f"drawdownLeadDays{horizon}d"
-    alert_rows = [row for row in observations if float(row["score"]) >= threshold]
-    event_rows = [row for row in observations if row.get(event_key)]
+    eligible_rows = [row for row in observations if optional_float(row.get(drawdown_key)) is not None]
+    alert_rows = [row for row in eligible_rows if float(row["score"]) >= threshold]
+    event_rows = [row for row in eligible_rows if row.get(event_key)]
     true_positives = sum(1 for row in alert_rows if row.get(event_key))
     false_positives = len(alert_rows) - true_positives
     false_negatives = len(event_rows) - true_positives
@@ -1903,7 +2289,7 @@ def equity_backtest_threshold_test(
         "horizon": horizon,
         "rule": f"score >= {threshold}",
         "event": f"maxDrawdown{horizon}d <= {drawdown_threshold_pct:.1f}%",
-        "sampleSize": len(observations),
+        "sampleSize": len(eligible_rows),
         "alertDays": len(alert_rows),
         "drawdownEvents": len(event_rows),
         "truePositives": true_positives,
@@ -1911,7 +2297,7 @@ def equity_backtest_threshold_test(
         "falseNegatives": false_negatives,
         "precision": equity_rate_pct(true_positives, len(alert_rows)),
         "recall": equity_rate_pct(true_positives, len(event_rows)),
-        "baseRate": equity_rate_pct(len(event_rows), len(observations)),
+        "baseRate": equity_rate_pct(len(event_rows), len(eligible_rows)),
         "avgForwardWhenAlert": equity_average_metric(alert_rows, forward_key),
         "avgMaxDrawdownWhenAlert": equity_average_metric(alert_rows, drawdown_key),
         "avgDrawdownLeadDaysWhenHit": round(sum(hit_leads) / len(hit_leads), 1) if hit_leads else None,
@@ -1970,18 +2356,33 @@ def equity_backtest_tiered_threshold_tests(horizon_tests: list[dict[str, Any]], 
 
 
 def equity_recommended_caution_threshold(calibration_grid: list[dict[str, Any]]) -> dict[str, Any]:
+    sample_size = max((int(optional_float(row.get("sampleSize")) or 0) for row in calibration_grid), default=0)
+    minimum_alert_days = min(10, max(3, sample_size // 100))
     candidates = [
         row
         for row in calibration_grid
-        if 55 <= int(row.get("threshold") or 0) <= 70 and (optional_float(row.get("alertDays")) or 0) > 0
+        if 55 <= int(row.get("threshold") or 0) <= 70
+        and (optional_float(row.get("alertDays")) or 0) >= minimum_alert_days
     ]
     if not candidates:
-        return {}
+        return {
+            "available": False,
+            "reason": f"No calibration threshold had the required {minimum_alert_days} alert observations.",
+            "minimumPrecision": 50.0,
+            "minimumAlertDays": minimum_alert_days,
+        }
     base_rate = max(optional_float(row.get("baseRate")) or 0.0 for row in candidates)
-    min_precision = max(50.0, base_rate + 5.0)
-    qualifying = [row for row in candidates if (optional_float(row.get("precision")) or 0.0) >= min_precision]
+    required_precision = max(50.0, base_rate + 5.0)
+    min_precision = min(100.0, required_precision)
+    qualifying = [row for row in candidates if (optional_float(row.get("precision")) or 0.0) >= required_precision]
     if not qualifying:
-        qualifying = candidates
+        return {
+            "available": False,
+            "reason": f"No threshold met the minimum precision requirement ({min_precision:.1f}%).",
+            "minimumPrecision": round(min_precision, 1),
+            "requiredPrecisionUncapped": round(required_precision, 1),
+            "minimumAlertDays": minimum_alert_days,
+        }
 
     def calibration_score(row: dict[str, Any]) -> tuple[float, float, float]:
         recall = optional_float(row.get("recall")) or 0.0
@@ -1992,30 +2393,45 @@ def equity_recommended_caution_threshold(calibration_grid: list[dict[str, Any]])
     selected = dict(max(qualifying, key=calibration_score))
     selected.update(
         {
+            "available": True,
             "key": "recommendedCautionThreshold",
             "label": "推荐观察阈值",
             "labelEn": "Recommended Caution Threshold",
             "useCase": "推荐观察层; 在保持基础精确率约束下尽量提高回撤覆盖率。",
+            "minimumPrecision": round(min_precision, 1),
+            "minimumAlertDays": minimum_alert_days,
         }
     )
     return selected
 
 
 def equity_high_precision_threshold(precision_grid: list[dict[str, Any]]) -> dict[str, Any]:
-    max_alert_days = max((optional_float(row.get("alertDays")) or 0.0 for row in precision_grid), default=0.0)
-    minimum_alert_days = min(5.0, max(1.0, max_alert_days))
+    sample_size = max((int(optional_float(row.get("sampleSize")) or 0) for row in precision_grid), default=0)
+    minimum_alert_days = min(10, max(5, sample_size // 100))
     candidates = [
         row
         for row in precision_grid
         if (optional_float(row.get("alertDays")) or 0.0) >= minimum_alert_days
     ]
     if not candidates:
-        return {}
+        return {
+            "available": False,
+            "reason": "No high-precision calibration threshold had enough alert observations.",
+            "minimumPrecision": 75.0,
+            "minimumAlertDays": minimum_alert_days,
+        }
     base_rate = max(optional_float(row.get("baseRate")) or 0.0 for row in candidates)
-    min_precision = max(75.0, base_rate + 25.0)
-    qualifying = [row for row in candidates if (optional_float(row.get("precision")) or 0.0) >= min_precision]
+    required_precision = max(75.0, base_rate + 25.0)
+    min_precision = min(100.0, required_precision)
+    qualifying = [row for row in candidates if (optional_float(row.get("precision")) or 0.0) >= required_precision]
     if not qualifying:
-        qualifying = candidates
+        return {
+            "available": False,
+            "reason": f"No threshold met the high-precision requirement ({min_precision:.1f}%).",
+            "minimumPrecision": round(min_precision, 1),
+            "requiredPrecisionUncapped": round(required_precision, 1),
+            "minimumAlertDays": minimum_alert_days,
+        }
 
     def precision_score(row: dict[str, Any]) -> tuple[float, float, float, float]:
         precision = optional_float(row.get("precision")) or 0.0
@@ -2027,13 +2443,99 @@ def equity_high_precision_threshold(precision_grid: list[dict[str, Any]]) -> dic
     selected = dict(max(qualifying, key=precision_score))
     selected.update(
         {
+            "available": True,
             "key": "highPrecisionThreshold",
             "label": "高精度强告警阈值",
             "labelEn": "High-Precision Strong Alert Threshold",
             "useCase": "更偏执行层的高置信降风险阈值; 牺牲覆盖率来提高历史精确率。",
+            "minimumPrecision": round(min_precision, 1),
+            "minimumAlertDays": minimum_alert_days,
         }
     )
     return selected
+
+
+def equity_descriptive_test_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **row,
+        "sampleRole": "descriptiveFullSample",
+        "productionUse": False,
+    }
+
+
+def equity_walk_forward_partition(
+    observations: list[dict[str, Any]],
+    *,
+    horizon: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], int, str]:
+    """Create a chronological 70/30 split with a label-end-date purge.
+
+    Production observations carry the exact trading-session label end.  Older
+    callers without that metadata use the conservative legacy fallback of
+    dropping ``horizon`` training observations.
+    """
+    drawdown_key = f"maxDrawdown{horizon}d"
+    eligible = sorted(
+        [row for row in observations if optional_float(row.get(drawdown_key)) is not None],
+        key=lambda row: str(row.get("date") or ""),
+    )
+    if len(eligible) < 2:
+        return eligible, [], [], 0, "sample too small"
+    split_index = max(1, min(len(eligible) - 1, int(len(eligible) * 0.70)))
+    training = eligible[:split_index]
+    out_sample = eligible[split_index:]
+    split_date_text = str(out_sample[0].get("date") or "")
+    label_end_key = f"labelEndDate{horizon}d"
+    try:
+        split_date = date.fromisoformat(split_date_text)
+        label_ends = [date.fromisoformat(str(row.get(label_end_key) or "")) for row in training]
+    except ValueError:
+        purge_count = min(horizon, max(0, split_index - 1))
+        return (
+            eligible,
+            training[: len(training) - purge_count],
+            out_sample,
+            purge_count,
+            f"fallback: remove {horizon} training observations because exact label-end metadata is unavailable",
+        )
+    in_sample = [row for row, label_end in zip(training, label_ends) if label_end < split_date]
+    purge_count = len(training) - len(in_sample)
+    return (
+        eligible,
+        in_sample,
+        out_sample,
+        purge_count,
+        f"keep training rows only when labelEndDate{horizon}d is earlier than the OOS split date",
+    )
+
+
+def equity_walk_forward_recommendation(
+    walk_forward: dict[str, Any],
+    *,
+    key: str,
+    label: str,
+    label_en: str,
+) -> dict[str, Any]:
+    payload = walk_forward.get(key) if isinstance(walk_forward.get(key), dict) else {}
+    if not walk_forward.get("available"):
+        minimum_precision = 75.0 if key == "highPrecisionThresholdTest" else 50.0
+        payload = {
+            "available": False,
+            "reason": (
+                "No threshold met a validated minimum precision requirement because "
+                + str(walk_forward.get("summary") or "walk-forward calibration is unavailable.")
+            ),
+            "minimumPrecision": minimum_precision,
+        }
+    return {
+        **payload,
+        "key": key,
+        "label": label,
+        "labelEn": label_en,
+        "selectionSample": "purged70PctCalibration",
+        "evaluationSample": "final30PctOos",
+        "productionUse": False,
+    }
 
 
 def equity_walk_forward_backtest(
@@ -2042,59 +2544,144 @@ def equity_walk_forward_backtest(
     *,
     horizon: int,
 ) -> dict[str, Any]:
-    if len(observations) < 20:
+    eligible_observations, in_sample, out_sample, purge_count, purge_rule = equity_walk_forward_partition(
+        observations,
+        horizon=horizon,
+    )
+    if len(eligible_observations) < 20:
         return {
             "available": False,
             "summary": "walk-forward sample requires at least 20 observations",
-            "inSample": {"sampleSize": len(observations)},
+            "inSample": {"sampleSize": len(eligible_observations)},
             "outOfSample": {"sampleSize": 0},
             "thresholdTests": [],
         }
-    split_index = max(1, min(len(observations) - 1, int(len(observations) * 0.70)))
-    in_sample = observations[:split_index]
-    out_sample = observations[split_index:]
+    if len(in_sample) < 10 or not out_sample:
+        return {
+            "available": False,
+            "summary": "walk-forward sample is too small after purging overlapping training labels",
+            "purgedTrainingRows": purge_count,
+            "purgeRule": purge_rule,
+            "inSample": {"sampleSize": len(in_sample)},
+            "outOfSample": {"sampleSize": len(out_sample)},
+            "thresholdTests": [],
+        }
     thresholds = (50, 55, 60, 65, 70, 75)
     in_grid = [
         equity_backtest_threshold_test(threshold, in_sample, drawdown_threshold_pct, horizon=horizon)
         for threshold in thresholds
     ]
-    selected = equity_recommended_caution_threshold(in_grid) or max(
-        in_grid,
-        key=lambda row: (
-            optional_float(row.get("precision")) or 0.0,
-            optional_float(row.get("recall")) or 0.0,
-            -(optional_float(row.get("threshold")) or 0.0),
-        ),
+    precision_thresholds = (75, 78, 80, 82, 85, 88, 90)
+    in_precision_grid = [
+        equity_backtest_threshold_test(threshold, in_sample, drawdown_threshold_pct, horizon=horizon)
+        for threshold in precision_thresholds
+    ]
+    selected = equity_recommended_caution_threshold(in_grid)
+    selected_high_precision = equity_high_precision_threshold(in_precision_grid)
+    selected_threshold = int(selected["threshold"]) if selected.get("available") and selected.get("threshold") is not None else None
+    selected_high_threshold = (
+        int(selected_high_precision["threshold"])
+        if selected_high_precision.get("available") and selected_high_precision.get("threshold") is not None
+        else None
     )
-    selected_threshold = int(selected.get("threshold") or 75)
-    tested_thresholds = sorted(set(thresholds + (selected_threshold, 75)))
+    tested_thresholds = sorted({75, *([selected_threshold] if selected_threshold is not None else []), *([selected_high_threshold] if selected_high_threshold is not None else [])})
     out_grid = [
         equity_backtest_threshold_test(threshold, out_sample, drawdown_threshold_pct, horizon=horizon)
         for threshold in tested_thresholds
     ]
-    selected_out = next((row for row in out_grid if int(row.get("threshold") or -1) == selected_threshold), {})
+    selected_out = next(
+        (row for row in out_grid if selected_threshold is not None and int(row.get("threshold") or -1) == selected_threshold),
+        {},
+    )
+    selected_high_out = next(
+        (row for row in out_grid if selected_high_threshold is not None and int(row.get("threshold") or -1) == selected_high_threshold),
+        {},
+    )
+
+    def recommendation_payload(
+        calibration: dict[str, Any],
+        evaluation: dict[str, Any],
+        *,
+        use_case: str,
+    ) -> dict[str, Any]:
+        if not calibration.get("available"):
+            return {
+                **calibration,
+                "available": False,
+                "calibration": calibration,
+                "oosEvaluation": {},
+                "useCase": use_case,
+                "productionUse": False,
+            }
+        oos_alert_days = int(optional_float(evaluation.get("alertDays")) or 0)
+        if oos_alert_days < 3 or optional_float(evaluation.get("precision")) is None:
+            return {
+                "available": False,
+                "threshold": calibration.get("threshold"),
+                "reason": "Calibration selected a threshold, but fewer than 3 OOS alerts were available for validation.",
+                "minimumPrecision": calibration.get("minimumPrecision", 75.0),
+                "minimumOosAlertDays": 3,
+                "calibration": calibration,
+                "oosEvaluation": evaluation,
+                "useCase": use_case,
+                "productionUse": False,
+            }
+        return {
+            **evaluation,
+            "available": True,
+            "threshold": calibration.get("threshold"),
+            "calibration": calibration,
+            "oosEvaluation": evaluation,
+            "useCase": use_case,
+            "productionUse": False,
+            "minimumOosAlertDays": 3,
+        }
+
+    caution_recommendation = recommendation_payload(
+        selected,
+        selected_out,
+        use_case="校准段选阈值、OOS只评估一次; 研究审计用途,不动态改写生产分档。",
+    )
+    high_precision_recommendation = recommendation_payload(
+        selected_high_precision,
+        selected_high_out,
+        use_case="校准段选高精度阈值、OOS只评估一次; 研究审计用途,不动态改写生产分档。",
+    )
+    if selected_threshold is None:
+        summary = "校准段没有阈值达到最低精确率门槛; OOS仅保留预注册score>=75诊断,不发布推荐阈值。"
+    else:
+        summary = (
+            f"IS选择阈值{selected_threshold}; OOS告警{selected_out.get('alertDays', 0)}次, "
+            f"precision {format_optional_percent_value(selected_out.get('precision'))}, "
+            f"base {format_optional_percent_value(selected_out.get('baseRate'))}."
+        )
     return {
         "available": True,
-        "method": "70/30 chronological walk-forward: choose threshold on the first 70% and report precision/recall on the final 30%.",
+        "method": f"70/30 chronological walk-forward with exact {horizon}-session label-end purging before the OOS boundary; choose thresholds on purged training data and evaluate only selected thresholds plus the pre-registered score>=75 rule on the final 30%.",
         "splitDate": out_sample[0]["date"] if out_sample else None,
+        "purgedTrainingRows": purge_count,
+        "purgeRule": purge_rule,
+        "thresholdSelectionAvailable": selected_threshold is not None,
         "selectedThreshold": selected_threshold,
+        "selectedHighPrecisionThreshold": selected_high_threshold,
+        "recommendedCautionThreshold": caution_recommendation,
+        "highPrecisionThresholdTest": high_precision_recommendation,
         "inSample": {
             "sampleSize": len(in_sample),
             "dateRange": {"start": in_sample[0]["date"], "end": in_sample[-1]["date"]},
             "selectedThresholdTest": selected,
             "thresholdTests": in_grid,
+            "highPrecisionThresholdTests": in_precision_grid,
+            "selectedHighPrecisionThresholdTest": selected_high_precision,
         },
         "outOfSample": {
             "sampleSize": len(out_sample),
             "dateRange": {"start": out_sample[0]["date"], "end": out_sample[-1]["date"]} if out_sample else {},
             "selectedThresholdTest": selected_out,
+            "selectedHighPrecisionThresholdTest": selected_high_out,
         },
-        "thresholdTests": out_grid,
-        "summary": (
-            f"IS选择阈值{selected_threshold}; OOS告警{selected_out.get('alertDays', 0)}次, "
-            f"precision {format_optional_percent_value(selected_out.get('precision'))}, "
-            f"base {format_optional_percent_value(selected_out.get('baseRate'))}."
-        ),
+        "thresholdTests": [{**row, "sampleRole": "walkForwardOos", "productionUse": int(row.get("threshold") or -1) == 75} for row in out_grid],
+        "summary": summary,
     }
 
 
@@ -2103,12 +2690,16 @@ def equity_backtest_component_diagnostics(
     drawdown_threshold_pct: float,
     *,
     horizon: int,
+    sample_role: str = "descriptiveFullSample",
+    production_use: bool = False,
 ) -> list[dict[str, Any]]:
     event_key = f"drawdownEvent{horizon}d"
     drawdown_key = f"maxDrawdown{horizon}d"
     component_rows: dict[str, list[dict[str, Any]]] = {}
     component_meta: dict[str, dict[str, Any]] = {}
     for row in observations:
+        if optional_float(row.get(drawdown_key)) is None:
+            continue
         component_scores = row.get("componentScores")
         if not isinstance(component_scores, dict):
             continue
@@ -2181,6 +2772,9 @@ def equity_backtest_component_diagnostics(
                 "historicalReplay": bool(meta.get("historicalReplay")),
                 "threshold": 75,
                 "horizon": horizon,
+                "sampleRole": sample_role,
+                "productionUse": bool(production_use),
+                "independentHoldout": False,
                 "event": f"maxDrawdown{horizon}d <= {drawdown_threshold_pct:.1f}%",
                 "sampleSize": len(rows),
                 "alertDays": len(high_rows),
@@ -2222,7 +2816,8 @@ def equity_backtest_alert_cluster_test(
     lead_key = f"drawdownLeadDays{horizon}d"
     clusters: list[list[dict[str, Any]]] = []
     active: list[dict[str, Any]] = []
-    for row in observations:
+    eligible_rows = [row for row in observations if optional_float(row.get(drawdown_key)) is not None]
+    for row in eligible_rows:
         if float(row["score"]) >= threshold:
             active.append(row)
         elif active:
@@ -2252,6 +2847,8 @@ def equity_backtest_alert_cluster_test(
     return {
         "threshold": threshold,
         "horizon": horizon,
+        "sampleRole": "descriptiveFullSample",
+        "productionUse": False,
         "event": f"first alert in cluster maxDrawdown{horizon}d <= {drawdown_threshold_pct:.1f}%",
         "clusterCount": len(cluster_rows),
         "hitClusters": hit_clusters,
@@ -2274,6 +2871,7 @@ def equity_backtest_regression_tests(observations: list[dict[str, Any]]) -> list
             label="10D forward return",
             unit="pct",
             summary_template="score每升10分,未来10日SPY收益变化{delta}个百分点",
+            hac_lag=9,
         ),
         equity_backtest_linear_regression(
             observations,
@@ -2282,6 +2880,7 @@ def equity_backtest_regression_tests(observations: list[dict[str, Any]]) -> list
             label="10D max drawdown",
             unit="pct",
             summary_template="score每升10分,未来10日最大回撤变化{delta}个百分点",
+            hac_lag=9,
         ),
         equity_backtest_linear_probability_regression(observations, horizon=10),
         equity_backtest_linear_regression(
@@ -2291,6 +2890,7 @@ def equity_backtest_regression_tests(observations: list[dict[str, Any]]) -> list
             label="15D max drawdown",
             unit="pct",
             summary_template="score每升10分,未来15日最大回撤变化{delta}个百分点",
+            hac_lag=14,
         ),
         equity_backtest_linear_probability_regression(observations, horizon=15),
     ]
@@ -2298,9 +2898,11 @@ def equity_backtest_regression_tests(observations: list[dict[str, Any]]) -> list
 
 def equity_backtest_linear_probability_regression(observations: list[dict[str, Any]], *, horizon: int) -> dict[str, Any]:
     event_key = f"drawdownEvent{horizon}d"
+    drawdown_key = f"maxDrawdown{horizon}d"
     rows = [
         {"score": row.get("score"), "drawdownEventPct": 100.0 if row.get(event_key) else 0.0}
         for row in observations
+        if optional_float(row.get(drawdown_key)) is not None
     ]
     return equity_backtest_linear_regression(
         rows,
@@ -2309,6 +2911,7 @@ def equity_backtest_linear_probability_regression(observations: list[dict[str, A
         label=f"{horizon}D drawdown event probability",
         unit="probability_pct",
         summary_template=f"score每升10分,未来{horizon}日<-2%回撤概率变化{{delta}}个百分点",
+        hac_lag=max(0, horizon - 1),
     )
 
 
@@ -2320,6 +2923,7 @@ def equity_backtest_linear_regression(
     label: str,
     unit: str,
     summary_template: str,
+    hac_lag: int = 0,
 ) -> dict[str, Any]:
     pairs = []
     for row in rows:
@@ -2346,8 +2950,7 @@ def equity_backtest_linear_regression(
     residual_sum_squares = sum((y - y_hat) ** 2 for y, y_hat in zip(ys, fitted))
     r_squared = max(0.0, min(1.0, correlation * correlation))
     if len(pairs) > 2 and ssx > 0:
-        residual_variance = residual_sum_squares / (len(pairs) - 2)
-        standard_error = math.sqrt(residual_variance / ssx) if residual_variance >= 0 else None
+        standard_error = equity_hac_slope_standard_error(xs, [y - y_hat for y, y_hat in zip(ys, fitted)], max_lag=hac_lag)
         t_stat = slope / standard_error if standard_error and standard_error > 0 else None
     else:
         t_stat = None
@@ -2362,8 +2965,43 @@ def equity_backtest_linear_regression(
         "correlation": round(correlation, 3),
         "rSquared": round(r_squared, 3),
         "tStat": round(t_stat, 2) if t_stat is not None and math.isfinite(t_stat) else None,
+        "standardErrorMethod": "Newey-West HAC",
+        "hacLag": min(max(0, hac_lag), len(pairs) - 1),
+        "productionUse": False,
         "summary": f"{summary_template.format(delta=delta)}; R² {r_squared:.2f}。",
     }
+
+
+def equity_hac_slope_standard_error(
+    xs: list[float],
+    residuals: list[float],
+    *,
+    max_lag: int,
+) -> float | None:
+    """Newey-West slope SE for an OLS regression with an intercept.
+
+    Forward 10/15-session outcomes overlap by construction, so the ordinary
+    iid residual standard error materially overstates effective information.
+    Bartlett-weighted HAC uses horizon-1 lags for those diagnostic regressions.
+    """
+    count = len(xs)
+    if count < 3 or count != len(residuals):
+        return None
+    mean_x = sum(xs) / count
+    centered = [value - mean_x for value in xs]
+    ssx = sum(value * value for value in centered)
+    if ssx <= 0:
+        return None
+    scores = [value * residual for value, residual in zip(centered, residuals)]
+    meat = sum(value * value for value in scores)
+    lag_limit = min(max(0, int(max_lag)), count - 1)
+    for lag in range(1, lag_limit + 1):
+        weight = 1.0 - lag / (lag_limit + 1.0)
+        covariance = sum(scores[index] * scores[index - lag] for index in range(lag, count))
+        meat += 2.0 * weight * covariance
+    # Small-sample degrees-of-freedom correction for intercept + slope.
+    variance = max(0.0, meat) * count / (count - 2) / (ssx * ssx)
+    return math.sqrt(variance)
 
 
 def equity_backtest_window_payload(row: dict[str, Any]) -> dict[str, Any]:
@@ -2481,10 +3119,10 @@ def parkinson_daily_volatility(bar: MarketDailyBar) -> float | None:
 
 
 def parkinson_vol_window(bars: list[MarketDailyBar], target: date, window: int) -> list[float]:
-    history = [bar for bar in bars if bar.date <= target]
-    if len(history) < window:
+    index = bar_index_at_or_before(bars, target)
+    if index is None or index + 1 < window:
         return []
-    values = [parkinson_daily_volatility(bar) for bar in history[-window:]]
+    values = [parkinson_daily_volatility(bar) for bar in bars[index - window + 1 : index + 1]]
     return [value for value in values if value is not None and math.isfinite(value)]
 
 
@@ -2495,23 +3133,54 @@ def mean_parkinson_vol(bars: list[MarketDailyBar], target: date, window: int) ->
     return sum(values) / len(values)
 
 
-def annualized_parkinson_vol(bars: list[MarketDailyBar], target: date, window: int) -> float | None:
-    daily_vol = mean_parkinson_vol(bars, target, window)
+def aggregate_parkinson_vol(values: list[float], *, estimator: str) -> float | None:
+    if estimator not in PARKINSON_ESTIMATORS:
+        raise ValueError(f"unsupported Parkinson estimator: {estimator}")
+    if not values:
+        return None
+    if estimator == PARKINSON_ESTIMATOR_STANDARD_RMS:
+        return math.sqrt(sum(value * value for value in values) / len(values))
+    return sum(values) / len(values)
+
+
+def annualized_parkinson_vol(
+    bars: list[MarketDailyBar],
+    target: date,
+    window: int,
+    *,
+    estimator: str = PARKINSON_ESTIMATOR_LEGACY_MEAN,
+) -> float | None:
+    values = parkinson_vol_window(bars, target, window)
+    if len(values) < window:
+        return None
+    daily_vol = aggregate_parkinson_vol(values, estimator=estimator)
     return daily_vol * math.sqrt(252) if daily_vol is not None else None
 
 
-def adaptive_parkinson_target_vol(bars: list[MarketDailyBar], target: date, *, window: int = 22, lookback: int = 65) -> float | None:
-    history = [bar for bar in bars if bar.date <= target]
+def adaptive_parkinson_target_vol(
+    bars: list[MarketDailyBar],
+    target: date,
+    *,
+    window: int = 22,
+    lookback: int = 65,
+    estimator: str = PARKINSON_ESTIMATOR_LEGACY_MEAN,
+) -> float | None:
+    index = bar_index_at_or_before(bars, target)
+    if index is None:
+        return None
+    history = bars[: index + 1]
     if len(history) < window + 5:
         return None
     start_index = max(window - 1, len(history) - lookback)
+    daily_vols = [parkinson_daily_volatility(bar) for bar in history]
     realized: list[float] = []
     for end_index in range(start_index, len(history)):
-        window_bars = history[end_index - window + 1: end_index + 1]
-        values = [parkinson_daily_volatility(bar) for bar in window_bars]
+        values = daily_vols[end_index - window + 1 : end_index + 1]
         clean = [value for value in values if value is not None and math.isfinite(value)]
         if len(clean) == window:
-            realized.append((sum(clean) / len(clean)) * math.sqrt(252))
+            aggregated = aggregate_parkinson_vol(clean, estimator=estimator)
+            if aggregated is not None:
+                realized.append(aggregated * math.sqrt(252))
     if not realized:
         return None
     raw_target = median(realized)

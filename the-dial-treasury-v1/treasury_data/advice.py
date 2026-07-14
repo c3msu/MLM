@@ -27,6 +27,9 @@ def portfolio_overview_evidence(row: dict[str, Any] | None) -> dict[str, Any]:
         "leadTimeDays": optional_float(row.get("leadTimeDays")),
         "sampleSize": row.get("observationCount"),
         "classification": str(row.get("classification") or ""),
+        "actionableRobust": row.get("actionableRobust"),
+        "fdrQValue3m": optional_float(row.get("fdrQValue3m")),
+        "foldStability3m": row.get("foldStability3m") if isinstance(row.get("foldStability3m"), dict) else {},
     }
 
 
@@ -53,6 +56,8 @@ def portfolio_overview_layer(
         if low is not None and high is not None:
             band = [low, high]
     tier, context_note_cn, context_note = overview_confidence_tier(robust)
+    actionable_band = band if robust is True else None
+    context_band = band if robust is not True else None
     return {
         "layer": layer,
         "label": label,
@@ -63,7 +68,12 @@ def portfolio_overview_layer(
         "regime": regime,
         "regimeCn": regime_cn,
         "stance": stance,
-        "exposureBandPct": band,
+        # A portfolio band is actionable only after the validation harness has
+        # passed its complete CI/FDR/fold-stability gate.  Unverified and failed
+        # layers remain visible as context, but cannot silently bind the headline
+        # allocation recommendation.
+        "exposureBandPct": actionable_band,
+        "contextBand": context_band,
         "evidence": evidence,
         "note": note,
         "robust": robust,
@@ -75,15 +85,15 @@ def portfolio_overview_layer(
 
 def overview_confidence_tier(robust: bool | None) -> tuple[str, str, str]:
     """Map a layer's OOS robustness verdict (from the signalValidation harness) to a
-    presentation tier + honest context note. Pure labeling — does not touch any score,
-    band, or allocation number (Phase 2 presentation-only)."""
+    presentation tier + honest context note.  The caller also uses the same verdict
+    to keep non-actionable bands out of the headline recommendation."""
     if robust is True:
         return "validated", "", ""
     if robust is False:
         return (
             "context",
-            "样本外未达稳健(置信区间跨0)—仅作背景上下文,不作前瞻信号。",
-            "Not OOS-robust (confidence interval spans 0) — context only, not a forward signal.",
+            "未通过CI、FDR与分折一致性的完整门槛—仅作背景上下文,不作前瞻信号。",
+            "Did not pass the complete CI, FDR, and fold-stability gate — context only, not a forward signal.",
         )
     return (
         "unverified",
@@ -93,10 +103,9 @@ def overview_confidence_tier(robust: bool | None) -> tuple[str, str, str]:
 
 
 def overview_layer_robust(composite_row: dict[str, Any] | None) -> bool | None:
-    """Read the already-computed `robust` verdict off a signalValidation composite row;
-    returns None when the layer has no composite (robustness unknown)."""
-    if isinstance(composite_row, dict) and "robust" in composite_row:
-        return bool(composite_row.get("robust"))
+    """Read the complete actionable gate; legacy CI-only rows fail closed."""
+    if isinstance(composite_row, dict) and "actionableRobust" in composite_row:
+        return composite_row.get("actionableRobust") is True
     return None
 
 
@@ -331,26 +340,27 @@ def build_portfolio_overview(
             "layers": rows,
             "conflicts": [],
             "suggestedEquityExposureBand": None,
+            "contextBand": conservative_band(
+                [row["contextBand"] for row in rows if row.get("contextBand")]
+            ),
         }
 
-    bands = [row["exposureBandPct"] for row in rows if row.get("exposureBandPct")]
-    suggested_band = None
+    bands = [row["exposureBandPct"] for row in rows if row.get("robust") is True and row.get("exposureBandPct")]
+    context_band = conservative_band([row["contextBand"] for row in rows if row.get("contextBand")])
+    suggested_band = conservative_band(bands)
     binding_layer = None
     binding_basis = None
-    if bands:
-        low = min(band[0] for band in bands)
-        high = min(band[1] for band in bands)
-        suggested_band = [round(max(0.0, low), 0), round(max(low, min(high, 110.0)), 0)]
+    if suggested_band:
+        high = suggested_band[1]
         for row in rows:
             band = row.get("exposureBandPct")
-            if band and band[1] == high:
+            if row.get("robust") is True and band and band[1] == high:
                 binding_layer = str(row.get("labelCn") or row.get("layer"))
                 binding_basis = str(row.get("confidenceTier") or "")
                 break
 
-    # Display order: OOS-robust (validated) layers lead; context/unverified follow (stable,
-    # preserving original order within each tier). Pure presentation — bands/binding above were
-    # computed on the original order, so no allocation number changes (Phase 2 presentation-only).
+    # Display order: OOS-robust (validated) layers lead; context/unverified follow,
+    # preserving original order within each tier.
     rows.sort(key=lambda row: 0 if row.get("robust") is True else 1)
 
     conflicts: list[dict[str, Any]] = []
@@ -392,16 +402,35 @@ def build_portfolio_overview(
         "available": True,
         "asOf": str(sew.get("asOf") or est.get("asOf") or ""),
         "method": (
-            "Combines the 1-10d tactical, 1-3M macro-warning, and LPPL tc-window layers; the suggested band "
-            "takes the most conservative layer (element-wise minimum). Evidence columns come from the weekly "
-            "walk-forward signalValidation harness; layers without OOS validation are marked 证据不足."
+            "Combines only complete-gate actionable layers into the suggested band (element-wise minimum). "
+            "Failed or unverified 1-10d tactical, 1-3M macro-warning, and LPPL tc-window bands remain in "
+            "contextBand and cannot bind allocation. Evidence comes from the weekly walk-forward validation harness."
         ),
         "summary": band_text + conflict_text + "。每层命中率均为走出样本(OOS)统计,与无条件基准率对照。",
         "layers": rows,
         "conflicts": conflicts,
         "suggestedEquityExposureBand": suggested_band,
+        "contextBand": context_band,
         "bindingLayer": binding_layer,
         "bindingBasis": binding_basis,
         "regionalTilt": portfolio_overview_regional_tilt(regional_monitor),
         "usInternalTilt": portfolio_overview_us_internal_tilt(regional_monitor),
     }
+
+
+def conservative_band(bands: list[list[Any]]) -> list[float] | None:
+    """Combine comparable bands without granting them an actionability verdict."""
+    valid: list[tuple[float, float]] = []
+    for band in bands:
+        if not isinstance(band, (list, tuple)) or len(band) != 2:
+            continue
+        low = optional_float(band[0])
+        high = optional_float(band[1])
+        if low is None or high is None:
+            continue
+        valid.append((low, high))
+    if not valid:
+        return None
+    low = min(item[0] for item in valid)
+    high = min(item[1] for item in valid)
+    return [round(max(0.0, low), 0), round(max(low, min(high, 110.0)), 0)]

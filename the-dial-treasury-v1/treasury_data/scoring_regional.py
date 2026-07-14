@@ -27,22 +27,34 @@ def build_regional_monitor(global_lppl_risk: dict[str, Any] | None) -> dict[str,
     """Group the per-index LPPL factors into first-class regions (US groups SPY+QQQ)
     so the dashboard can surface region-distinguished factors at the top level instead
     of burying HK/TW/JP as 'ETF proxy' sub-rows. Purely a regrouping of existing index
-    rows — each row already embeds its own history/backtest/forwardSignal/validation."""
+    rows. Canonical history/backtest maps are hydrated only for calculations and
+    replaced with lightweight refs at the serialized regional boundary."""
     indices = global_lppl_risk.get("indices") if isinstance(global_lppl_risk, dict) else None
     if not isinstance(indices, list) or not indices:
         return {"available": False, "reason": "缺少逐指数LPPL数据,暂不能按地区拆分。", "regions": []}
 
+    history_by_symbol = (
+        global_lppl_risk.get("perIndexHistory", {})
+        if isinstance(global_lppl_risk, dict) and isinstance(global_lppl_risk.get("perIndexHistory"), dict)
+        else {}
+    )
+    backtest_by_symbol = (
+        global_lppl_risk.get("perIndexBacktests", {})
+        if isinstance(global_lppl_risk, dict) and isinstance(global_lppl_risk.get("perIndexBacktests"), dict)
+        else {}
+    )
     grouped: dict[str, list[dict[str, Any]]] = {}
     meta: dict[str, dict[str, str]] = {}
     for row in indices:
         if not isinstance(row, dict):
             continue
-        key = str(row.get("regionKey") or "").strip() or "other"
-        grouped.setdefault(key, []).append(row)
+        working_row = hydrate_regional_index_row(row, history_by_symbol, backtest_by_symbol)
+        key = str(working_row.get("regionKey") or "").strip() or "other"
+        grouped.setdefault(key, []).append(working_row)
         if key not in meta:
             meta[key] = {
-                "name": str(row.get("regionName") or row.get("region") or key),
-                "nameCn": str(row.get("regionNameCn") or row.get("regionName") or key),
+                "name": str(working_row.get("regionName") or working_row.get("region") or key),
+                "nameCn": str(working_row.get("regionNameCn") or working_row.get("regionName") or key),
             }
 
     ordered_keys = [key for key in REGIONAL_MONITOR_ORDER if key in grouped]
@@ -80,8 +92,82 @@ def build_regional_monitor(global_lppl_risk: dict[str, Any] | None) -> dict[str,
         "summary": regional_monitor_summary(available_regions, alerting),
         "rotation": build_regional_rotation(regions, diversification),
         "diversification": diversification,
-        "regions": regions,
+        "regions": compact_regional_regions(regions),
     }
+
+
+def hydrate_regional_index_row(
+    row: dict[str, Any],
+    history_by_symbol: dict[str, Any],
+    backtest_by_symbol: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve canonical LPPL refs for calculations without serializing copies."""
+    hydrated = dict(row)
+    symbol = str(row.get("symbol") or "").upper()
+    if symbol and not isinstance(hydrated.get("history"), dict):
+        history = history_by_symbol.get(symbol)
+        if isinstance(history, dict):
+            hydrated["history"] = history
+    if symbol and not isinstance(hydrated.get("backtest"), dict):
+        backtest = backtest_by_symbol.get(symbol)
+        if isinstance(backtest, dict):
+            hydrated["backtest"] = backtest
+    return hydrated
+
+
+REGIONAL_INDEX_SUMMARY_FIELDS = (
+    "symbol",
+    "name",
+    "region",
+    "regionKey",
+    "regionName",
+    "regionNameCn",
+    "proxyNote",
+    "proxyNoteCn",
+    "source",
+    "sourceSymbol",
+    "sourceQuality",
+    "available",
+    "score",
+    "confidence",
+    "status",
+    "statusCn",
+    "criticalDate",
+    "daysToCritical",
+    "daysToCriticalRange",
+    "fitR2",
+    "windowDays",
+    "asOf",
+    "reason",
+    "effectiveWeightMultiplier",
+    "clipState",
+    "tcAggregation",
+    "forwardSignal",
+    "priceFactors",
+    "validation",
+    "factorValidation",
+)
+
+
+def compact_regional_index_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the index summary needed by the regional UI plus canonical refs."""
+    compact = {key: row[key] for key in REGIONAL_INDEX_SUMMARY_FIELDS if key in row}
+    symbol = str(row.get("symbol") or "").upper()
+    if symbol:
+        compact["globalIndexRef"] = {"symbol": symbol, "collection": "globalLpplRisk.indices"}
+        compact["historyRef"] = {"symbol": symbol, "path": f"globalLpplRisk.perIndexHistory.{symbol}"}
+        compact["backtestRef"] = {"symbol": symbol, "path": f"globalLpplRisk.perIndexBacktests.{symbol}"}
+    return compact
+
+
+def compact_regional_regions(regions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    compact_regions: list[dict[str, Any]] = []
+    for region in regions:
+        compact = dict(region)
+        indices = region.get("indices", []) if isinstance(region.get("indices"), list) else []
+        compact["indices"] = [compact_regional_index_row(row) for row in indices if isinstance(row, dict)]
+        compact_regions.append(compact)
+    return compact_regions
 
 
 def regional_monitor_aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -238,6 +324,9 @@ def regional_monitor_summary(available_regions: list[dict[str, Any]], alerting: 
 
 # Factor ids whose high readings mean MORE risk (used to gate evidence-backed caution).
 REGIONAL_RISK_FACTOR_IDS = {"lpplScore", "realizedVol"}
+REGIONAL_COMPOSITE_ALERT_MIN_OBSERVATIONS = 60
+REGIONAL_COMPOSITE_ALERT_MIN_OOS_OBSERVATIONS = 20
+REGIONAL_COMPOSITE_ALERT_MIN_OOS_ALERTS = 3
 
 
 def regional_representative_index(indices: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -283,9 +372,34 @@ def composite_qualifies_as_alert(composite: dict[str, Any]) -> bool:
         return False
     if composite.get("currentValue") is None or composite.get("alertThreshold") is None:
         return False
-    if composite.get("beatsBestSingleFactor") is True:
-        return True
-    return str(composite.get("classification")) == "leading" and (optional_float(composite.get("lift")) or 0.0) > 1.0
+    fold_stability = composite.get("foldStability3m") if isinstance(composite.get("foldStability3m"), dict) else {}
+    oos_ic = optional_float(composite.get("oosIc3m"))
+    observation_count = optional_float(composite.get("observationCount")) or 0.0
+    oos_sample_size = optional_float(composite.get("oosSampleSize3m")) or 0.0
+    oos_alert_count = optional_float(composite.get("oosAlertCount")) or 0.0
+    direction = str(composite.get("direction") or "")
+
+    # ``beatsBestSingleFactor`` is a relative comparison, not a validation
+    # verdict.  A composite can beat a weak single factor while still being
+    # wrong-way, unstable, multiplicity-insignificant, or supported by only a
+    # handful of observations.  Keep the live alert fail-closed on every part
+    # of the complete actionable gate.
+    return bool(
+        composite.get("beatsBestSingleFactor") is True
+        and str(composite.get("classification") or "") == "leading"
+        and direction == "higher_risk"
+        and oos_ic is not None
+        and oos_ic > 0.0
+        and composite.get("wrongWay") is False
+        and (optional_float(composite.get("lift")) or 0.0) > 1.0
+        and composite.get("robust") is True
+        and composite.get("fdrSignificant3m") is True
+        and fold_stability.get("stablePositive") is True
+        and composite.get("actionableRobust") is True
+        and observation_count >= REGIONAL_COMPOSITE_ALERT_MIN_OBSERVATIONS
+        and oos_sample_size >= REGIONAL_COMPOSITE_ALERT_MIN_OOS_OBSERVATIONS
+        and oos_alert_count >= REGIONAL_COMPOSITE_ALERT_MIN_OOS_ALERTS
+    )
 
 
 def build_region_factor_alert(region: dict[str, Any]) -> dict[str, Any]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_right
 import csv
 import html
 import json
@@ -138,17 +139,33 @@ class TimeSeries:
     series_id: str
     points: list[SeriesPoint]
 
+    def __post_init__(self) -> None:
+        """Keep the observation grain canonical: one finite value per date.
+
+        All as-of lookups use binary search, so accepting an unsorted list makes
+        their answer input-order dependent.  Duplicate dates also create a fake
+        extra observation in returns, volatility and percentile windows.  Public
+        feeds should not normally contain either case, but overlapping bulk CSVs
+        and revised rows can.  The last valid row for a date wins, matching the
+        usual feed/update convention.
+        """
+        by_date: dict[date, SeriesPoint] = {}
+        for point in self.points:
+            if math.isfinite(point.value):
+                by_date[point.date] = point
+        canonical = [by_date[point_date] for point_date in sorted(by_date)]
+        object.__setattr__(self, "points", canonical)
+
     @property
     def latest(self) -> SeriesPoint:
         if not self.points:
             raise ValueError(f"{self.series_id} has no numeric observations")
         return self.points[-1]
 
-    def value_at_or_before(self, target: date) -> SeriesPoint:
-        for point in reversed(self.points):
-            if point.date <= target:
-                return point
-        return self.points[0]
+    def value_at_or_before(self, target: date) -> SeriesPoint | None:
+        """Return the latest known observation without borrowing from the future."""
+        index = bisect_right(self.points, target, key=lambda point: point.date) - 1
+        return self.points[index] if index >= 0 else None
 
 
 @dataclass(frozen=True)
@@ -434,8 +451,11 @@ def parse_fred_csv(content: str, series_id: str) -> TimeSeries:
         raw_value = (row.get(value_field) or "").strip()
         if not raw_date or raw_value in {"", "."}:
             continue
+        value = parse_optional_float(raw_value)
+        if value is None:
+            continue
         try:
-            points.append(SeriesPoint(datetime.strptime(raw_date, "%Y-%m-%d").date(), float(raw_value)))
+            points.append(SeriesPoint(datetime.strptime(raw_date, "%Y-%m-%d").date(), value))
         except ValueError:
             continue
     if not points:
@@ -457,10 +477,13 @@ def parse_stooq_quote_csv(content: str, symbol: str) -> MarketQuote:
         raw_close = (row.get("Close") or "").strip()
         if raw_date in {"", "N/D"} or raw_close in {"", "N/D"}:
             continue
+        close = parse_market_number(raw_close)
+        if close is None or close <= 0:
+            continue
         return MarketQuote(
             symbol=(row.get("Symbol") or symbol).strip(),
             date=datetime.strptime(raw_date, "%Y-%m-%d").date(),
-            close=float(raw_close),
+            close=close,
             source="Stooq",
         )
     raise ValueError(f"Stooq response for {symbol} did not contain a numeric quote")
@@ -489,7 +512,7 @@ def parse_stooq_daily_csv(content: str, symbol: str, *, source_url: str = "Stooq
         high_price = parse_market_number(row.get("High"))
         low_price = parse_market_number(row.get("Low"))
         close_price = parse_market_number(row.get("Close"))
-        if None in {open_price, high_price, low_price, close_price}:
+        if not valid_ohlc(open_price, high_price, low_price, close_price):
             continue
         volume_raw = parse_market_number(row.get("Volume"))
         bars.append(
@@ -500,11 +523,11 @@ def parse_stooq_daily_csv(content: str, symbol: str, *, source_url: str = "Stooq
                 high=float(high_price),
                 low=float(low_price),
                 close=float(close_price),
-                volume=int(volume_raw) if volume_raw is not None else None,
+                volume=int(volume_raw) if volume_raw is not None and volume_raw >= 0 else None,
                 source=source_url,
             )
         )
-    bars.sort(key=lambda item: item.date)
+    bars = canonical_market_bars(bars)
     if not bars:
         raise ValueError(f"Stooq response for {symbol} did not contain usable OHLC rows")
     return bars
@@ -543,9 +566,38 @@ def parse_market_number(value: Any) -> float | None:
     if not text or text.upper() in {"N/A", "NA", "N/D", "NULL", "NONE", "--"}:
         return None
     try:
-        return float(text)
+        parsed = float(text)
     except ValueError:
         return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def valid_ohlc(
+    open_price: float | None,
+    high_price: float | None,
+    low_price: float | None,
+    close_price: float | None,
+) -> bool:
+    """Return whether a parsed daily bar is finite, positive and coherent."""
+    if None in {open_price, high_price, low_price, close_price}:
+        return False
+    assert open_price is not None and high_price is not None
+    assert low_price is not None and close_price is not None
+    if min(open_price, high_price, low_price, close_price) <= 0:
+        return False
+    return high_price >= max(open_price, close_price, low_price) and low_price <= min(
+        open_price,
+        close_price,
+        high_price,
+    )
+
+
+def canonical_market_bars(bars: Iterable[MarketDailyBar]) -> list[MarketDailyBar]:
+    """Sort and deduplicate daily bars, retaining the last row for a date."""
+    by_date: dict[date, MarketDailyBar] = {}
+    for bar in bars:
+        by_date[bar.date] = bar
+    return [by_date[bar_date] for bar_date in sorted(by_date)]
 
 
 def parse_nasdaq_historical_json(content: str, symbol: str, *, source_url: str = "Nasdaq historical") -> list[MarketDailyBar]:
@@ -572,7 +624,7 @@ def parse_nasdaq_historical_json(content: str, symbol: str, *, source_url: str =
         high_price = parse_market_number(row.get("high"))
         low_price = parse_market_number(row.get("low"))
         close_price = parse_market_number(row.get("close"))
-        if None in {open_price, high_price, low_price, close_price}:
+        if not valid_ohlc(open_price, high_price, low_price, close_price):
             continue
         volume_raw = parse_market_number(row.get("volume"))
         bars.append(
@@ -583,11 +635,11 @@ def parse_nasdaq_historical_json(content: str, symbol: str, *, source_url: str =
                 high=float(high_price),
                 low=float(low_price),
                 close=float(close_price),
-                volume=int(volume_raw) if volume_raw is not None else None,
+                volume=int(volume_raw) if volume_raw is not None and volume_raw >= 0 else None,
                 source=source_url,
             )
         )
-    bars.sort(key=lambda item: item.date)
+    bars = canonical_market_bars(bars)
     if not bars:
         raise ValueError(f"Nasdaq response for {symbol} did not contain usable OHLC rows")
     return bars
@@ -766,9 +818,10 @@ def parse_optional_float(raw: object) -> float | None:
     if text in {"", ".", "nan", "NaN", "None"}:
         return None
     try:
-        return float(text)
+        value = float(text)
     except ValueError:
         return None
+    return value if math.isfinite(value) else None
 
 
 def parse_optional_int(raw: object) -> int | None:
@@ -853,16 +906,24 @@ def parse_cftc_financial_futures_txt(content: str) -> list[CftcTreasuryPosition]
     for report_date, row in rows:
         if report_date != latest_date:
             continue
-        open_interest = parse_optional_int(row.get("Open_Interest_All")) or 0
-        dealer_net = (parse_optional_int(row.get("Dealer_Positions_Long_All")) or 0) - (
-            parse_optional_int(row.get("Dealer_Positions_Short_All")) or 0
-        )
-        asset_manager_net = (parse_optional_int(row.get("Asset_Mgr_Positions_Long_All")) or 0) - (
-            parse_optional_int(row.get("Asset_Mgr_Positions_Short_All")) or 0
-        )
-        leveraged_net = (parse_optional_int(row.get("Lev_Money_Positions_Long_All")) or 0) - (
-            parse_optional_int(row.get("Lev_Money_Positions_Short_All")) or 0
-        )
+        parsed_counts = {
+            "open_interest": parse_optional_int(row.get("Open_Interest_All")),
+            "dealer_long": parse_optional_int(row.get("Dealer_Positions_Long_All")),
+            "dealer_short": parse_optional_int(row.get("Dealer_Positions_Short_All")),
+            "asset_manager_long": parse_optional_int(row.get("Asset_Mgr_Positions_Long_All")),
+            "asset_manager_short": parse_optional_int(row.get("Asset_Mgr_Positions_Short_All")),
+            "leveraged_long": parse_optional_int(row.get("Lev_Money_Positions_Long_All")),
+            "leveraged_short": parse_optional_int(row.get("Lev_Money_Positions_Short_All")),
+        }
+        if any(value is None for value in parsed_counts.values()):
+            continue
+        counts = {key: int(value) for key, value in parsed_counts.items() if value is not None}
+        if counts["open_interest"] <= 0 or any(value < 0 for value in counts.values()):
+            continue
+        open_interest = counts["open_interest"]
+        dealer_net = counts["dealer_long"] - counts["dealer_short"]
+        asset_manager_net = counts["asset_manager_long"] - counts["asset_manager_short"]
+        leveraged_net = counts["leveraged_long"] - counts["leveraged_short"]
         positions.append(
             CftcTreasuryPosition(
                 report_date=report_date,
@@ -871,9 +932,11 @@ def parse_cftc_financial_futures_txt(content: str) -> list[CftcTreasuryPosition]
                 dealer_net=dealer_net,
                 asset_manager_net=asset_manager_net,
                 leveraged_net=leveraged_net,
-                leveraged_net_pct_oi=round((leveraged_net / open_interest) * 100, 2) if open_interest else 0.0,
+                leveraged_net_pct_oi=round((leveraged_net / open_interest) * 100, 2),
             )
         )
+    if not positions:
+        raise ValueError("CFTC latest Treasury futures rows did not contain complete position counts")
     positions.sort(key=lambda item: (-abs(item.leveraged_net), item.market))
     return positions
 
@@ -1362,7 +1425,10 @@ def fetch_fred_macro_release_events(today: date | None = None, timeout: int = 30
         html_content = fetch_text_curl_first(FRED_RELEASE_CALENDAR_URL.format(release_id=release_id, year=target_year), timeout=timeout)
         for event in parse_fred_release_calendar_html(html_content, title_prefix="BLS"):
             events_by_key[(event.date, event.title)] = event
-    return [events_by_key[key] for key in sorted(events_by_key)]
+    events = [events_by_key[key] for key in sorted(events_by_key)]
+    if not events:
+        raise ValueError("FRED economic release calendars did not contain CPI, PPI, or employment dates")
+    return events
 
 
 def parse_bea_release_schedule_html(content: str) -> list[CalendarEvent]:
@@ -1402,7 +1468,10 @@ def is_bea_market_moving_release(title: str) -> bool:
 
 
 def fetch_bea_release_events(timeout: int = 30) -> list[CalendarEvent]:
-    return parse_bea_release_schedule_html(fetch_text_curl_first(BEA_RELEASE_SCHEDULE_URL, timeout=timeout))
+    events = parse_bea_release_schedule_html(fetch_text_curl_first(BEA_RELEASE_SCHEDULE_URL, timeout=timeout))
+    if not events:
+        raise ValueError("BEA release schedule did not contain GDP or Personal Income and Outlays dates")
+    return events
 
 
 def parse_fomc_projection_html(content: str) -> FomcProjection:
@@ -1517,19 +1586,22 @@ def parse_treasury_yield_xml(content: str) -> list[YieldCurveRecord]:
             node = props.find(f"d:{field_name}", namespaces)
             if node is None or node.text in {None, ""}:
                 continue
+            value = parse_optional_float(node.text)
+            if value is not None:
+                values[tenor] = value
+        if set(TENORS).issubset(values):
             try:
-                values[tenor] = float(node.text)
+                record_date = datetime.strptime(date_node.text[:10], "%Y-%m-%d").date()
             except ValueError:
                 continue
-        if set(TENORS).issubset(values):
             records.append(
                 YieldCurveRecord(
-                    date=datetime.strptime(date_node.text[:10], "%Y-%m-%d").date(),
+                    date=record_date,
                     values={tenor: values[tenor] for tenor in TENORS},
                 )
             )
-    records.sort(key=lambda item: item.date)
-    return records
+    by_date = {record.date: record for record in records}
+    return [by_date[record_date] for record_date in sorted(by_date)]
 
 
 def month_keys(end: date, months_back: int) -> list[str]:
@@ -1552,7 +1624,10 @@ def fetch_treasury_yield_curves(today: date | None = None, months_back: int = 4,
         content = fetch_text(TREASURY_XML_URL.format(month_key=key), timeout=timeout)
         for record in parse_treasury_yield_xml(content):
             by_date[record.date] = record
-    return [by_date[key] for key in sorted(by_date)]
+    records = [by_date[key] for key in sorted(by_date)]
+    if not records:
+        raise ValueError("Treasury yield curve XML did not contain a complete curve record")
+    return records
 
 
 def fetch_json(url: str, timeout: int = 30) -> object:
@@ -1567,7 +1642,10 @@ def fetch_treasury_auctions(timeout: int = 30) -> list[dict[str, object]]:
     auctioned = fetch_json_curl_first(TREASURY_AUCTIONED_URL, timeout=timeout)
     if not isinstance(auctioned, list):
         raise ValueError("TreasuryDirect auctioned endpoint did not return a list")
-    return [item for item in auctioned if isinstance(item, dict)]
+    rows = [item for item in auctioned if isinstance(item, dict)]
+    if not rows:
+        raise ValueError("TreasuryDirect auctioned endpoint returned no securities")
+    return rows
 
 
 def fetch_announced_auctions(timeout: int = 30) -> list[dict[str, object]]:

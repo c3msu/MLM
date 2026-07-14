@@ -9,6 +9,8 @@ from .build_dashboard import (
     FRED_SERIES,
     build_net_liquidity_points,
     change_points,
+    clean_curve_records,
+    clean_points,
     funding_fragmentation_points,
     onrrp_buffer_risk_points,
     parse_dashboard_date,
@@ -46,7 +48,7 @@ FRED_SERIES_META: dict[str, tuple[str, str, str, str]] = {
     "WALCL": ("美联储资产负债表", "$M", "FRED WALCL", "liquidity"),
     "TREAST": ("SOMA Treasury持仓", "$M", "FRED TREAST", "liquidity"),
     "WRESBAL": ("银行准备金", "$M", "FRED WRESBAL", "liquidity"),
-    "RRPONTSYD": ("ON RRP", "$M", "FRED RRPONTSYD", "liquidity"),
+    "RRPONTSYD": ("ON RRP", "$B", "FRED RRPONTSYD", "liquidity"),
     "CPIAUCSL": ("CPI指数", "index", "FRED CPIAUCSL", "macro"),
     "PCEPI": ("PCE价格指数", "index", "FRED PCEPI", "macro"),
     "PCEPILFE": ("核心PCE价格指数", "index", "FRED PCEPILFE", "macro"),
@@ -79,6 +81,15 @@ def fetch_public_history(today: date | None = None, years: int = 5) -> tuple[lis
     curve_records = fetch_treasury_yield_curves(today=today, months_back=years * 12 + 2)
     fred = fetch_fred_series_bulk(FRED_SERIES)
     source_errors: list[dict[str, str]] = []
+    missing_fred_series = sorted(set(FRED_SERIES_META) - set(fred))
+    if missing_fred_series:
+        source_errors.append(
+            {
+                "name": "FRED bulk history",
+                "error": f"Missing {len(missing_fred_series)} required series: {', '.join(missing_fred_series)}",
+                "severity": "error",
+            }
+        )
     try:
         auctions = fetch_treasury_auctions()
     except Exception as exc:  # noqa: BLE001
@@ -88,6 +99,7 @@ def fetch_public_history(today: date | None = None, years: int = 5) -> tuple[lis
     meta = {
         "curveRecordCount": len(curve_records),
         "fredSeriesCount": len(fred),
+        "missingFredSeries": missing_fred_series,
         "auctionRecordCount": len(auctions),
         "sourceErrors": source_errors,
         "observationCount": len(observations),
@@ -125,12 +137,23 @@ def build_historical_observations(
     observations.extend(fred_observations(fred, start, today))
     observations.extend(derived_observations(fred, start, today))
     observations.extend(auction_observations(auctions, start, today))
-    return observations
+    # Mirror the SQLite uniqueness contract before reporting counts/saved rows.
+    # Duplicate feed rows are revisions at the same grain, not extra history.
+    by_identity: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for row in observations:
+        identity = (
+            str(row.get("date") or ""),
+            str(row.get("category") or ""),
+            str(row.get("name") or ""),
+            str(row.get("label") or ""),
+        )
+        by_identity[identity] = row
+    return [by_identity[key] for key in sorted(by_identity)]
 
 
 def curve_observations(curve_records: list[YieldCurveRecord], start: date, end: date) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for record in sorted(curve_records, key=lambda item: item.date):
+    for record in clean_curve_records(curve_records):
         if record.date < start or record.date > end:
             continue
         for tenor in TENORS:
@@ -161,8 +184,8 @@ def fred_observations(fred: dict[str, TimeSeries], start: date, end: date) -> li
 
 def derived_observations(fred: dict[str, TimeSeries], start: date, end: date) -> list[dict[str, Any]]:
     net_liquidity = build_net_liquidity_points(fred)
-    momentum = change_points(net_liquidity, days=30)
-    momentum_13w = change_points(net_liquidity, days=91)
+    momentum = change_points(net_liquidity, days=30, max_target_gap_days=14)
+    momentum_13w = change_points(net_liquidity, days=91, max_target_gap_days=14)
     tga_deviation = rolling_median_deviation_points(fred.get("WTREGEN"), window_days=364)
     onrrp_risk = onrrp_buffer_risk_points(fred.get("RRPONTSYD"))
     sofr_effr = spread_points(fred.get("SOFR"), fred.get("DFF"), multiplier=100)
@@ -226,7 +249,7 @@ def point_rows(
 ) -> list[dict[str, Any]]:
     return [
         history_row(point.date, category, name, point.value, unit, source, label)
-        for point in points
+        for point in clean_points(points)
         if start <= point.date <= end and is_valid_number(point.value)
     ]
 

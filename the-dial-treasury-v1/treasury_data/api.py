@@ -61,6 +61,7 @@ def build_health_payload(dashboard: dict[str, Any]) -> dict[str, Any]:
                 errors.append(item)
     return {
         "status": "degraded" if errors else "ok",
+        "schemaVersion": dashboard.get("schemaVersion"),
         "asOf": dashboard.get("asOf"),
         "generatedAt": dashboard.get("generatedAt"),
         "sourceCounts": counts,

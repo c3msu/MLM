@@ -33,25 +33,50 @@ class BhadialWeeklyReplay:
         self._module_raw_cache: dict[tuple[str, date], tuple[float, int]] = {}
         self._month_ends_cache: dict[str, list[date]] = {}
 
+    @staticmethod
+    def publication_lag_days(spec: dict[str, Any]) -> int:
+        """Delegate to the same availability rule used by live scoring."""
+        return bhadial_publication_lag_days(spec)
+
     def factor_score_at(self, spec: dict[str, Any], target: date) -> tuple[float, bool]:
+        """Return the decision-date score and whether it is eligible for use.
+
+        ``target`` is always the decision date.  This method owns the release-lag
+        cutoff so callers cannot accidentally omit it or apply it twice.  A
+        missing, stale, or warming observation is neutralised to 50 and excluded
+        from validation, matching the live scorer's eligibility contract.
+        """
         cache_key = (str(spec["id"]), target)
         cached = self._factor_cache.get(cache_key)
         if cached is not None:
             return cached
+        availability_cutoff = target - timedelta(days=self.publication_lag_days(spec))
         sorted_points = self.sorted_series.get(str(spec["scoreKey"]))
-        current = sorted_points.value_at_or_before(target) if sorted_points is not None else None
+        current_index = sorted_points.index_at_or_before(availability_cutoff) if sorted_points is not None else None
+        current = sorted_points.values[current_index] if sorted_points is not None and current_index is not None else None
         if current is None:
             row = (50.0, False)
         else:
-            method = str(spec["method"])
-            direction = str(spec["direction"])
-            if method == "risk_signal":
-                bounded = max(0.0, min(1.0, current))
-                score = (1 - bounded) * 100 if direction == "lower_better" else bounded * 100
-            elif method == "shock_only" and current <= 0:
-                score = 50.0
-            else:
-                score = score_from_percentile(sorted_points.percentile_at(target), direction)
+            observation_date = sorted_points.dates[current_index]
+            age_days = max(0, (target - observation_date).days)
+            max_age_days = int(spec["maxAgeDays"])
+            percentile, sample_count = sorted_points.percentile_with_sample_count_at(availability_cutoff)
+            min_sample_count = int(spec["minSampleCount"])
+            eligible = (
+                age_days <= max_age_days
+                and sample_count >= min_sample_count
+                and percentile is not None
+            )
+            if not eligible:
+                row = (50.0, False)
+                self._factor_cache[cache_key] = row
+                return row
+            score = bhadial_score_from_observation(
+                current,
+                percentile,
+                method=str(spec["method"]),
+                direction=str(spec["direction"]),
+            )
             row = (max(0.0, min(100.0, score)), True)
         self._factor_cache[cache_key] = row
         return row
@@ -96,9 +121,13 @@ class BhadialWeeklyReplay:
 
     def module_ema_score_at(self, module: dict[str, Any], target: date, *, span: int = 5) -> float | None:
         start = window_start(target, years=5)
-        point_dates = [point_date for point_date in self.module_month_ends(module) if start <= point_date <= target]
-        if target not in point_dates:
-            point_dates.append(target)
+        point_dates_by_month = {
+            (point_date.year, point_date.month): point_date
+            for point_date in self.module_month_ends(module)
+            if start <= point_date <= target
+        }
+        point_dates_by_month[(target.year, target.month)] = target
+        point_dates = [point_dates_by_month[key] for key in sorted(point_dates_by_month)]
         alpha = 2 / (span + 1)
         ema: float | None = None
         for point_date in sorted(point_dates):
@@ -145,12 +174,24 @@ class BhadialWeeklyReplay:
 
 
 
+EQUITY_SHORT_TERM_VALIDATION_EXCLUSION = {
+    "id": "equityShortTermRisk",
+    "reason": (
+        "Excluded from the 91-calendar-day composite/FDR family because its "
+        "primary endpoint is 15 trading days and it has a dedicated walk-forward backtest."
+    ),
+    "primaryEndpoint": "15 trading days",
+    "validationPath": "equityShortTermRisk.backtest",
+}
+
+
 def unavailable_signal_validation(reason: str) -> dict[str, Any]:
     return {
         "available": False,
         "reason": reason,
         "factors": [],
         "composites": [],
+        "excludedModels": [dict(EQUITY_SHORT_TERM_VALIDATION_EXCLUSION)],
         "clusters": [],
         "effectiveWeights": [],
     }
@@ -168,6 +209,11 @@ def build_signal_validation(
         return unavailable_signal_validation("S&P 500周度样本不足,暂不能执行走出样本验证。")
     prices_sorted = SortedSeries(sp500_points)
     replay = BhadialWeeklyReplay(series)
+    common_split_index = max(
+        0,
+        min(len(week_targets) - 1, int(len(week_targets) * SIGNAL_VALIDATION_OOS_SPLIT)),
+    )
+    common_oos_start = week_targets[common_split_index]
 
     factor_series: dict[str, list[SeriesPoint]] = {}
     factor_rows: list[dict[str, Any]] = []
@@ -188,6 +234,7 @@ def build_signal_validation(
                 price_points=sp500_points,
                 prices_sorted=prices_sorted,
                 direction="higher_better",
+                oos_start_date=common_oos_start,
             )
             if row is not None:
                 factor_rows.append(row)
@@ -325,13 +372,10 @@ def build_signal_validation(
             price_points=sp500_points,
             prices_sorted=prices_sorted,
             direction=str(spec["direction"]),
+            oos_start_date=common_oos_start,
         )
         if row is not None:
             composite_rows.append(row)
-
-    equity_row = build_equity_signal_validation_row(equity_short_term_risk)
-    if equity_row is not None:
-        composite_rows.append(equity_row)
 
     weights = effective_weights(BHADIAL_CONDITION_MODULES, BHADIAL_MODULE_WEIGHTS, clusters)
 
@@ -352,9 +396,25 @@ def build_signal_validation(
             price_points=sp500_points,
             prices_sorted=prices_sorted,
             direction="higher_better",
+            oos_start_date=common_oos_start,
         )
         if predictive_row is not None:
             composite_rows.append(predictive_row)
+    factor_family_size = sum(len(module["factors"]) for module in BHADIAL_CONDITION_MODULES)
+    # The predictive lens is attempted under a fixed specification.  If it is
+    # unavailable, it remains an implicit p=1 member rather than silently
+    # reducing the composite multiplicity penalty.
+    composite_family_size = len(composite_specs) + 1
+    apply_benjamini_hochberg(
+        factor_rows,
+        alpha=DEFAULT_FDR_ALPHA,
+        family_size=factor_family_size,
+    )
+    apply_benjamini_hochberg(
+        composite_rows,
+        alpha=DEFAULT_FDR_ALPHA,
+        family_size=composite_family_size,
+    )
     predictive_payload = {key: value for key, value in predictive_lens.items() if key != "points"}
     summary = signal_validation_summary(factor_rows, composite_rows)
     return {
@@ -363,14 +423,41 @@ def build_signal_validation(
         "summary": summary,
         "method": (
             "Weekly point-in-time replay of all condition factors and composite overlays against forward "
-            "S&P 500 returns; thresholds and ICs are split into calibration (first 65%) and out-of-sample "
-            "(last 35%) slices; alert hit rates are compared with the unconditional base rate."
+            "S&P 500 returns; every row uses one common calendar 65/35 OOS boundary, plus contiguous fold-stability "
+            "diagnostics and Benjamini-Hochberg control on the pre-specified 3M factor endpoint. Because factor "
+            "definitions and weights were informed by prior validation, the tail slice is research validation, "
+            "not an untouched independent holdout. equityShortTermRisk is excluded because its primary endpoint "
+            "is 15 trading days and is assessed in its dedicated walk-forward backtest."
         ),
+        "validationStatus": "research-validation",
+        "independentHoldout": False,
+        "primaryEndpointDays": 91,
+        "commonOosStartDate": common_oos_start.isoformat(),
+        "multipleTesting": {
+            "method": "Benjamini-Hochberg",
+            "alpha": DEFAULT_FDR_ALPHA,
+            "scope": "separate factor and composite oosIc3m families",
+            "families": [
+                {
+                    "name": "factors",
+                    "size": factor_family_size,
+                    "reportedRows": len(factor_rows),
+                    "implicitUnavailableHypotheses": max(0, factor_family_size - len(factor_rows)),
+                },
+                {
+                    "name": "composites",
+                    "size": composite_family_size,
+                    "reportedRows": len(composite_rows),
+                    "implicitUnavailableHypotheses": max(0, composite_family_size - len(composite_rows)),
+                },
+            ],
+        },
         "weeklyObservationCount": len(week_targets),
         "oosSplitPct": round(SIGNAL_VALIDATION_OOS_SPLIT * 100),
         "drawdownRule": f"{SIGNAL_VALIDATION_DRAWDOWN_DAYS}D内最大回撤≤{SIGNAL_VALIDATION_DRAWDOWN_PCT:.0f}%",
         "factors": factor_rows,
         "composites": composite_rows,
+        "excludedModels": [dict(EQUITY_SHORT_TERM_VALIDATION_EXCLUSION)],
         "clusters": cluster_rows,
         "effectiveWeights": weights,
         "predictiveLens": predictive_payload,
@@ -385,18 +472,22 @@ def signal_validation_summary(
     """One-line honest readout of the OOS-robustness landscape, read off the already-computed
     `robust`/`classification` fields (no new estimation). Discipline: only robust signals are
     forward-actionable; the rest are diagnostic context."""
-    robust_factors = [f for f in factor_rows if isinstance(f, dict) and f.get("robust")]
+    robust_factors = [f for f in factor_rows if isinstance(f, dict) and f.get("actionableRobust")]
     robust_leading = [f for f in robust_factors if str(f.get("classification")) == "leading"]
     robust_other = [f for f in robust_factors if str(f.get("classification")) != "leading"]
     by_id = {str(c.get("id")): c for c in composite_rows if isinstance(c, dict)}
     agg = by_id.get("spyEarlyWarning")
-    if isinstance(agg, dict) and "robust" in agg:
-        agg_text = "聚合预警样本外稳健" if agg.get("robust") else "聚合预警未达样本外稳健(CI跨0)"
+    if isinstance(agg, dict) and agg.get("actionableRobust") is True:
+        agg_text = "聚合预警通过CI、FDR与分折一致性门槛"
+    elif isinstance(agg, dict) and agg.get("robust") is True:
+        agg_text = "聚合预警CI为正,但未通过FDR/分折门槛"
+    elif isinstance(agg, dict) and "robust" in agg:
+        agg_text = "聚合预警未达样本外统计显著(CI跨0)"
     else:
         agg_text = "聚合预警稳健性未知"
     return (
-        f"{len(factor_rows)}因子周度回放: {len(robust_leading)}个稳健领先(样本外CI排除0), "
-        f"{len(robust_other)}个稳健同步/滞后; {agg_text}。仅稳健信号可作前瞻依据,余者仅诊断。"
+        f"{len(factor_rows)}因子周度回放: {len(robust_leading)}个通过CI、FDR与分折一致性的领先因子, "
+        f"{len(robust_other)}个稳健同步/滞后; {agg_text}。仅通过完整门槛的信号可作前瞻依据,余者仅诊断。"
     )
 
 
@@ -412,12 +503,25 @@ def annotate_spy_warning_robustness(
     by_id = {str(c.get("id")): c for c in (signal_validation.get("composites") or []) if isinstance(c, dict)}
     agg = by_id.get("spyEarlyWarning")
     if isinstance(agg, dict) and "robust" in agg:
-        spy_early_warning["aggregateRobust"] = bool(agg.get("robust"))
+        spy_early_warning["aggregateCiRobust"] = bool(agg.get("robust"))
+        spy_early_warning["aggregateActionableRobust"] = bool(agg.get("actionableRobust"))
+        # Compatibility field now carries the complete gate, not CI-only significance.
+        spy_early_warning["aggregateRobust"] = bool(agg.get("actionableRobust"))
         spy_early_warning["aggregateOosCi3m"] = agg.get("oosCi3m")
     spy_early_warning["robustSleeves"] = [
         cid.split(":", 1)[1]
         for cid, c in by_id.items()
-        if cid.startswith("sleeve:") and c.get("robust") and (optional_float(c.get("oosIc3m")) or 0.0) > 0
+        if cid.startswith("sleeve:") and c.get("actionableRobust") and (optional_float(c.get("oosIc3m")) or 0.0) > 0
+    ]
+    spy_early_warning["exploratorySleeves"] = [
+        cid.split(":", 1)[1]
+        for cid, c in by_id.items()
+        if (
+            cid.startswith("sleeve:")
+            and c.get("robust")
+            and not c.get("actionableRobust")
+            and (optional_float(c.get("oosIc3m")) or 0.0) > 0
+        )
     ]
 
 
@@ -440,13 +544,31 @@ def build_bhadial_predictive_lens(
         for module in BHADIAL_CONDITION_MODULES
         for spec in module["factors"]
     }
+    split_index = max(
+        0,
+        min(len(week_targets) - 1, int(len(week_targets) * SIGNAL_VALIDATION_OOS_SPLIT)),
+    )
+    oos_start = week_targets[split_index] if week_targets else None
+    purge_horizon_days = 91
+    purge_payload: dict[str, Any] = {
+        "applied": oos_start is not None,
+        "horizonDays": purge_horizon_days,
+        "oosStartDate": oos_start.isoformat() if oos_start is not None else None,
+        "rule": "calibration signal date + 91 calendar days must be strictly before the OOS start date",
+        "purgedObservationCount": 0,
+    }
     selected: list[dict[str, Any]] = []
     for factor_id in sorted(factor_series):
         points = factor_series[factor_id]
         if len(points) < MIN_SIGNAL_VALIDATION_POINTS:
             continue
-        split_index = max(1, int(len(points) * SIGNAL_VALIDATION_OOS_SPLIT))
-        calibration = points[:split_index]
+        pre_oos = [point for point in points if oos_start is None or point.date < oos_start]
+        calibration = [
+            point
+            for point in pre_oos
+            if oos_start is None or point.date + timedelta(days=purge_horizon_days) < oos_start
+        ]
+        purge_payload["purgedObservationCount"] += len(pre_oos) - len(calibration)
         signal_values: list[float | None] = [point.value for point in calibration]
         ic_1m = spearman_ic(signal_values, [prices_sorted.forward_return_pct(point.date, days=30) for point in calibration])
         ic_3m = spearman_ic(signal_values, [prices_sorted.forward_return_pct(point.date, days=91) for point in calibration])
@@ -458,12 +580,20 @@ def build_bhadial_predictive_lens(
         consistent_ic = min(ic_1m, ic_3m)
         if consistent_ic < min_calibration_ic:
             continue
-        selected.append({"id": factor_id, "calibrationIc": round(consistent_ic, 3)})
+        selected.append(
+            {
+                "id": factor_id,
+                "calibrationIc": round(consistent_ic, 3),
+                "calibrationSampleSize": len(calibration),
+                "calibrationEndDate": calibration[-1].date.isoformat() if calibration else None,
+            }
+        )
     if len(selected) < min_factors:
         return {
             "available": False,
             "reason": f"校准段达标的领先因子不足{min_factors}个,预测镜头暂不发布。",
             "selectedFactors": selected,
+            "purge": purge_payload,
             "points": [],
         }
     weight_by_id = {str(row["id"]): float(row["effectiveWeight"]) for row in weight_rows}
@@ -475,8 +605,9 @@ def build_bhadial_predictive_lens(
             spec = spec_by_id.get(item["id"])
             if spec is None:
                 continue
-            lag = int(spec.get("publicationLagDays") or 1)
-            score, observed = replay.factor_score_at(spec, target - timedelta(days=lag))
+            # BhadialWeeklyReplay owns the publication cutoff.  Passing the
+            # decision date here avoids silently applying the factor lag twice.
+            score, observed = replay.factor_score_at(spec, target)
             if not observed:
                 continue
             weight = weight_by_id.get(item["id"], 0.0)
@@ -492,9 +623,11 @@ def build_bhadial_predictive_lens(
         "method": (
             "Leading factors chosen on the calibration slice only, requiring BOTH 1M and 3M "
             f"forward IC >= {min_calibration_ic:.2f} (multi-horizon consistency, not best-of), "
-            "weighted by redundancy-adjusted effective weights, replayed with per-factor publication lags."
+            "with a 91-calendar-day purge before the common OOS boundary, weighted by "
+            "redundancy-adjusted effective weights, and replayed with per-factor publication lags."
         ),
         "selectedFactors": selected,
+        "purge": purge_payload,
         "latestScore": latest_score,
         "points": points,
     }

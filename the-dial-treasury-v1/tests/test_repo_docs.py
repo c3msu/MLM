@@ -94,6 +94,39 @@ class RepoDocsTests(unittest.TestCase):
         self.assertIn("CSV export does not apply to `/api/health`,", deployment)
         self.assertIn("warning-severity source errors remain", combined)
         self.assertIn("candidate with core curve, scorecard, and Conditions Score trend content", deployment)
+        self.assertIn("21 active factors", combined)
+        self.assertNotIn("30 scored factors", combined)
+        self.assertIn("`macroLiquidity.activeFactorCount == 21`", authoring)
+        self.assertIn("Treat `scoredFactorCount` as dynamic", authoring)
+        self.assertIn("`meta.bhadialCompatibility.coverage.scorecardFactorCount == 21`", authoring)
+
+    def test_investment_view_domain_is_extracted_behind_the_builder_facade(self):
+        domain = APP_ROOT / "treasury_data" / "investment_views.py"
+        builder = (APP_ROOT / "treasury_data" / "build_dashboard.py").read_text(encoding="utf-8")
+        readme = (APP_ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertTrue(domain.exists())
+        self.assertIn("from .investment_views import *", builder)
+        self.assertNotIn("def build_ideas", builder)
+        self.assertNotIn("def investment_view_decision_fields", builder)
+        self.assertNotIn("def investment_view_equity_impact", builder)
+        self.assertIn("treasury_data/investment_views.py", readme)
+
+    def test_factor_group_domain_is_extracted_behind_the_builder_facade(self):
+        domain = APP_ROOT / "treasury_data" / "factor_groups.py"
+        formatting = APP_ROOT / "treasury_data" / "dashboard_format.py"
+        builder = (APP_ROOT / "treasury_data" / "build_dashboard.py").read_text(encoding="utf-8")
+        readme = (APP_ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertTrue(domain.exists())
+        self.assertTrue(formatting.exists())
+        self.assertIn("from .factor_groups import *", builder)
+        self.assertIn("from .dashboard_format import *", builder)
+        self.assertNotIn("def build_groups", builder)
+        self.assertNotIn("def compatibility_factor", builder)
+        self.assertNotIn("def auction_demand_signal", builder)
+        self.assertIn("treasury_data/factor_groups.py", readme)
+        self.assertIn("treasury_data/dashboard_format.py", readme)
 
 
 if __name__ == "__main__":

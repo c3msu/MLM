@@ -52,7 +52,12 @@ const DEFAULT_DATA = {
     bias: "restrictive",
     sourceUrl: "https://bhadial.com/dashboard",
     moduleCount: 7,
+    activeFactorCount: 21,
     scoredFactorCount: 21,
+    observedFactorCount: 21,
+    scoredCoveragePct: 100,
+    effectiveWeightCoveragePct: 100,
+    reliabilityScore: 42,
     method: "Bhadial Conditions Score-compatible 21-factor, 7-module 5Y historical percentile composite; Funding uses EMA(5).",
     summary: "偏紧: 等待 data/dashboard.json 后显示实时 21 因子模块评分。",
     constraint: { name: "净流动性", value: "$5.93T", contribution: -8.14, direction: "restrictive" },
@@ -604,7 +609,7 @@ async function loadRuntimeData(options = {}) {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 6000);
-    const response = await fetch(`data/dashboard.json?ts=${Date.now()}`, { cache: "no-store", signal: controller.signal });
+    const response = await fetch("data/dashboard.json", { cache: "no-cache", signal: controller.signal });
     clearTimeout(timeout);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const liveData = await response.json();
@@ -638,7 +643,7 @@ async function loadEquityFreshnessStatus() {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
-    const response = await fetch(`/api/health?ts=${Date.now()}`, { cache: "no-store", signal: controller.signal });
+    const response = await fetch("/api/health", { cache: "no-cache", signal: controller.signal });
     clearTimeout(timeout);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
@@ -1008,6 +1013,7 @@ function renderAll() {
   renderPortfolioOverview();
   renderEvents();
   renderIdeas();
+  initTopNavMore();
   bindNavObserver();
   initCollapsibleSections();
 }
@@ -1212,6 +1218,9 @@ function applyLanguage() {
   $$("[data-i18n-title]").forEach((node) => {
     node.title = t(node.dataset.i18nTitle);
   });
+  $$("[data-i18n-aria-label]").forEach((node) => {
+    node.setAttribute("aria-label", t(node.dataset.i18nAriaLabel));
+  });
   const toggle = $("#languageToggle");
   if (toggle) {
     toggle.textContent = currentLanguage === "en" ? "中" : "EN";
@@ -1240,7 +1249,8 @@ function renderHero() {
     { label: t("curve.slope2s10s"), value: `${Math.round(s2s10)} bp`, change: t("curve.steepening"), cls: "flat" },
     { label: t("curve.slope5s30s"), value: `${Math.round(s5s30)} bp`, change: t("curve.steepening"), cls: "flat" }
   );
-  $("#heroTiles").innerHTML = tiles.map((tile) => `
+  const summaryTiles = [tiles[0], tiles[2], tiles[4], tiles[5]];
+  $("#heroTiles").innerHTML = summaryTiles.map((tile) => `
     <div class="tile">
       <div class="lab">${tile.label}</div>
       <div class="val">${tile.value}</div>
@@ -1311,8 +1321,100 @@ function renderConclusionAudit() {
   `;
 }
 
+function decisionSnapshotCard({ eyebrow, label, value, status, detail, tone = "neutral" }) {
+  return `
+    <article class="decision-snapshot-card ${escapeHtml(tone)}">
+      <div class="decision-snapshot-top">
+        <span>${escapeHtml(eyebrow)}</span>
+        <em>${escapeHtml(status)}</em>
+      </div>
+      <div class="decision-snapshot-value">
+        <h3>${escapeHtml(label)}</h3>
+        <strong>${escapeHtml(value)}</strong>
+      </div>
+      <p>${escapeHtml(detail)}</p>
+    </article>
+  `;
+}
+
+function curvePoint(curve, tenor, series = "today") {
+  const index = curve.tenors.indexOf(tenor);
+  const value = index >= 0 ? curve[series]?.[index] : null;
+  return Number.isFinite(value) ? value : null;
+}
+
+function bpDelta(current, previous) {
+  if (!Number.isFinite(current) || !Number.isFinite(previous)) return null;
+  return Math.round((current - previous) * 100);
+}
+
+function signedBp(value) {
+  return Number.isFinite(value) ? `${value > 0 ? "+" : ""}${Math.round(value)}bp` : "--";
+}
+
+function curveShiftLabel(frontMove, longMove, slopeMove) {
+  if (![frontMove, longMove, slopeMove].every(Number.isFinite)) return "变化待确认";
+  if (Math.abs(slopeMove) < 2) return "近乎平移";
+  const direction = (frontMove + longMove) >= 0 ? "熊市" : "牛市";
+  return `${direction}${slopeMove > 0 ? "变陡" : "变平"}`;
+}
+
+function renderCurveDecisionSnapshot() {
+  const C = state.curve;
+  const twoYear = curvePoint(C, "2Y");
+  const tenYear = curvePoint(C, "10Y");
+  const twoYearDay = curvePoint(C, "2Y", "d1");
+  const tenYearDay = curvePoint(C, "10Y", "d1");
+  const twoYearMonth = bpDelta(twoYear, curvePoint(C, "2Y", "m1"));
+  const tenYearMonth = bpDelta(tenYear, curvePoint(C, "10Y", "m1"));
+  const twoYearDayBp = Number.isFinite(twoYearDay) ? Math.round(twoYearDay * 100) : null;
+  const tenYearDayBp = Number.isFinite(tenYearDay) ? Math.round(tenYearDay * 100) : null;
+  const slope = bpDelta(tenYear, twoYear);
+  const slopeDay = Number.isFinite(twoYearDayBp) && Number.isFinite(tenYearDayBp)
+    ? tenYearDayBp - twoYearDayBp
+    : null;
+  const slopeMonth = Number.isFinite(twoYearMonth) && Number.isFinite(tenYearMonth)
+    ? tenYearMonth - twoYearMonth
+    : null;
+  const shape = curveShiftLabel(twoYearDayBp, tenYearDayBp, slopeDay);
+  const cards = [
+    {
+      eyebrow: "前端重定价 · 2Y",
+      label: "政策敏感端",
+      value: Number.isFinite(twoYear) ? `${twoYear.toFixed(2)}%` : "--",
+      status: Number.isFinite(twoYearDayBp) && twoYearDayBp > 2 ? "偏鹰" : "稳定",
+      detail: `日 ${signedBp(twoYearDayBp)} · 月 ${signedBp(twoYearMonth)}`,
+      tone: Number.isFinite(twoYearDayBp) && twoYearDayBp > 2 ? "restrictive" : "neutral"
+    },
+    {
+      eyebrow: "长端定价锚 · 10Y",
+      label: "长端收益率",
+      value: Number.isFinite(tenYear) ? `${tenYear.toFixed(2)}%` : "--",
+      status: Math.abs(tenYearMonth || 0) <= 2 ? "高位盘整" : "重新定价",
+      detail: `日 ${signedBp(tenYearDayBp)} · 月 ${signedBp(tenYearMonth)}`,
+      tone: Number.isFinite(tenYearDayBp) && tenYearDayBp > 3 ? "restrictive" : "neutral"
+    },
+    {
+      eyebrow: "曲线形态 · 2s10s",
+      label: "期限结构",
+      value: signedBp(slope),
+      status: shape,
+      detail: `日 ${signedBp(slopeDay)} · 月 ${signedBp(slopeMonth)}`,
+      tone: Math.abs(slopeDay || 0) >= 4 ? "restrictive" : "neutral"
+    }
+  ];
+  $("#curveDecisionCards").innerHTML = cards.map(decisionSnapshotCard).join("");
+  const [curveStance] = curveLabel(aggregates().curve);
+  $("#curveDecisionRead").innerHTML = `
+    <strong>关键变化</strong>
+    <span>2Y 一个月 ${signedBp(twoYearMonth)}、10Y ${signedBp(tenYearMonth)}，2s10s 同期 ${signedBp(slopeMonth)}；本轮由前端重新定价主导。</span>
+    <em>行动含义 · ${escapeHtml(curveStance)}</em>
+  `;
+}
+
 function renderCurve() {
   const C = state.curve;
+  renderCurveDecisionSnapshot();
   drawCurveChart("#curveChart", C);
   const s2s10 = (C.today[8] - C.today[4]) * 100;
   const s5s30 = (C.today[10] - C.today[6]) * 100;
@@ -1467,6 +1569,20 @@ function drawAttributionChart() {
   `;
 }
 
+function scoreMeaningLabel(scoreValue) {
+  return ({
+    "-2": t("score.strongBear"),
+    "-1": t("score.bear"),
+    "0": t("score.neutral"),
+    "1": t("score.bull"),
+    "2": t("score.strongBull")
+  })[String(scoreValue)] || t("score.neutral");
+}
+
+function signedScoreLabel(scoreValue) {
+  return Number(scoreValue) > 0 ? `+${scoreValue}` : String(scoreValue);
+}
+
 function renderScorecard() {
   const score = aggregates();
   const [durationText, durationCode] = stanceLabel(score.duration);
@@ -1511,10 +1627,16 @@ function renderScorecard() {
               <span>${t("score.current")} ${factor.score}</span>
             </div>
             <div class="factor-note">${factor.note}${renderFactorSourceMode(factor)}</div>
-            <div class="score-buttons" aria-label="${factor.n} score controls">
-              ${[-2, -1, 0, 1, 2].map((scoreValue) => `
-                <button type="button" class="${scoreValue === factor.score ? "active" : ""}" data-score="${groupIndex}:${factorIndex}:${scoreValue}">${scoreValue}</button>
-              `).join("")}
+            <div class="score-buttons" role="group" aria-label="${escapeHtml(t("score.controlGroup", { factor: factor.n }))}">
+              ${[-2, -1, 0, 1, 2].map((scoreValue) => {
+                const selected = scoreValue === factor.score;
+                const meaning = scoreMeaningLabel(scoreValue);
+                const scoreLabel = signedScoreLabel(scoreValue);
+                const accessibleLabel = t("score.setAria", { factor: factor.n, value: scoreLabel, meaning });
+                return `
+                  <button type="button" class="${selected ? "active" : ""}" data-score="${groupIndex}:${factorIndex}:${scoreValue}" aria-pressed="${selected ? "true" : "false"}" aria-label="${escapeHtml(accessibleLabel)}" title="${escapeHtml(accessibleLabel)}">${scoreLabel}</button>
+                `;
+              }).join("")}
             </div>
           </div>
         `).join("")}
@@ -1724,11 +1846,24 @@ function renderMacroLiquidityQuality(panel) {
   const counts = sourceStatusCounts();
   const observed = Number(panel.observedFactorCount);
   const scored = Number(panel.scoredFactorCount);
+  const active = Number(panel.activeFactorCount);
   const total = Number(panel.totalFactorCount);
-  const coverageText = Number.isFinite(observed) && Number.isFinite(scored)
-    ? `${observed.toFixed(0)}/${scored.toFixed(0)} scored`
-    : "-- scored";
+  const coverageText = Number.isFinite(scored) && Number.isFinite(active)
+    ? `${scored.toFixed(0)}/${active.toFixed(0)} eligible${Number.isFinite(observed) ? ` · ${observed.toFixed(0)} fresh` : ""}`
+    : Number.isFinite(observed) && Number.isFinite(scored)
+      ? `${scored.toFixed(0)} eligible · ${observed.toFixed(0)} fresh`
+      : "-- eligible";
   const totalText = Number.isFinite(total) ? `${total.toFixed(0)} total` : "47 total";
+  const effectiveWeightCoverage = Number(panel.effectiveWeightCoveragePct);
+  const reliabilityScore = Number(panel.reliabilityScore);
+  const publishedScore = Number(panel.score);
+  const reliabilityText = [
+    Number.isFinite(effectiveWeightCoverage) ? `${effectiveWeightCoverage.toFixed(0)}% weight` : "",
+    Number.isFinite(reliabilityScore) ? `reliable ${reliabilityScore.toFixed(1)}` : "",
+    Number.isFinite(reliabilityScore) && Number.isFinite(publishedScore)
+      ? `Δ ${formatSignedMetric(reliabilityScore - publishedScore, 1)}`
+      : "",
+  ].filter(Boolean).join(" · ") || "--";
   const sourceParts = [
     `${counts.ok} ok`,
     counts.warning ? `${counts.warning} warn` : "",
@@ -1743,6 +1878,7 @@ function renderMacroLiquidityQuality(panel) {
     : `<span class="neutral"><b>Public</b><em>${escapeHtml(benchmark.latest || "benchmark pending")}</em></span>`;
   return `
     <span class="neutral"><b>Coverage</b><em>${coverageText} · ${totalText}</em></span>
+    <span class="${Number.isFinite(effectiveWeightCoverage) && effectiveWeightCoverage < 70 ? "restrictive" : "neutral"}"><b>Reliability</b><em>${reliabilityText}</em></span>
     <span class="${counts.error ? "restrictive" : counts.warning ? "neutral" : "supportive"}"><b>Sources</b><em>${sourceParts.join(" · ") || "--"}</em></span>
     ${benchmarkHtml}
   `;
@@ -1753,6 +1889,110 @@ function benchmarkDeltaClass(delta) {
   if (!Number.isFinite(numeric) || Math.abs(numeric) <= 2) return "supportive";
   if (Math.abs(numeric) <= 5) return "neutral";
   return "restrictive";
+}
+
+function forwardSignalFallbackLayers() {
+  const short = state.equityShortTermRisk || DEFAULT_DATA.equityShortTermRisk || {};
+  const spy = state.spyEarlyWarning || DEFAULT_DATA.spyEarlyWarning || {};
+  const lppl = state.globalLpplRisk || DEFAULT_DATA.globalLpplRisk || {};
+  const lpplRows = Array.isArray(lppl.indices) ? lppl.indices : [];
+  const lpplLeader = lpplRows
+    .filter((row) => row?.forwardSignal?.available && Number.isFinite(Number(row.forwardSignal.score)))
+    .sort((a, b) => Number(b.forwardSignal.score) - Number(a.forwardSignal.score))[0] || null;
+  return [
+    {
+      layer: "equityShortTermRisk",
+      labelCn: "短期权益风险",
+      horizonCn: short.allocation?.horizonCn || "1-10个交易日",
+      score: short.score,
+      regimeCn: short.regimeCn || short.regime,
+      stance: short.allocation?.hedgeAction || short.allocation?.stance || "等待数据",
+      exposureBandPct: short.allocation?.exposureBandPct,
+      confidenceTier: short.available ? "validated" : "unverified",
+      evidence: { available: false },
+    },
+    {
+      layer: "spyEarlyWarning",
+      labelCn: "SPY宏观预警",
+      horizonCn: spy.allocation?.horizonCn || "1-3个月",
+      score: spy.score,
+      regimeCn: spy.regimeCn || spy.regime,
+      stance: spy.allocation?.hedgeAction || spy.allocation?.stance || "等待数据",
+      exposureBandPct: spy.allocation?.exposureBandPct,
+      confidenceTier: spy.aggregateRobust ? "validated" : "context",
+      evidence: { available: false },
+    },
+    {
+      layer: "globalLppl",
+      labelCn: "全球LPPL泡沫监测",
+      horizonCn: "临界窗口",
+      score: lpplLeader?.forwardSignal?.score,
+      regimeCn: lpplLeader?.forwardSignal?.regimeCn || lppl.regimeCn || lppl.regime,
+      stance: lpplLeader ? `关注 ${lpplLeader.symbol} 临界压力` : "等待逐市场评估",
+      confidenceTier: "unverified",
+      evidence: { available: false },
+      note: lpplLeader?.forwardSignal?.summary || "",
+    },
+  ];
+}
+
+function forwardSignalEvidenceLabel(tier) {
+  return ({ validated: "样本外稳健", context: "背景信号", unverified: "谨慎参考" })[tier] || "待验证";
+}
+
+function forwardSignalEvidenceText(layer) {
+  const evidence = layer?.evidence && typeof layer.evidence === "object" ? layer.evidence : {};
+  if (!evidence.available) return layer?.note || layer?.contextNoteCn || "等待历史验证证据";
+  const hit = Number(evidence.oosHitRate);
+  const base = Number(evidence.baseRate);
+  const lift = Number(evidence.lift);
+  const lead = Number(evidence.leadTimeDays);
+  return [
+    Number.isFinite(hit) ? `OOS命中 ${(100 * hit).toFixed(0)}%` : "",
+    Number.isFinite(base) ? `基准 ${(100 * base).toFixed(0)}%` : "",
+    Number.isFinite(lift) ? `lift ${lift.toFixed(2)}x` : "",
+    Number.isFinite(lead) ? `提前≈${lead.toFixed(0)}天` : "",
+  ].filter(Boolean).join(" · ") || "等待历史验证证据";
+}
+
+function renderForwardSignalCards() {
+  const node = $("#forwardSignalCards");
+  if (!node) return;
+  const overview = state.portfolioOverview || DEFAULT_DATA.portfolioOverview || {};
+  const sourceLayers = Array.isArray(overview.layers) && overview.layers.length
+    ? overview.layers
+    : forwardSignalFallbackLayers();
+  const byKey = new Map(sourceLayers.map((layer) => [layer.layer, layer]));
+  const layers = ["equityShortTermRisk", "spyEarlyWarning", "globalLppl"]
+    .map((key) => byKey.get(key))
+    .filter(Boolean);
+  node.innerHTML = layers.map((layer) => {
+    const score = Number(layer.score);
+    const band = Array.isArray(layer.exposureBandPct) ? layer.exposureBandPct : [];
+    const bandText = band.length >= 2 ? `${Number(band[0]).toFixed(0)}-${Number(band[1]).toFixed(0)}%` : "--";
+    const tier = String(layer.confidenceTier || "unverified");
+    return `
+      <article class="forward-signal-card ${spyWarningClass(score)} tier-${escapeHtml(tier)}">
+        <div class="forward-signal-card-top">
+          <span>${escapeHtml(layer.horizonCn || "--")}</span>
+          <em>${escapeHtml(forwardSignalEvidenceLabel(tier))}</em>
+        </div>
+        <div class="forward-signal-card-score">
+          <div>
+            <h4>${escapeHtml(layer.labelCn || layer.label || "前瞻信号")}</h4>
+            <strong>${Number.isFinite(score) ? score.toFixed(1) : "--"}</strong>
+          </div>
+          <b>${escapeHtml(layer.regimeCn || layer.regime || "--")}</b>
+        </div>
+        <div class="forward-signal-card-action">
+          <span>动作</span>
+          <strong>${escapeHtml(layer.stance || "等待确认")}</strong>
+          <em>仓位带 ${escapeHtml(bandText)}</em>
+        </div>
+        <small>${escapeHtml(forwardSignalEvidenceText(layer))}</small>
+      </article>
+    `;
+  }).join("");
 }
 
 function renderMacroLiquidityEquityLead() {
@@ -1769,6 +2009,7 @@ function renderMacroLiquidityEquityLead() {
   }
   const read = $("#liquidityEquityRead");
   if (read) read.textContent = panel.conclusion || "暂无历史领先性检验。";
+  renderForwardSignalCards();
   const warningNode = $("#spyEarlyWarning");
   if (warningNode) warningNode.innerHTML = renderSpyEarlyWarning(state.spyEarlyWarning || DEFAULT_DATA.spyEarlyWarning);
   const shortTermNode = $("#equityShortTermRisk");
@@ -1836,10 +2077,10 @@ function portfolioOverviewEvidenceText(evidence) {
 function portfolioLayerTier(layer) {
   const tier = layer && layer.confidenceTier;
   if (tier === "validated") {
-    return { cls: "tier-validated", badge: `<span class="pol-tier validated" title="样本外稳健: 90%自助CI排除0,可作前瞻依据 · OOS-robust">✓稳健</span>` };
+    return { cls: "tier-validated", badge: `<span class="pol-tier validated" title="正向样本外CI、FDR与分折一致性均通过,可作前瞻依据">✓完整稳健</span>` };
   }
   if (tier === "context") {
-    return { cls: "tier-context", badge: `<span class="pol-tier context" title="样本外未达稳健: CI跨0,仅作背景上下文,不作前瞻信号 · context only">上下文</span>` };
+    return { cls: "tier-context", badge: `<span class="pol-tier context" title="未通过CI、FDR与分折一致性的完整门槛,仅作背景上下文">上下文</span>` };
   }
   return { cls: "tier-unverified", badge: `<span class="pol-tier unverified" title="未经样本外稳健性(CI)检验,谨慎参考 · unverified">未验证</span>` };
 }
@@ -1967,16 +2208,38 @@ function formatSignalDays(value) {
   return Number.isFinite(numeric) ? `${numeric.toFixed(0)}d` : "--";
 }
 
-function formatOosCi(ci, robust) {
+function formatOosCi(ci) {
   if (!Array.isArray(ci) || ci.length < 2 || ci[0] == null || ci[1] == null) return "";
-  const lo = Number(ci[0]).toFixed(2);
-  const hi = Number(ci[1]).toFixed(2);
-  const mark = robust ? "✓" : "≈0";
-  const cls = robust ? "sv-ci robust" : "sv-ci weak";
-  const title = robust
-    ? "样本外90%自助CI排除0,该IC统计显著"
-    : "样本外90%自助CI跨越0,未达统计显著——勿当作真实预测力";
+  const low = Number(ci[0]);
+  const high = Number(ci[1]);
+  const lo = low.toFixed(2);
+  const hi = high.toFixed(2);
+  const positive = low > 0;
+  const wrongWay = high < 0;
+  const mark = positive ? "✓" : wrongWay ? "反向" : "≈0";
+  const cls = positive ? "sv-ci robust" : wrongWay ? "sv-ci wrong" : "sv-ci weak";
+  const title = positive
+    ? "样本外90%自助CI位于0上方,方向正确且统计显著"
+    : wrongWay
+      ? "样本外90%自助CI位于0下方,为统计显著的反向信号,不可作为正向预测力"
+      : "样本外90%自助CI跨越0,未达统计显著——勿当作真实预测力";
   return `<div class="${cls}" title="${title}">[${lo}, ${hi}] ${mark}</div>`;
+}
+
+function signalValidationActionable(row) {
+  return Boolean(row && typeof row === "object" && row.actionableRobust === true);
+}
+
+function formatSignalValidationGate(row) {
+  if (!row || row.robust !== true) return "";
+  if (signalValidationActionable(row)) {
+    return `<div class="sv-gate pass" title="正向CI、Benjamini-Hochberg FDR与分折正向稳定性均通过">FDR+fold ✓</div>`;
+  }
+  const reasons = [];
+  if (row.fdrSignificant3m !== true) reasons.push("FDR");
+  if (row.foldStability3m?.stablePositive !== true) reasons.push("fold");
+  const label = reasons.length ? `${reasons.join("+")}未过` : "完整门槛未过";
+  return `<div class="sv-gate weak" title="CI虽为正,但${escapeHtml(label)}; 仅作探索性诊断,不可作为前瞻依据">${escapeHtml(label)}</div>`;
 }
 
 function formatRegimeFlag(rs) {
@@ -1999,9 +2262,10 @@ function signalValidationRowHtml(row, { showModule = false, showCluster = false 
   const moduleCell = showModule ? `<td>${escapeHtml(row.module || "--")}</td>` : "";
   const clusterCell = showCluster ? `<td>${row.clusterId ? escapeHtml(row.clusterId) : "--"}</td>` : "";
   const hitText = `${formatSignalRate(row.hitRateOos)} / ${formatSignalRate(row.baseRate)}`;
-  const oosCell = `${formatSignalIc(row.oosIc3m)}${formatOosCi(row.oosCi3m, row.robust)}`;
+  const actionable = signalValidationActionable(row);
+  const oosCell = `${formatSignalIc(row.oosIc3m)}${formatOosCi(row.oosCi3m)}${formatSignalValidationGate(row)}`;
   return `
-    <tr class="${row.robust === false ? "sv-row-weak" : ""}">
+    <tr class="${actionable ? "" : "sv-row-weak"}">
       <td class="sv-name" title="${escapeHtml(row.label || "")}">${name}</td>
       ${moduleCell}
       <td>${formatSignalIc(row.ic3m)}</td>
@@ -2021,7 +2285,7 @@ function renderSignalValidation() {
   const root = $("#signalValidationPanel");
   if (!root) return;
   const method = $("#signalValidationMethod");
-  if (method) method.textContent = panel.available ? `weekly replay · OOS ${panel.oosSplitPct || 65}/${100 - (panel.oosSplitPct || 65)} split · ${panel.drawdownRule || ""}` : "weekly point-in-time replay · out-of-sample split";
+  if (method) method.textContent = panel.available ? `research replay · OOS ${panel.oosSplitPct || 65}/${100 - (panel.oosSplitPct || 65)} split · ${panel.multipleTesting?.method || "FDR pending"}` : "weekly point-in-time research replay · out-of-sample split";
   const coverage = $("#signalValidationCoverage");
   if (coverage) coverage.textContent = panel.available ? `${Number(panel.weeklyObservationCount) || 0} weekly obs · asOf ${panel.asOf || "--"}` : "waiting for public history";
   const read = $("#signalValidationRead");
@@ -2039,12 +2303,12 @@ function renderSignalValidation() {
   const factors = Array.isArray(panel.factors) ? panel.factors : [];
   const leadingCount = factors.filter((row) => row.classification === "leading").length;
   const coincidentCount = factors.filter((row) => row.classification === "coincident").length;
-  const robustCount = factors.filter((row) => row.robust === true).length;
-  const robustLeadingCount = factors.filter((row) => row.robust === true && row.classification === "leading").length;
+  const robustCount = factors.filter((row) => signalValidationActionable(row)).length;
+  const robustLeadingCount = factors.filter((row) => signalValidationActionable(row) && row.classification === "leading").length;
   const regimeFlipCount = factors.filter((row) => row.regimeSplit && row.regimeSplit.signConsistent === false).length;
   if (read) {
     const summaryLead = panel.summary ? `${panel.summary} ` : "";
-    read.textContent = `${summaryLead}IC为信号与SPX远期收益的秩相关(已按方向校正,正值=有预测力); 命中率与基准率均在走出样本段计算。[]内为样本外90%自助置信区间——跨0(标记≈0)表示该IC未达统计显著,不应当作真实预测力。⇅标记为跨涨/跌市方向一致性(子样本小,探索性),${regimeFlipCount}个因子方向在两种市态间反转(慎用)。当前${factors.length}个因子中${leadingCount}个领先、${coincidentCount}个同步; 仅${robustCount}个样本外CI排除0(其中${robustLeadingCount}个稳健领先)。`;
+    read.textContent = `${summaryLead}这是研究回放,不是独立留出集。IC为信号与SPX远期收益的秩相关(已按方向校正,正值=有预测力); 命中率与基准率均在走出样本段计算。[]内为样本外90%自助置信区间; 可执行稳健还需通过${panel.multipleTesting?.method || "多重检验"}与折叠稳定性门槛。⇅标记为跨涨/跌市方向一致性(子样本小,探索性),${regimeFlipCount}个因子方向在两种市态间反转(慎用)。当前${factors.length}个因子中${leadingCount}个领先、${coincidentCount}个同步; ${robustCount}个通过完整稳健门槛(其中${robustLeadingCount}个稳健领先)。`;
   }
   if (compositesNode) {
     const lens = panel.predictiveLens && typeof panel.predictiveLens === "object" ? panel.predictiveLens : {};
@@ -2098,12 +2362,19 @@ function spyWarningRobustNote(item) {
     : "";
   if (item.aggregateRobust === false) {
     const sleeves = Array.isArray(item.robustSleeves) ? item.robustSleeves : [];
-    const sleeveText = sleeves.length
-      ? `; 但其稳健领先 sleeve: <strong>${sleeves.map((s) => escapeHtml(spyWarningSleeveLabel(s))).join(" · ")}</strong>(样本外CI排除0,可作前瞻依据)`
+    const exploratory = Array.isArray(item.exploratorySleeves) ? item.exploratorySleeves : [];
+    const actionableText = sleeves.length
+      ? `; 通过完整门槛的 sleeve: <strong>${sleeves.map((s) => escapeHtml(spyWarningSleeveLabel(s))).join(" · ")}</strong>`
       : "";
-    return `<p class="spy-warning-robust weak" title="聚合预警样本外90%自助CI跨0,未达统计显著——勿当作真实预测力 · aggregate not OOS-robust">⚠ 聚合预警样本外未达稳健${ci ? `(CI ${ci}跨0)` : "(CI跨0)"}${sleeveText}</p>`;
+    const exploratoryText = exploratory.length
+      ? `; 探索性 sleeve: <strong>${exploratory.map((s) => escapeHtml(spyWarningSleeveLabel(s))).join(" · ")}</strong>(CI为正但FDR/分折未过,不作前瞻依据)`
+      : "";
+    const aggregateReason = item.aggregateCiRobust === true
+      ? `${ci ? `CI ${ci}为正,但` : "CI为正,但"}FDR/分折未过`
+      : `${ci ? `CI ${ci}跨0` : "CI跨0"}`;
+    return `<p class="spy-warning-robust weak" title="聚合预警未通过CI、FDR与分折一致性的完整门槛; 仅作研究诊断">⚠ 聚合预警未达完整稳健(${aggregateReason})${actionableText}${exploratoryText}</p>`;
   }
-  return `<p class="spy-warning-robust ok" title="聚合预警样本外CI排除0 · OOS-robust">✓ 聚合预警样本外稳健${ci ? `(CI ${ci})` : ""}</p>`;
+  return `<p class="spy-warning-robust ok" title="聚合预警正向CI、FDR与分折一致性均通过">✓ 聚合预警通过完整稳健门槛${ci ? `(CI ${ci})` : ""}</p>`;
 }
 
 function spyWarningSleeveLabel(key) {
@@ -2188,8 +2459,9 @@ function renderDriverDashboard() {
   const pulseNode = $("#modulePulse");
   if (!driverNode || !pulseNode) return;
   const drivers = factorDrivers();
-  driverNode.innerHTML = drivers.length ? drivers.map((item) => `
-    <div class="driver-row">
+  driverNode.innerHTML = drivers.length ? drivers.map((item, index) => `
+    <div class="driver-row" role="listitem">
+      <span class="driver-rank" aria-hidden="true">${String(index + 1).padStart(2, "0")}</span>
       <div>
         <strong>${escapeHtml(item.name)}</strong>
         <span>${escapeHtml(item.module)} · ${escapeHtml(item.value)}</span>
@@ -2197,18 +2469,26 @@ function renderDriverDashboard() {
       <em class="${item.contribution > 0 ? "bull" : "bear"}">${item.contribution > 0 ? "+" : ""}${item.contribution.toFixed(2)}</em>
     </div>
   `).join("") : `<div class="empty-state compact">暂无有效驱动</div>`;
-  pulseNode.innerHTML = state.groups.map((group) => {
+  pulseNode.innerHTML = `
+    <div class="module-pulse-head">
+      <strong>模块方向</strong>
+      <small>均分 · -2 至 +2</small>
+    </div>
+    <div class="module-pulse-grid">
+      ${state.groups.map((group) => {
     const average = group.factors.reduce((sum, factor) => sum + factor.score, 0) / group.factors.length;
     const width = Math.min(50, Math.abs(average) / 2 * 50);
     const left = average < 0 ? 50 - width : 50;
     return `
-      <div class="pulse-row">
+      <div class="pulse-row" aria-label="${escapeHtml(currentLanguage === "en" ? group.en : group.name)} ${average.toFixed(2)}">
         <span>${escapeHtml(currentLanguage === "en" ? group.en : group.name)}</span>
         <div class="pulse-track"><i class="${scoreClass(average)}" style="left:${left.toFixed(1)}%;width:${width.toFixed(1)}%"></i></div>
         <strong class="${scoreClass(average)}">${average.toFixed(2)}</strong>
       </div>
     `;
-  }).join("");
+      }).join("")}
+    </div>
+  `;
 }
 
 function factorDrivers() {
@@ -2250,6 +2530,7 @@ function bindScorecardEvents() {
 }
 
 function renderPolicy() {
+  renderPolicyDecisionSnapshot();
   $("#policyCards").innerHTML = state.policy.rates.map(metricCard).join("");
   $("#plumbingCards").innerHTML = state.policy.plumbing.map(metricCard).join("");
   $("#fedPathChart").innerHTML = state.fedPath.map((row) => `
@@ -2264,7 +2545,55 @@ function renderPolicy() {
   `).join("");
 }
 
+function policyMetric(rows, fragment) {
+  return (rows || []).find((item) => String(item?.[0] || "").includes(fragment)) || [];
+}
+
+function renderPolicyDecisionSnapshot() {
+  const target = policyMetric(state.policy.rates, "目标区间");
+  const effr = policyMetric(state.policy.rates, "有效联邦基金利率");
+  const twoYearMove = policyMetric(state.policy.rates, "1月2Y变化");
+  const netLiquidity = policyMetric(state.policy.plumbing, "净流动性");
+  const tga = policyMetric(state.policy.plumbing, "财政部一般账户");
+  const liquidityRead = policyMetric(state.policy.plumbing, "流动性结论");
+  const nearMeeting = state.fedPath?.[0] || {};
+  const farMeeting = state.fedPath?.[state.fedPath.length - 1] || {};
+  const cards = [
+    {
+      eyebrow: "当前利率锚 · EFFR",
+      label: "政策设置",
+      value: target[1] || "--",
+      status: "按兵不动",
+      detail: `EFFR ${effr[1] || "--"} · 2Y月变动 ${twoYearMove[1] || "--"}`,
+      tone: "neutral"
+    },
+    {
+      eyebrow: `市场路径 · ${farMeeting.m || "远端"}`,
+      label: "远端加息尾部",
+      value: Number.isFinite(farMeeting.hike) ? `${farMeeting.hike}%` : "--",
+      status: Number(farMeeting.hike || 0) >= 40 ? "尾部转鹰" : "持有为主",
+      detail: `近端持有 ${Number.isFinite(nearMeeting.hold) ? `${nearMeeting.hold}%` : "--"} · 远端持有 ${Number.isFinite(farMeeting.hold) ? `${farMeeting.hold}%` : "--"}`,
+      tone: Number(farMeeting.hike || 0) >= 40 ? "restrictive" : "neutral"
+    },
+    {
+      eyebrow: "资金面 · WALCL-TGA-RRP",
+      label: "净流动性",
+      value: netLiquidity[1] || "--",
+      status: liquidityRead[1] || "待确认",
+      detail: `TGA ${tga[1] || "--"} · ${netLiquidity[2] || "公开数据代理"}`,
+      tone: String(liquidityRead[1] || "").includes("紧") ? "restrictive" : "neutral"
+    }
+  ];
+  $("#policyDecisionCards").innerHTML = cards.map(decisionSnapshotCard).join("");
+  $("#policyDecisionRead").innerHTML = `
+    <strong>关键变化</strong>
+    <span>近端会议仍以持有为主（${Number.isFinite(nearMeeting.hold) ? `${nearMeeting.hold}%` : "--"}），但 ${escapeHtml(farMeeting.m || "远端")} 加息尾部升至 ${Number.isFinite(farMeeting.hike) ? `${farMeeting.hike}%` : "--"}。</span>
+    <em>行动含义 · 优先关注前端政策重定价；流动性仍为${escapeHtml(liquidityRead[1] || "中性")}</em>
+  `;
+}
+
 function renderSupply() {
+  renderSupplyDecisionSnapshot();
   $("#auctionTable").innerHTML = `
     <thead><tr><th>${t("table.security")}</th><th>${t("table.size")}</th><th>${t("table.highRate")}</th><th>${t("table.bidToCover")}</th><th>${t("table.rating")}</th></tr></thead>
     <tbody>
@@ -2276,13 +2605,120 @@ function renderSupply() {
   $("#fiscalCards").innerHTML = state.fiscal.map(metricCard).join("");
 }
 
+function findRowByLabel(rows, fragment) {
+  return (rows || []).find((item) => String(Array.isArray(item) ? item[0] : item?.type || "").includes(fragment));
+}
+
+function compactMoney(value) {
+  const match = String(value || "").match(/\$[\d.]+[TB]/i);
+  return match?.[0] || String(value || "--");
+}
+
+function renderSupplyDecisionSnapshot() {
+  const auctions = state.auctions || [];
+  const longAuction = auctions.find((row) => /bond|30-year|29-year/i.test(String(row.type || ""))) || auctions[0] || {};
+  const strongCount = auctions.filter((row) => String(row.rating || "").includes("强")).length;
+  const weakCount = auctions.filter((row) => /弱|疲|尾/.test(String(row.rating || ""))).length;
+  const qra = findRowByLabel(state.fiscal, "季度再融资") || [];
+  const tga = findRowByLabel(state.fiscal, "TGA 余额") || [];
+  const buybacks = findRowByLabel(state.fiscal, "Buybacks") || [];
+  const auctionTone = weakCount > 0 ? "restrictive" : "supportive";
+  const cards = [
+    {
+      eyebrow: "长端需求 · Auction",
+      label: longAuction.type || "长端拍卖",
+      value: longAuction.btc ? `${longAuction.btc}x` : "--",
+      status: longAuction.rating || "待确认",
+      detail: `${longAuction.yield || "--"} · ${longAuction.size || "--"}`,
+      tone: /弱|疲|尾/.test(String(longAuction.rating || "")) ? "restrictive" : "supportive"
+    },
+    {
+      eyebrow: "拍卖广度 · Recent",
+      label: "强劲场次",
+      value: `${strongCount}/${auctions.length || "--"}`,
+      status: weakCount ? `${weakCount}场偏弱` : "无弱项",
+      detail: `最近 ${auctions.length} 场 · 稳健/强劲 ${Math.max(auctions.length - weakCount, 0)} 场`,
+      tone: auctionTone
+    },
+    {
+      eyebrow: "财政供给 · QRA",
+      label: "下季借款",
+      value: compactMoney(qra[1]),
+      status: "供给高位",
+      detail: `TGA ${tga[1] || "--"} · Buybacks ${compactMoney(buybacks[1])}`,
+      tone: "restrictive"
+    }
+  ];
+  $("#supplyDecisionCards").innerHTML = cards.map(decisionSnapshotCard).join("");
+  $("#supplyDecisionRead").innerHTML = `
+    <strong>关键变化</strong>
+    <span>最近 ${auctions.length} 场拍卖中 ${strongCount} 场强劲、${weakCount} 场偏弱；长端最新投标倍数 ${escapeHtml(longAuction.btc || "--")}x。</span>
+    <em>行动含义 · 拍卖需求暂稳，但 ${escapeHtml(compactMoney(qra[1]))} 下季借款继续约束长端</em>
+  `;
+  const auctionNote = $("#auctionDetailNote");
+  if (auctionNote) auctionNote.textContent = weakCount
+    ? `最近拍卖出现 ${weakCount} 场偏弱，需结合期限分布判断长端需求。`
+    : "最近拍卖均为稳健或强劲，当前未出现拍卖需求失速。";
+  const fiscalNote = $("#fiscalDetailNote");
+  if (fiscalNote) fiscalNote.textContent = "下一次 QRA 是关键观察点；若进一步上调长债占比，期限溢价可能重新承压。";
+}
+
 function renderPositioning() {
+  renderPositioningDecisionSnapshot();
   $("#cftcList").innerHTML = (state.positioning.cftc || []).map(signalItem).join("");
   $("#dealerCards").innerHTML = (state.positioning.dealers || []).map(metricCard).join("");
   $("#ticCards").innerHTML = (state.positioning.tic || []).map(metricCard).join("");
 }
 
+function extractFirstMatch(value, pattern, fallback = "--") {
+  return String(value || "").match(pattern)?.[0] || fallback;
+}
+
+function renderPositioningDecisionSnapshot() {
+  const positioning = state.positioning || {};
+  const cftcTotal = findRowByLabel(positioning.cftc, "国债期货合计") || [];
+  const dealers = findRowByLabel(positioning.dealers, "UST ex-TIPS") || [];
+  const ticTotal = findRowByLabel(positioning.tic, "全球外资总持仓") || [];
+  const official = findRowByLabel(positioning.tic, "官方部门持仓") || [];
+  const cftcSize = extractFirstMatch(cftcTotal[1], /[\d.]+M张/i);
+  const cftcOi = extractFirstMatch(cftcTotal[1], /-?[\d.]+% OI/i);
+  const ticFlowPositive = /\+/.test(String(ticTotal[2] || ""));
+  const cards = [
+    {
+      eyebrow: "CFTC · Treasury",
+      label: "杠杆基金净空",
+      value: cftcSize,
+      status: "拥挤空头",
+      detail: `${cftcOi} · 周频合计`,
+      tone: "supportive"
+    },
+    {
+      eyebrow: "Primary Dealers",
+      label: "UST净持仓",
+      value: dealers[1] || "--",
+      status: "周频观察",
+      detail: dealers[2] || "NY Fed weekly",
+      tone: "neutral"
+    },
+    {
+      eyebrow: "TIC · Foreign",
+      label: "全球外资持仓",
+      value: ticTotal[1] || "--",
+      status: ticFlowPositive ? "小幅流入" : "边际流出",
+      detail: `${ticTotal[2] || "--"} · 官方 ${official[2] || "--"}`,
+      tone: ticFlowPositive ? "supportive" : "restrictive"
+    }
+  ];
+  $("#positioningDecisionCards").innerHTML = cards.map(decisionSnapshotCard).join("");
+  $("#positioningDecisionRead").innerHTML = `
+    <strong>关键变化</strong>
+    <span>杠杆基金国债期货净空 ${escapeHtml(cftcSize)}（${escapeHtml(cftcOi)}），全球外资 ${escapeHtml(ticTotal[2] || "--")}、官方部门 ${escapeHtml(official[2] || "--")}。</span>
+    <em>行动含义 · 空头拥挤提供轧空缓冲，外资结构仍需谨慎</em>
+  `;
+}
+
 function renderCrossMarket() {
+  renderCrossMarketDecisionSnapshot();
   const max = Math.max(...state.cross.yields.map((item) => item[1]));
   $("#globalYields").innerHTML = state.cross.yields.map(([label, value]) => `
     <div class="bar-item">
@@ -2292,11 +2728,71 @@ function renderCrossMarket() {
     </div>
   `).join("");
   $("#riskUsd").innerHTML = state.cross.risk.map(signalItem).join("");
-  $("#inflationCommodity").innerHTML = state.cross.inflation.map(signalItem).join("");
+  $("#inflationCommodity").innerHTML = state.cross.inflation.map((row) => {
+    if (String(row?.[0] || "").includes("黄金") && /^\$?0(?:\.0+)?$/.test(String(row?.[1] || "").trim())) {
+      return signalItem([row[0], "--", "Stooq XAUUSD 暂缺有效报价"]);
+    }
+    return signalItem(row);
+  }).join("");
   renderCrossMarketHistoryControls();
 }
 
+function numericText(value) {
+  const cleaned = String(value ?? "").replace(/[^\d.-]/g, "");
+  if (!cleaned || cleaned === "-" || cleaned === ".") return null;
+  const number = Number(cleaned);
+  return Number.isFinite(number) ? number : null;
+}
+
+function renderCrossMarketDecisionSnapshot() {
+  const cross = state.cross || {};
+  const us = findRowByLabel(cross.yields, "美国") || [];
+  const highest = [...(cross.yields || [])].sort((left, right) => Number(right[1] || 0) - Number(left[1] || 0))[0] || [];
+  const spx = findRowByLabel(cross.risk, "标普") || [];
+  const vix = findRowByLabel(cross.risk, "VIX") || [];
+  const credit = findRowByLabel(cross.risk, "信用利差") || [];
+  const cpi = findRowByLabel(cross.inflation, "CPI通胀") || [];
+  const corePce = findRowByLabel(cross.inflation, "核心PCE") || [];
+  const realRate = findRowByLabel(cross.inflation, "实际利率") || [];
+  const breakeven = findRowByLabel(cross.inflation, "盈亏平衡") || [];
+  const vixValue = numericText(vix[1]);
+  const corePceValue = numericText(corePce[1]);
+  const cards = [
+    {
+      eyebrow: "全球长端 · 10Y",
+      label: "美国国债",
+      value: Number.isFinite(us[1]) ? `${Number(us[1]).toFixed(2)}%` : "--",
+      status: highest[0] && highest[0] !== us[0] ? `${highest[0]} 更高` : "全球高位",
+      detail: `全球最高 ${highest[0] || "--"} ${Number.isFinite(highest[1]) ? `${Number(highest[1]).toFixed(2)}%` : "--"}`,
+      tone: "restrictive"
+    },
+    {
+      eyebrow: "风险偏好 · VIX",
+      label: "市场波动",
+      value: vix[1] || "--",
+      status: Number.isFinite(vixValue) && vixValue < 20 ? "风险平稳" : "波动升温",
+      detail: `${spx[2] || "S&P 500"} · 信用 ${credit[1] || "--"}`,
+      tone: Number.isFinite(vixValue) && vixValue < 20 ? "supportive" : "restrictive"
+    },
+    {
+      eyebrow: "通胀约束 · CPI/Core PCE",
+      label: "核心通胀",
+      value: corePce[1] || "--",
+      status: Number.isFinite(corePceValue) && corePceValue > 3 ? "粘性偏高" : "逐步降温",
+      detail: `CPI ${cpi[1] || "--"} · 实际利率 ${realRate[1] || "--"}`,
+      tone: Number.isFinite(corePceValue) && corePceValue > 3 ? "restrictive" : "neutral"
+    }
+  ];
+  $("#crossDecisionCards").innerHTML = cards.map(decisionSnapshotCard).join("");
+  $("#crossDecisionRead").innerHTML = `
+    <strong>关键变化</strong>
+    <span>VIX ${escapeHtml(vix[1] || "--")} 显示风险环境平稳，但核心PCE ${escapeHtml(corePce[1] || "--")}、10Y实际利率 ${escapeHtml(realRate[1] || "--")} 仍高。</span>
+    <em>行动含义 · 当前利率压力主要来自通胀与实际利率，而非风险逃逸</em>
+  `;
+}
+
 function renderEvents() {
+  renderEventsDecisionSnapshot();
   $("#eventTimeline").innerHTML = state.events.map(([date, title, severity]) => `
     <div class="event-item">
       <strong>${date} · ${title}</strong>
@@ -2311,21 +2807,215 @@ function renderEvents() {
   `).join("");
 }
 
-function renderIdeas() {
-  $("#ideaCards").innerHTML = state.ideas.map((idea, index) => `
-    <article class="idea-card">
-      <span class="num">${String(index + 1).padStart(2, "0")}</span>
-      <h3>${escapeHtml(idea.title)}</h3>
-      <div class="idea-card-meta">
-        <span class="tag">${escapeHtml(idea.tag)}</span>
-        ${idea.confidenceLabel ? `<span class="idea-confidence ${escapeHtml(idea.confidenceLevel || "medium")}">${escapeHtml(idea.confidenceLabel)}</span>` : ""}
+function shortEventDate(value) {
+  const text = String(value || "");
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text.slice(5).replace("-", "/") : text || "--";
+}
+
+function daysFromSnapshot(dateValue) {
+  const snapshot = Date.parse(`${state.asOf || ""}T00:00:00Z`);
+  const target = Date.parse(`${dateValue || ""}T00:00:00Z`);
+  if (!Number.isFinite(snapshot) || !Number.isFinite(target)) return null;
+  return Math.max(0, Math.round((target - snapshot) / 86400000));
+}
+
+function eventDisplayLabel(title) {
+  const text = String(title || "");
+  if (/Consumer Price Index/i.test(text)) return "美国CPI发布";
+  if (/Producer Price Index/i.test(text)) return "美国PPI发布";
+  if (/FOMC/i.test(text)) return "FOMC利率决议";
+  if (/quarterly refunding/i.test(text)) return "季度再融资声明";
+  if (/borrowing estimates|QRA pre-release/i.test(text)) return "QRA借款预估";
+  if (/Employment Situation/i.test(text)) return "美国就业报告";
+  return text || "下一事件";
+}
+
+function renderEventsDecisionSnapshot() {
+  const events = state.events || [];
+  const highEvents = events.filter((event) => event?.[2] === "高");
+  const nextHigh = highEvents[0] || events[0] || [];
+  const fomc = events.find((event) => /FOMC/i.test(String(event?.[1] || ""))) || [];
+  const qra = events.find((event) => /quarterly refunding statement/i.test(String(event?.[1] || "")))
+    || events.find((event) => /quarterly refunding|QRA/i.test(String(event?.[1] || "")))
+    || [];
+  const nextHighDays = daysFromSnapshot(nextHigh[0]);
+  const cards = [
+    {
+      eyebrow: "最近高影响 · Macro",
+      label: eventDisplayLabel(nextHigh[1]),
+      value: shortEventDate(nextHigh[0]),
+      status: nextHigh[2] === "高" ? "高影响" : "中影响",
+      detail: Number.isFinite(nextHighDays) ? `距快照 ${nextHighDays} 天` : "日期待确认",
+      tone: nextHigh[2] === "高" ? "restrictive" : "neutral"
+    },
+    {
+      eyebrow: "政策验证 · FOMC",
+      label: eventDisplayLabel(fomc[1] || "FOMC"),
+      value: shortEventDate(fomc[0]),
+      status: fomc[2] === "高" ? "高影响" : "待确认",
+      detail: "验证远端加息尾部与政策反应函数",
+      tone: "restrictive"
+    },
+    {
+      eyebrow: "供给验证 · QRA",
+      label: eventDisplayLabel(qra[1] || "季度再融资"),
+      value: shortEventDate(qra[0]),
+      status: qra[2] === "高" ? "高影响" : "中影响",
+      detail: "观察长债占比、借款规模与回购安排",
+      tone: qra[2] === "高" ? "restrictive" : "neutral"
+    }
+  ];
+  $("#eventsDecisionCards").innerHTML = cards.map(decisionSnapshotCard).join("");
+  $("#eventsDecisionRead").innerHTML = `
+    <strong>关键变化</strong>
+    <span>未来 ${events.length} 项事件中 ${highEvents.length} 项为高影响；最近窗口由 ${escapeHtml(eventDisplayLabel(nextHigh[1]))} 开始。</span>
+    <em>行动含义 · 先防通胀数据波动，再看FOMC与QRA确认</em>
+  `;
+}
+
+function ideaDecisionFallback(idea) {
+  const tag = String(idea?.tag || "");
+  if (tag.includes("久期")) {
+    return tag.includes("LONG")
+      ? {
+          trigger: "核心PCE与Dallas Trimmed PCE继续降温，且2Y收益率延续回落",
+          invalidation: "核心通胀重新上行或2Y收益率转为持续上升",
+          sizing: "主观点 · 基准久期偏离"
+        }
+      : {
+          trigger: "核心通胀维持偏热，或2Y收益率继续上行确认政策重定价",
+          invalidation: "PCE/核心PCE降温，或2Y收益率明显回落",
+          sizing: "主观点 · 基准久期偏离"
+        };
+  }
+  if (tag.includes("CURVE")) return {
+    trigger: "QRA上修长债供给、30Y拍卖走弱或期限溢价继续上行",
+    invalidation: "长端空头挤压、QRA低于预期或曲线已过度变陡",
+    sizing: "次级观点 · 曲线相对价值"
+  };
+  if (tag.includes("FRONT-END") || tag.includes("前端")) return {
+    trigger: "SOFR/EFFR维持高位，且2Y仍提供足够正carry",
+    invalidation: "降息预期充分定价，或就业/核心PCE反弹推高前端波动",
+    sizing: "防守仓位 · 现金替代"
+  };
+  return {
+    trigger: "能源或进口价格上行，并由PCE/核心PCE重新加速确认",
+    invalidation: "油价回落，或PCE/核心PCE持续降温",
+    sizing: "小仓位 · 通胀尾部对冲"
+  };
+}
+
+function ideaDecisionFields(idea, index) {
+  const fallback = ideaDecisionFallback(idea);
+  return {
+    priority: Number.isFinite(Number(idea?.priority)) ? Number(idea.priority) : index + 1,
+    direction: idea?.direction || idea?.tag || "待确认",
+    trigger: idea?.trigger || fallback.trigger,
+    invalidation: idea?.invalidation || fallback.invalidation,
+    sizing: idea?.sizing || fallback.sizing
+  };
+}
+
+function confidenceEvidenceMeta(value, fallback = "medium") {
+  const text = String(value || fallback).trim().toLowerCase();
+  const level = text.includes("high") || text.includes("高")
+    ? "high"
+    : text.includes("low") || text.includes("低")
+      ? "low"
+      : "medium";
+  return {
+    level,
+    label: t(`evidence.${level}`),
+    rank: ({ low: 1, medium: 2, high: 3 })[level]
+  };
+}
+
+function ideaEvidenceLayers(idea) {
+  const impact = idea?.equityImpact && typeof idea.equityImpact === "object" ? idea.equityImpact : {};
+  const model = confidenceEvidenceMeta(idea?.confidenceLevel || idea?.confidenceLabel, "medium");
+  const history = confidenceEvidenceMeta(impact.available ? impact.confidenceLabel || impact.confidence : "low", "low");
+  const sampleSize = Number(impact.sampleSize);
+  const sampleText = Number.isFinite(sampleSize) ? `n=${sampleSize}` : "n=--";
+  const execution = model.rank <= history.rank ? model : history;
+  return { model, history, execution, sampleText };
+}
+
+function renderIdeaEvidenceStrip(evidence) {
+  return `
+    <div class="idea-evidence-strip" role="group" aria-label="${escapeHtml(t("evidence.execution"))}">
+      <span class="evidence-badge model ${escapeHtml(evidence.model.level)}"><small>${escapeHtml(t("evidence.model"))}</small><strong>${escapeHtml(evidence.model.label)}</strong></span>
+      <span class="evidence-badge history ${escapeHtml(evidence.history.level)}"><small>${escapeHtml(t("evidence.history"))}</small><strong>${escapeHtml(evidence.history.label)} · ${escapeHtml(evidence.sampleText)}</strong></span>
+      <span class="evidence-badge execution ${escapeHtml(evidence.execution.level)}"><small>${escapeHtml(t("evidence.execution"))}</small><strong>${escapeHtml(evidence.execution.label)}</strong></span>
+    </div>
+  `;
+}
+
+function renderIdeaDecisionRow({ idea, index, decision }, displayIndex, isOpen = false) {
+  const evidence = ideaEvidenceLayers(idea);
+  const roleLabel = displayIndex === 0 ? t("idea.primary") : t("idea.secondary");
+  return `
+    <details class="idea-decision-row${displayIndex === 0 ? " primary-view" : ""}" data-idea-priority="${decision.priority}"${isOpen ? " open" : ""}>
+      <summary class="idea-decision-summary">
+        <span class="idea-decision-priority">${String(decision.priority).padStart(2, "0")}</span>
+        <span class="idea-decision-title">
+          <span class="idea-decision-role">${escapeHtml(roleLabel)}</span>
+          <strong>${escapeHtml(idea.title)}</strong>
+          <em>${escapeHtml(decision.direction)}</em>
+        </span>
+        <span class="idea-decision-meta">
+          <em>${escapeHtml(idea.horizonCn || idea.horizon || "--")}</em>
+          <span class="idea-evidence-compact">
+            <b class="idea-confidence ${escapeHtml(evidence.model.level)}">${escapeHtml(t("evidence.model"))} ${escapeHtml(evidence.model.label)}</b>
+            <b class="idea-confidence ${escapeHtml(evidence.history.level)}">${escapeHtml(t("evidence.history"))} ${escapeHtml(evidence.history.label)}</b>
+          </span>
+          <small>${escapeHtml(decision.sizing)}</small>
+        </span>
+        <span class="idea-decision-gate trigger">
+          <small>触发条件</small>
+          <b>${escapeHtml(decision.trigger)}</b>
+        </span>
+        <span class="idea-decision-gate invalidation">
+          <small>失效条件</small>
+          <b>${escapeHtml(decision.invalidation)}</b>
+        </span>
+        <span class="idea-decision-toggle"><span class="when-closed">展开</span><span class="when-open">收起</span></span>
+      </summary>
+      <div class="idea-decision-body">
+        ${renderIdeaEvidenceStrip(evidence)}
+        <div class="idea-decision-thesis">
+          <strong>完整论点 · 点击正文可编辑</strong>
+          <p contenteditable="true" role="textbox" aria-multiline="true" aria-label="${escapeHtml(idea.title)} 完整论点" data-idea="${index}">${escapeHtml(idea.text)}</p>
+          <small>${t("idea.factorSource")} -> ${escapeHtml(idea.source || "--")}</small>
+          ${idea.confidenceNote ? `<small class="idea-confidence-note">${escapeHtml(idea.confidenceNote)}</small>` : ""}
+        </div>
+        ${renderIdeaEquityImpact(idea.equityImpact)}
       </div>
-      <p contenteditable="true" data-idea="${index}">${escapeHtml(idea.text)}</p>
-      <small>${t("idea.factorSource")} -> ${escapeHtml(idea.source || "--")}</small>
-      ${idea.confidenceNote ? `<small class="idea-confidence-note">${escapeHtml(idea.confidenceNote)}</small>` : ""}
-      ${renderIdeaEquityImpact(idea.equityImpact)}
-    </article>
-  `).join("");
+    </details>
+  `;
+}
+
+function renderIdeas() {
+  const node = $("#ideaCards");
+  const openPriorities = new Set(
+    Array.from(node.querySelectorAll(".idea-decision-row[open]")).map((row) => row.dataset.ideaPriority)
+  );
+  const moreWasOpen = Boolean(node.querySelector(".idea-more-details[open]"));
+  const entries = state.ideas
+    .map((idea, index) => ({ idea, index, decision: ideaDecisionFields(idea, index) }))
+    .sort((first, second) => first.decision.priority - second.decision.priority);
+  const featured = entries.slice(0, 3);
+  const additional = entries.slice(3);
+  node.innerHTML = `
+    ${featured.map((entry, displayIndex) => renderIdeaDecisionRow(entry, displayIndex, openPriorities.has(String(entry.decision.priority)))).join("")}
+    ${additional.length ? `
+      <details class="idea-more-details diagnostic-details"${moreWasOpen ? " open" : ""}>
+        <summary>${escapeHtml(t("idea.more", { count: additional.length }))}<span class="diagnostic-hint">watchlist · lower priority</span></summary>
+        <div class="idea-more-list">
+          ${additional.map((entry, offset) => renderIdeaDecisionRow(entry, featured.length + offset, openPriorities.has(String(entry.decision.priority)))).join("")}
+        </div>
+      </details>
+    ` : ""}
+  `;
   $$("[data-idea]").forEach((node) => {
     node.addEventListener("blur", () => {
       state.ideas[Number(node.dataset.idea)].text = node.textContent.trim();
@@ -2365,7 +3055,7 @@ function renderIdeaEquityImpact(impact) {
     <div class="idea-equity-impact ${escapeHtml(tone)}">
       <div class="idea-equity-impact-head">
         <strong>历史SPY影响</strong>
-        <span>${escapeHtml(confidence)} · ${escapeHtml(sampleText)}</span>
+        <span>${escapeHtml(t("evidence.history"))} ${escapeHtml(confidence)} · ${escapeHtml(sampleText)}</span>
       </div>
       ${stats.length ? `<p>${stats.map((part) => escapeHtml(part)).join(" · ")}</p>` : ""}
       <small>${escapeHtml(item.summary || "历史同类样本不足,暂不显示SPY影响。")}</small>
@@ -2484,13 +3174,45 @@ function resetState() {
   window.location.reload();
 }
 
+function syncTopNavMoreActiveState() {
+  const more = $("#primaryNavMore");
+  if (!more) return;
+  more.classList.toggle("active", Boolean(more.querySelector("a.active")));
+}
+
+function initTopNavMore() {
+  const more = $("#primaryNavMore");
+  if (!more || more.dataset.navMoreInit) return;
+  more.dataset.navMoreInit = "1";
+  const summary = more.querySelector(":scope > summary");
+  more.querySelectorAll("a").forEach((link) => {
+    link.addEventListener("click", () => { more.open = false; });
+  });
+  document.addEventListener("click", (event) => {
+    if (more.open && !more.contains(event.target)) more.open = false;
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !more.open) return;
+    more.open = false;
+    summary?.focus();
+  });
+}
+
 function bindNavObserver() {
+  if (document.body.dataset.navObserverBound) return;
+  document.body.dataset.navObserverBound = "1";
   const links = $$(".top-nav a");
   const sections = links.map((link) => document.querySelector(link.getAttribute("href"))).filter(Boolean);
   const observer = new IntersectionObserver((entries) => {
     entries.forEach((entry) => {
       if (!entry.isIntersecting) return;
-      links.forEach((link) => link.classList.toggle("active", link.getAttribute("href") === `#${entry.target.id}`));
+      links.forEach((link) => {
+        const active = link.getAttribute("href") === `#${entry.target.id}`;
+        link.classList.toggle("active", active);
+        if (active) link.setAttribute("aria-current", "page");
+        else link.removeAttribute("aria-current");
+      });
+      syncTopNavMoreActiveState();
     });
   }, { rootMargin: "-30% 0px -60% 0px" });
   sections.forEach((section) => observer.observe(section));

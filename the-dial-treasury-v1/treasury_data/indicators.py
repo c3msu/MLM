@@ -6,7 +6,6 @@ build_dashboard via `from .indicators import *`."""
 from __future__ import annotations
 
 import math
-from datetime import date
 from typing import Any
 
 from .sources import SeriesPoint, TimeSeries, YieldCurveRecord
@@ -42,13 +41,36 @@ def compute_indicators(
     walcl_millions = latest_value(fred, "WALCL", default=0.0)
     soma_treasury_millions = latest_value(fred, "TREAST", default=0.0)
     bank_reserves_millions = latest_value(fred, "WRESBAL", default=0.0)
-    rrp_millions = latest_value(fred, "RRPONTSYD", default=0.0)
+    rrp_billions = latest_value(fred, "RRPONTSYD", default=0.0)
     net_liquidity_points = build_net_liquidity_points(fred)
-    net_liquidity_latest = net_liquidity_points[-1].value if net_liquidity_points else walcl_millions - tga_millions - rrp_millions
-    net_liquidity_m1_change = point_change(net_liquidity_points, days=30)
-    net_liquidity_momentum_points = change_points(net_liquidity_points, days=30)
-    net_liquidity_13w_change = point_change(net_liquidity_points, days=91)
-    net_liquidity_13w_momentum_points = change_points(net_liquidity_points, days=91)
+    net_liquidity_latest = (
+        net_liquidity_points[-1].value
+        if net_liquidity_points
+        else walcl_millions - tga_millions - rrp_billions * 1_000.0
+    )
+    # Net-liquidity legs are weekly/daily.  Do not label a change as 1M/13W
+    # when the observation around the requested anchor is more than two weeks
+    # old because of a historical gap.
+    net_liquidity_m1_change = point_change(
+        net_liquidity_points,
+        days=30,
+        max_target_gap_days=14,
+    )
+    net_liquidity_momentum_points = change_points(
+        net_liquidity_points,
+        days=30,
+        max_target_gap_days=14,
+    )
+    net_liquidity_13w_change = point_change(
+        net_liquidity_points,
+        days=91,
+        max_target_gap_days=14,
+    )
+    net_liquidity_13w_momentum_points = change_points(
+        net_liquidity_points,
+        days=91,
+        max_target_gap_days=14,
+    )
     tga_deviation_points = rolling_median_deviation_points(fred.get("WTREGEN"), window_days=364)
     onrrp_buffer_risk_series_points = onrrp_buffer_risk_points(fred.get("RRPONTSYD"))
     sofr_effr_spread_points = spread_points(fred.get("SOFR"), fred.get("DFF"), multiplier=100)
@@ -65,6 +87,26 @@ def compute_indicators(
     real_rate_level_points = weighted_points(fred.get("DFII5"), fred.get("DFII10"), 0.6, 0.4)
     real_curve_points = spread_points(fred.get("DFII10"), fred.get("DFII5"), multiplier=100)
     breakeven_target_distance_points = target_distance_points(fred.get("T10YIE"), target=BHADIAL_BREAKEVEN_TARGET)
+    real_10y_w1_change = point_change_optional(
+        fred["DFII10"].points,
+        days=7,
+        max_target_gap_days=7,
+    ) if fred.get("DFII10") else None
+    real_10y_m1_change = point_change_optional(
+        fred["DFII10"].points,
+        days=30,
+        max_target_gap_days=7,
+    ) if fred.get("DFII10") else None
+    breakeven_10y_w1_change = point_change_optional(
+        fred["T10YIE"].points,
+        days=7,
+        max_target_gap_days=7,
+    ) if fred.get("T10YIE") else None
+    breakeven_10y_m1_change = point_change_optional(
+        fred["T10YIE"].points,
+        days=30,
+        max_target_gap_days=7,
+    ) if fred.get("T10YIE") else None
     hy_ig_oas_spread_points = spread_points(fred.get("BAMLH0A0HYM2"), fred.get("BAMLC0A0CM"), multiplier=100)
     vix_term_structure_points = ratio_points(fred.get("VIXCLS"), fred.get("VXVCLS"))
     dxy_realized_vol_points = realized_volatility_points(fred.get("DTWEXBGS"), window=63)
@@ -72,15 +114,16 @@ def compute_indicators(
     wti_shock_points = rolling_median_deviation_points(fred.get("DCOILWTICO"), window_days=365, positive_only=True)
     natgas_shock_points = rolling_median_deviation_points(fred.get("DHHNGSP"), window_days=365, positive_only=True)
     treasury_30y10y_points = curve_spread_points(curve_records, "30Y", "10Y", multiplier=100)
+    treasury_10y_vol_20d_points = curve_realized_volatility_points(curve_records, "10Y", window=20)
     treasury_10y_vol_21d_points = curve_realized_volatility_points(curve_records, "10Y", window=21)
     curve_curvature_abs_points = treasury_curve_curvature_abs_points(curve_records)
     treasury_price_proxy_points = treasury_price_proxy_from_yield_points(fred.get("DGS10"), duration=8.0)
     treasury_price_proxy_series = TimeSeries("DGS10_PRICE_PROXY", treasury_price_proxy_points) if treasury_price_proxy_points else None
-    risk_vs_safe_points = ratio_points(fred.get("SP500"), treasury_price_proxy_series)
+    risk_vs_safe_points = blended_relative_return_points(fred.get("SP500"), treasury_price_proxy_series)
     high_beta_preference_points = ratio_points(fred.get("NASDAQXNDX"), fred.get("NASDAQNQUS500LCT"))
     regional_bank_vs_market_points = ratio_points(fred.get("NASDAQBANK"), fred.get("SP500"))
-    hy_credit_preference_points = ratio_points(fred.get("BAMLHYH0A0HYM2TRIV"), treasury_price_proxy_series)
-    ig_credit_preference_points = ratio_points(fred.get("BAMLCC0A0CMTRIV"), treasury_price_proxy_series)
+    hy_credit_preference_points = blended_relative_return_points(fred.get("BAMLHYH0A0HYM2TRIV"), treasury_price_proxy_series)
+    ig_credit_preference_points = blended_relative_return_points(fred.get("BAMLCC0A0CMTRIV"), treasury_price_proxy_series)
     percentile_values = {
         "walcl": series_percentile(fred.get("WALCL")),
         "tga": series_percentile(fred.get("WTREGEN")),
@@ -127,18 +170,59 @@ def compute_indicators(
         "hy_credit_preference": point_series_percentile(hy_credit_preference_points),
         "ig_credit_preference": point_series_percentile(ig_credit_preference_points),
     }
-    cpi_yoy = yoy(fred.get("CPIAUCSL"))
-    pce_yoy = yoy(fred.get("PCEPI"))
-    core_pce_yoy = yoy(fred.get("PCEPILFE"))
+    cpi_yoy_value = yoy_or_none(fred.get("CPIAUCSL"))
+    pce_yoy_value = yoy_or_none(fred.get("PCEPI"))
+    core_pce_yoy_value = yoy_or_none(fred.get("PCEPILFE"))
+    ppi_yoy_value = yoy_or_none(fred.get("PPIACO"))
+    cpi_yoy = cpi_yoy_value if cpi_yoy_value is not None else 0.0
+    pce_yoy = pce_yoy_value if pce_yoy_value is not None else 0.0
+    core_pce_yoy = core_pce_yoy_value if core_pce_yoy_value is not None else 0.0
     trimmed_mean_pce_yoy = latest_value(fred, "PCETRIM12M159SFRBDAL", default=0.0)
-    ppi_yoy = yoy(fred.get("PPIACO"))
+    ppi_yoy = ppi_yoy_value if ppi_yoy_value is not None else 0.0
     unrate = latest_value(fred, "UNRATE", default=0.0)
-    payroll_latest = fred.get("PAYEMS").latest.value if fred.get("PAYEMS") else 0.0
-    payroll_prior = fred.get("PAYEMS").points[-2].value if fred.get("PAYEMS") and len(fred["PAYEMS"].points) > 1 else payroll_latest
-    payroll_change_k = payroll_latest - payroll_prior
+    payroll_change = latest_absolute_change_or_none(fred.get("PAYEMS"), max_gap_days=45)
+    payroll_change_k = payroll_change if payroll_change is not None else 0.0
     gdp_yoy = yoy(fred.get("GDPC1"))
     futures_implied_rate = fed_funds_futures.implied_rate if fed_funds_futures else None
+    availability = {
+        "dff": bool(fred.get("DFF") and fred["DFF"].points),
+        "sofr": bool(fred.get("SOFR") and fred["SOFR"].points),
+        "obfr": bool(fred.get("OBFR") and fred["OBFR"].points),
+        "iorb": bool(fred.get("IORB") and fred["IORB"].points),
+        "rrp_award": bool(fred.get("RRPONTSYAWARD") and fred["RRPONTSYAWARD"].points),
+        "tga": bool(fred.get("WTREGEN") and fred["WTREGEN"].points),
+        "tga_trillions": bool(fred.get("WTREGEN") and fred["WTREGEN"].points),
+        "walcl": bool(fred.get("WALCL") and fred["WALCL"].points),
+        "walcl_trillions": bool(fred.get("WALCL") and fred["WALCL"].points),
+        "soma_treasury_trillions": bool(fred.get("TREAST") and fred["TREAST"].points),
+        "rrp": bool(fred.get("RRPONTSYD") and fred["RRPONTSYD"].points),
+        "rrp_trillions": bool(fred.get("RRPONTSYD") and fred["RRPONTSYD"].points),
+        "bank_reserves": bool(fred.get("WRESBAL") and fred["WRESBAL"].points),
+        "bank_reserves_trillions": bool(fred.get("WRESBAL") and fred["WRESBAL"].points),
+        "sofr_effr_spread_bp": bool(sofr_effr_spread_points),
+        "real_5y": bool(fred.get("DFII5") and fred["DFII5"].points),
+        "real_10y": bool(fred.get("DFII10") and fred["DFII10"].points),
+        "real_rate_level": bool(real_rate_level_points),
+        "real_curve_10y5y_bp": bool(real_curve_points),
+        "breakeven_10y": bool(fred.get("T10YIE") and fred["T10YIE"].points),
+        "real_10y_w1_change_bp": real_10y_w1_change is not None,
+        "real_10y_m1_change_bp": real_10y_m1_change is not None,
+        "breakeven_10y_w1_change_bp": breakeven_10y_w1_change is not None,
+        "breakeven_10y_m1_change_bp": breakeven_10y_m1_change is not None,
+        "net_liquidity": bool(net_liquidity_points),
+        "net_liquidity_trillions": bool(net_liquidity_points),
+        "cpi_yoy": cpi_yoy_value is not None,
+        "pce_yoy": pce_yoy_value is not None,
+        "core_pce_yoy": core_pce_yoy_value is not None,
+        "trimmed_mean_pce_yoy": bool(fred.get("PCETRIM12M159SFRBDAL") and fred["PCETRIM12M159SFRBDAL"].points),
+        "ppi_yoy": ppi_yoy_value is not None,
+        "unrate": bool(fred.get("UNRATE") and fred["UNRATE"].points),
+        "payroll_change_k": payroll_change is not None,
+        "ten_year_realized_vol_20d_bp": bool(treasury_10y_vol_20d_points),
+        "hy_oas": bool(fred.get("BAMLH0A0HYM2") and fred["BAMLH0A0HYM2"].points),
+    }
     return {
+        "availability": availability,
         "ten_year": ten_year,
         "two_year": two_year,
         "five_year": five_year,
@@ -149,7 +233,7 @@ def compute_indicators(
         "fly_2s5s10s": (2 * five_year - two_year - ten_year) * 100,
         "s10s3m": (ten_year - today.values["3M"]) * 100,
         "s30s10": (thirty_year - ten_year) * 100,
-        "curve_curvature_abs_bp": abs(2 * ten_year - two_year - thirty_year) * 100,
+        "curve_curvature_abs_bp": treasury_curve_curvature_abs_bp(two_year, ten_year, thirty_year),
         "ten_year_w1_change_bp": (ten_year - one_week.values["10Y"]) * 100,
         "ten_year_m1_change_bp": (ten_year - one_month.values["10Y"]) * 100,
         "two_year_m1_change_bp": (two_year - one_month.values["2Y"]) * 100,
@@ -160,8 +244,12 @@ def compute_indicators(
         "real_rate_level": latest_point_value(real_rate_level_points, real_5y * 0.6 + real_10y * 0.4),
         "real_curve_10y5y_bp": latest_point_value(real_curve_points, (real_10y - real_5y) * 100),
         "breakeven_10y": breakeven_10y,
+        "real_10y_w1_change_bp": real_10y_w1_change * 100 if real_10y_w1_change is not None else None,
+        "real_10y_m1_change_bp": real_10y_m1_change * 100 if real_10y_m1_change is not None else None,
+        "breakeven_10y_w1_change_bp": breakeven_10y_w1_change * 100 if breakeven_10y_w1_change is not None else None,
+        "breakeven_10y_m1_change_bp": breakeven_10y_m1_change * 100 if breakeven_10y_m1_change is not None else None,
         "dff": dff,
-        "target_range": target_range_from_effective_rate(dff),
+        "target_range": target_range_from_effective_rate(dff) if availability["dff"] else "--",
         "fed_funds_futures_symbol": fed_funds_futures.symbol if fed_funds_futures else "",
         "fed_funds_futures_date": fed_funds_futures.date.isoformat() if fed_funds_futures else "",
         "fed_funds_futures_close": fed_funds_futures.close if fed_funds_futures else None,
@@ -186,7 +274,7 @@ def compute_indicators(
         "cp_tbill_spread_bp": latest_point_value(cp_tbill_spread_points),
         "funding_fragmentation_21d": latest_point_value(funding_fragmentation_series_points),
         "breakeven_target_distance": abs(breakeven_10y - BHADIAL_BREAKEVEN_TARGET),
-        "rrp_trillions": rrp_millions / 1_000_000,
+        "rrp_trillions": rrp_billions / 1_000,
         "onrrp_buffer_risk": latest_point_value(onrrp_buffer_risk_series_points),
         "percentiles": percentile_values,
         "percentile_series": {
@@ -261,7 +349,10 @@ def compute_indicators(
         "wti_shock": latest_point_value(wti_shock_points),
         "natgas": latest_value(fred, "DHHNGSP"),
         "natgas_shock": latest_point_value(natgas_shock_points),
-        "gold_spot": gold_quote.close if gold_quote else 0.0,
+        # Missing market data must stay missing. A numeric zero is a valid-looking price
+        # and previously leaked into the dashboard as "$0.00", which can be mistaken for
+        # a real cross-market signal.
+        "gold_spot": gold_quote.close if gold_quote else None,
         "oil_vol": latest_value(fred, "OVXCLS"),
         "oil_vol_deviation": latest_point_value(oil_vol_deviation_points),
         "gold_vol": latest_value(fred, "GVZCLS"),
@@ -274,27 +365,60 @@ def compute_indicators(
     }
 
 
-def yoy(series: TimeSeries | None) -> float:
+def yoy_or_none(series: TimeSeries | None, *, max_prior_gap_days: int = 45) -> float | None:
+    """Return a true one-year change, rejecting a stale comparison period.
+
+    Monthly and quarterly FRED observation dates normally match the same
+    calendar period one year earlier.  Without a tolerance, a missing year-ago
+    observation can silently turn a multi-year change into a value labelled
+    YoY.
+    """
+    if max_prior_gap_days < 0:
+        raise ValueError("max_prior_gap_days must be non-negative")
     if not series or len(series.points) < 2:
-        return 0.0
+        return None
     latest = series.latest
-    prior = series.value_at_or_before(date(latest.date.year - 1, latest.date.month, latest.date.day))
-    if prior.value == 0:
-        return 0.0
+    target = window_start(latest.date, years=1)
+    prior = series.value_at_or_before(target)
+    if prior is None or prior.value == 0:
+        return None
+    if (target - prior.date).days > max_prior_gap_days:
+        return None
     return (latest.value / prior.value - 1) * 100
 
 
-def latest_pct_change(series: TimeSeries | None) -> float:
+def yoy(series: TimeSeries | None) -> float:
+    value = yoy_or_none(series)
+    return value if value is not None else 0.0
+
+
+def latest_absolute_change_or_none(
+    series: TimeSeries | None,
+    *,
+    max_gap_days: int,
+) -> float | None:
+    if max_gap_days < 0:
+        raise ValueError("max_gap_days must be non-negative")
+    if not series or len(series.points) < 2:
+        return None
+    latest = series.points[-1]
+    prior = series.points[-2]
+    if (latest.date - prior.date).days > max_gap_days:
+        return None
+    return latest.value - prior.value
+
+
+def latest_pct_change(series: TimeSeries | None, *, max_gap_days: int = 7) -> float:
     if not series or len(series.points) < 2:
         return 0.0
     latest = series.points[-1]
     prior = series.points[-2]
-    if prior.value == 0:
+    if prior.value == 0 or (latest.date - prior.date).days > max_gap_days:
         return 0.0
     return (latest.value / prior.value - 1) * 100
 
 
 def target_range_from_effective_rate(rate: float) -> str:
-    lower = int(rate * 4) / 4
+    lower = math.floor(rate * 4) / 4
     upper = lower + 0.25
     return f"{lower:.2f}-{upper:.2f}%"

@@ -8,20 +8,27 @@ data updater, local REST API, SQLite history store, and optional daily local
 scheduler.
 
 The headline 0-100 macro score is aligned to the public bhadial Conditions
-Score shape: 30 scored factors, 7 modules, Funding EMA(5), and explicit
-public-proxy boundaries for ETF-relative factors.
+Score shape: 47 tracked factors, 21 active factors across 7 modules after
+redundancy pruning from the original 30-factor baseline, Funding EMA(5 months),
+and explicit public-proxy boundaries for ETF-relative factors. The fixed-weight
+score remains the compatibility output; freshness, warm-up, effective-weight
+coverage, observed-only, and reliability diagnostics expose the currently
+eligible subset.
 
 The equity-risk surface has three separate contracts:
 
 - `spyEarlyWarning`: monthly/medium-horizon macro drawdown-risk overlay.
 - `equityShortTermRisk`: daily SPY tactical risk score from replayable OHLCV
-  market structure, event context, and audited factor weights.
+  market structure, event context, audited factor weights, and rule-level
+  `scoreAdjustments` reconciliation from base score to final score. Its
+  `volatilityEstimatorAudit` shadow-tests standard Parkinson RMS aggregation
+  without changing the production estimator.
 - `globalLpplRisk`: independent global LPPL research indicator for SPY, QQQ,
   KOSPI/EWY, Hang Seng/EWH, Taiwan/EWT, and Nikkei/EWJ. It is not included in
   `equityShortTermRisk`; each index carries its own current LPPL fit,
-  `history`, `backtest`, `indexValidation`, and validation-weighted
-  `forwardSignal`. The top-level score stays `null` so markets are not blended
-  into a composite.
+  `historyRef`, `backtestRef`, `indexValidation`, and validation-weighted
+  `forwardSignal`, with canonical history/backtest maps stored once. The
+  top-level score stays `null` so markets are not blended into a composite.
 
 Run locally:
 
@@ -82,16 +89,26 @@ operation, testing, and documentation should target `the-dial-treasury-v1/`.
 - Frontend: `the-dial-treasury-v1/index.html`, `app.js`, `i18n.js`, and
   `styles.css`.
 - Data builder: `the-dial-treasury-v1/treasury_data/build_dashboard.py`.
+- Factor-group domain: `the-dial-treasury-v1/treasury_data/factor_groups.py`,
+  with shared parsing/formatting in `treasury_data/dashboard_format.py`; both
+  are re-exported by the data builder facade.
+- Investment-view domain: `the-dial-treasury-v1/treasury_data/investment_views.py`,
+  re-exported by the data builder facade.
 - Public-source parsers: `the-dial-treasury-v1/treasury_data/sources.py`.
 - Local server/API: `the-dial-treasury-v1/scripts/serve.py`.
 - Manual refresh entrypoint: `the-dial-treasury-v1/scripts/update_data.py`.
 - Equity/LPPL lightweight refresh entrypoint:
   `the-dial-treasury-v1/scripts/update_equity_risk.py`.
 - Smoke check: `the-dial-treasury-v1/scripts/smoke_check.py`.
+- Dashboard contract: `the-dial-treasury-v1/treasury_data/dashboard_contract.py`
+  and `the-dial-treasury-v1/schema/dashboard-v1.schema.json`.
+- Bounded source orchestration: `the-dial-treasury-v1/treasury_data/live_sources.py`.
 
 The local server exposes the existing dashboard slice APIs, history APIs, and
-`POST /api/update`. The refactor does not rename the active directory or change
-the API contract.
+`POST /api/update`. JSON GETs support ETag revalidation, publication is atomic
+and cross-process locked, partial market refreshes use an incremental cache,
+and SQLite retains compressed recent payloads plus long-lived normalized
+metrics. The refactor does not rename the active directory.
 
 ## Repository State
 

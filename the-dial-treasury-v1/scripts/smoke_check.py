@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from treasury_data.build_dashboard import EQUITY_RISK_COMPONENT_WEIGHTS, EQUITY_RISK_SYMBOLS  # noqa: E402
+from treasury_data.dashboard_contract import dashboard_contract_issues  # noqa: E402
 
 DEFAULT_DASHBOARD = PROJECT_ROOT / "data" / "dashboard.json"
 EQUITY_SHORT_TERM_RISK_MIN_HISTORY_POINTS = 200
@@ -49,7 +50,7 @@ def load_health(url: str, timeout: float = 10.0) -> dict[str, Any]:
 
 
 def validate_dashboard(dashboard: dict[str, Any]) -> list[str]:
-    issues: list[str] = []
+    issues = dashboard_contract_issues(dashboard)
     if dashboard.get("meta", {}).get("dataMode") != "real-public-sources":
         issues.append("meta.dataMode is not real-public-sources")
     if not parse_iso_date(dashboard.get("asOf")):
@@ -100,6 +101,8 @@ def validate_dashboard(dashboard: dict[str, Any]) -> list[str]:
         issues.append("missing equity short-term risk contract")
     if not has_global_lppl_risk_contract(dashboard.get("globalLpplRisk")):
         issues.append("missing global LPPL risk contract")
+    issues.extend(macro_liquidity_reliability_issues(dashboard.get("macroLiquidity")))
+    issues.extend(signal_validation_research_issues(dashboard.get("signalValidation")))
     return issues
 
 
@@ -186,6 +189,90 @@ def has_signal_validation_contract(payload: Any) -> bool:
             if field not in sample:
                 return False
     return True
+
+
+def macro_liquidity_reliability_issues(payload: Any) -> list[str]:
+    if payload is None:
+        return []
+    if not isinstance(payload, dict):
+        return ["macroLiquidity reliability contract is not an object"]
+    issues: list[str] = []
+    for field in (
+        "legacyFixedScore",
+        "observedOnlyScore",
+        "reliabilityScore",
+        "effectiveWeightCoveragePct",
+        "scoredCoveragePct",
+    ):
+        if not isinstance(payload.get(field), (int, float)):
+            issues.append(f"macroLiquidity missing numeric {field}")
+    components = payload.get("components")
+    if not isinstance(components, list) or not components:
+        issues.append("macroLiquidity components are missing")
+        return issues
+    required_component_fields = (
+        "scoreEligible",
+        "observationDate",
+        "ageDays",
+        "freshnessStatus",
+        "scoringStatus",
+        "effectiveSampleCount",
+        "minSampleCount",
+        "cadence",
+        "maxAgeDays",
+    )
+    for index, component in enumerate(components):
+        if not isinstance(component, dict):
+            issues.append(f"macroLiquidity component {index} is not an object")
+            continue
+        missing = [field for field in required_component_fields if field not in component]
+        if missing:
+            issues.append(f"macroLiquidity component {index} missing {','.join(missing)}")
+    return issues
+
+
+def signal_validation_research_issues(payload: Any) -> list[str]:
+    if payload is None or (isinstance(payload, dict) and payload.get("available") is not True):
+        return []
+    if not isinstance(payload, dict):
+        return ["signalValidation research contract is not an object"]
+    issues: list[str] = []
+    if payload.get("validationStatus") != "research-validation":
+        issues.append("signalValidation validationStatus must be research-validation")
+    if payload.get("independentHoldout") is not False:
+        issues.append("signalValidation independentHoldout must be false")
+    multiple_testing = payload.get("multipleTesting")
+    if not isinstance(multiple_testing, dict) or multiple_testing.get("method") != "Benjamini-Hochberg":
+        issues.append("signalValidation multipleTesting must declare Benjamini-Hochberg")
+    factors = payload.get("factors")
+    if not isinstance(factors, list) or not factors:
+        issues.append("signalValidation factors are missing")
+        return issues
+    required_factor_fields = (
+        "actionableRobust",
+        "fdrQValue3m",
+        "foldStability3m",
+        "oosSampleSize3m",
+    )
+    for index, factor in enumerate(factors):
+        if not isinstance(factor, dict):
+            issues.append(f"signalValidation factor {index} is not an object")
+            continue
+        missing = [field for field in required_factor_fields if field not in factor]
+        if missing:
+            issues.append(f"signalValidation factor {index} missing {','.join(missing)}")
+    composites = payload.get("composites")
+    if not isinstance(composites, list) or not composites:
+        issues.append("signalValidation composites are missing")
+        return issues
+    for index, composite in enumerate(composites):
+        if not isinstance(composite, dict):
+            issues.append(f"signalValidation composite {index} is not an object")
+            continue
+        missing = [field for field in required_factor_fields if field not in composite]
+        if missing:
+            issues.append(f"signalValidation composite {index} missing {','.join(missing)}")
+    return issues
 
 
 def validate_health_payload(payload: dict[str, Any]) -> list[str]:
@@ -386,6 +473,19 @@ def has_equity_short_term_risk_contract(payload: Any) -> bool:
     score = payload.get("score")
     if not isinstance(score, (int, float)) or not 0 <= float(score) <= 100:
         return False
+    score_adjustments = payload.get("scoreAdjustments")
+    if score_adjustments is not None and not has_equity_score_adjustments_contract(
+        score_adjustments,
+        score=float(score),
+        base_score=payload.get("baseScore"),
+    ):
+        return False
+    estimator_audit = payload.get("volatilityEstimatorAudit")
+    if estimator_audit is not None and not has_equity_volatility_estimator_audit_contract(
+        estimator_audit,
+        score=float(score),
+    ):
+        return False
     for key in ("regime", "regimeCn", "summary", "asOf", "method"):
         if not isinstance(payload.get(key), str) or not payload.get(key):
             return False
@@ -573,9 +673,19 @@ def has_equity_short_term_risk_contract(payload: Any) -> bool:
     high_precision = backtest.get("highPrecisionThresholdTest")
     if not isinstance(high_precision, dict):
         return False
-    for key in ("threshold", "precision", "recall", "alertDays", "falsePositives"):
-        if key not in high_precision:
+    if high_precision.get("available") is False:
+        minimum_precision = high_precision.get("minimumPrecision")
+        if (
+            not isinstance(minimum_precision, (int, float))
+            or not 0 <= float(minimum_precision) <= 100
+            or not isinstance(high_precision.get("reason"), str)
+            or not high_precision.get("reason")
+        ):
             return False
+    else:
+        for key in ("threshold", "precision", "recall", "alertDays", "falsePositives"):
+            if key not in high_precision:
+                return False
     alert_cluster = backtest.get("alertClusterTest")
     if not isinstance(alert_cluster, dict) or "avgLeadDays" not in alert_cluster:
         return False
@@ -584,6 +694,83 @@ def has_equity_short_term_risk_contract(payload: Any) -> bool:
         return False
     if guard.get("dataThrough") != payload.get("asOf"):
         return False
+    return True
+
+
+def has_equity_score_adjustments_contract(payload: Any, *, score: float, base_score: Any) -> bool:
+    if not isinstance(payload, dict) or not isinstance(base_score, (int, float)):
+        return False
+    numeric_keys = ("baseScore", "amplifier", "dampener", "scoreFloor", "adjustedBeforeFloor", "finalScore")
+    if any(not isinstance(payload.get(key), (int, float)) for key in numeric_keys):
+        return False
+    if abs(float(payload["baseScore"]) - float(base_score)) > 0.11:
+        return False
+    expected_adjusted = float(payload["baseScore"]) + float(payload["amplifier"]) + float(payload["dampener"])
+    if abs(float(payload["adjustedBeforeFloor"]) - expected_adjusted) > 0.11:
+        return False
+    expected_final = max(0.0, min(100.0, max(expected_adjusted, float(payload["scoreFloor"]))))
+    if abs(float(payload["finalScore"]) - expected_final) > 0.11 or abs(float(payload["finalScore"]) - score) > 0.11:
+        return False
+    if not isinstance(payload.get("floorApplied"), bool):
+        return False
+    rules = payload.get("rules")
+    if not isinstance(rules, list):
+        return False
+    value_key_by_kind = {"amplifier": "scoreBoost", "dampener": "scoreOffset", "floor": "scoreFloor"}
+    for rule in rules:
+        if not isinstance(rule, dict):
+            return False
+        if not isinstance(rule.get("key"), str) or not rule.get("key"):
+            return False
+        if not isinstance(rule.get("label"), str) or not rule.get("label"):
+            return False
+        value_key = value_key_by_kind.get(rule.get("kind"))
+        if value_key is None or not isinstance(rule.get(value_key), (int, float)):
+            return False
+    return True
+
+
+def has_equity_volatility_estimator_audit_contract(payload: Any, *, score: float) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("productionEstimator") != "legacyMean" or payload.get("candidateEstimator") != "standardRms":
+        return False
+    if payload.get("productionUnchanged") is not True:
+        return False
+    if not isinstance(payload.get("summary"), str) or not payload.get("summary"):
+        return False
+    if payload.get("available") is not True:
+        return payload.get("available") is False
+    if payload.get("verdict") not in {"insufficientEvidence", "candidatePromising", "retainLegacy"}:
+        return False
+    if payload.get("recommendedAction") not in {"retainProduction", "keepShadowTesting"}:
+        return False
+    current = payload.get("current")
+    if not isinstance(current, dict):
+        return False
+    production_current = current.get("production")
+    candidate_current = current.get("candidate")
+    if not isinstance(production_current, dict) or not isinstance(candidate_current, dict):
+        return False
+    if not isinstance(production_current.get("riskScore"), (int, float)):
+        return False
+    if abs(float(production_current["riskScore"]) - score) > 0.11:
+        return False
+    backtest = payload.get("backtest")
+    if not isinstance(backtest, dict):
+        return False
+    for key in ("production", "candidate"):
+        metrics = backtest.get(key)
+        if not isinstance(metrics, dict):
+            return False
+        if metrics.get("threshold") != 75 or not isinstance(metrics.get("sampleSize"), int):
+            return False
+    for key in ("riskScoreDelta", "volComponentScoreDelta"):
+        if current.get(key) is not None and not isinstance(current.get(key), (int, float)):
+            return False
+    for key in ("fullPrecisionDelta", "oosPrecisionDelta", "oosLiftDelta", "oosFalsePositiveDelta"):
+        if backtest.get(key) is not None and not isinstance(backtest.get(key), (int, float)):
+            return False
     return True
 
 
@@ -608,6 +795,10 @@ def has_global_lppl_risk_contract(payload: Any) -> bool:
         return False
     indices = payload.get("indices")
     if not isinstance(indices, list) or len(indices) < 6:
+        return False
+    per_index_history = payload.get("perIndexHistory")
+    per_index_backtests = payload.get("perIndexBacktests")
+    if not isinstance(per_index_history, dict) or not isinstance(per_index_backtests, dict):
         return False
     for row in indices:
         if not isinstance(row, dict):
@@ -666,7 +857,11 @@ def has_global_lppl_risk_contract(payload: Any) -> bool:
                 return False
             if not isinstance(row.get("windowDays"), int):
                 return False
-            if not isinstance(row.get("effectiveWeightMultiplier"), (int, float)):
+            effective_multiplier = row.get("effectiveWeightMultiplier")
+            if (
+                not isinstance(effective_multiplier, (int, float))
+                or not 0 <= float(effective_multiplier) <= 1
+            ):
                 return False
             forward_signal = row.get("forwardSignal")
             if not isinstance(forward_signal, dict) or forward_signal.get("available") is not True:
@@ -684,9 +879,24 @@ def has_global_lppl_risk_contract(payload: Any) -> bool:
             validation = row.get("validation")
             if not isinstance(validation, dict) or validation.get("symbol") != row.get("symbol"):
                 return False
-            if not has_lppl_history_contract(row.get("history"), require_available=True):
+            symbol = str(row.get("symbol") or "")
+            history_ref = row.get("historyRef")
+            backtest_ref = row.get("backtestRef")
+            referenced_history = (
+                isinstance(history_ref, dict)
+                and history_ref.get("symbol") == symbol
+                and history_ref.get("path") == f"globalLpplRisk.perIndexHistory.{symbol}"
+                and has_lppl_history_contract(per_index_history.get(symbol), require_available=True)
+            )
+            referenced_backtest = (
+                isinstance(backtest_ref, dict)
+                and backtest_ref.get("symbol") == symbol
+                and backtest_ref.get("path") == f"globalLpplRisk.perIndexBacktests.{symbol}"
+                and has_lppl_backtest_contract(per_index_backtests.get(symbol), require_available=True)
+            )
+            if not referenced_history and not has_lppl_history_contract(row.get("history"), require_available=True):
                 return False
-            if not has_lppl_backtest_contract(row.get("backtest"), require_available=True):
+            if not referenced_backtest and not has_lppl_backtest_contract(row.get("backtest"), require_available=True):
                 return False
         elif row_score is not None:
             return False
@@ -709,7 +919,7 @@ def has_global_lppl_risk_contract(payload: Any) -> bool:
                 if not isinstance(row.get(key), int):
                     return False
             multiplier = row.get("effectiveWeightMultiplier")
-            if not isinstance(multiplier, (int, float)) or not 0 < float(multiplier) <= 1:
+            if not isinstance(multiplier, (int, float)) or not 0 <= float(multiplier) <= 1:
                 return False
     elif not isinstance(index_validation.get("rows"), list):
         return False
@@ -737,10 +947,6 @@ def has_global_lppl_risk_contract(payload: Any) -> bool:
     if not isinstance(backtest, dict):
         return False
     if backtest.get("available") is True or not isinstance(backtest.get("horizonTests"), list):
-        return False
-    per_index_history = payload.get("perIndexHistory")
-    per_index_backtests = payload.get("perIndexBacktests")
-    if not isinstance(per_index_history, dict) or not isinstance(per_index_backtests, dict):
         return False
     for row in indices:
         if not isinstance(row, dict) or not row.get("available"):

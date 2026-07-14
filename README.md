@@ -2,9 +2,10 @@
 
 Current active app: `the-dial-treasury-v1/`, the US Treasury factor dashboard.
 The headline 0-100 macro score now follows the public bhadial Conditions Score
-shape: 47 tracked factors, 30 scored factors across 7 modules, module weights
-based on public factor coverage plus overlap adjustment, Funding EMA(5), and
-explicit proxy boundaries for ETF-relative inputs.
+shape: 47 tracked factors, 21 active scored factors across 7 modules after
+redundancy pruning from the original 30-factor baseline, module weights based
+on public factor coverage plus overlap adjustment, Funding EMA(5), and explicit
+proxy boundaries for ETF-relative inputs.
 The scorecard conclusion layer includes a credibility audit: factor-driver
 contributions are scaled by module weight and factor count, while proxy,
 modeled, and manual-placeholder inputs are discounted before the dashboard

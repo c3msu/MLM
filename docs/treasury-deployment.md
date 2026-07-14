@@ -73,9 +73,15 @@ The dashboard slice endpoints are dynamic views over `data/dashboard.json`;
 the history endpoints read `data/history.sqlite3`. The update script does not
 generate static API files.
 
+`data/dashboard.json` carries `schemaVersion: "1.0.0"`; the envelope schema is
+stored at `the-dial-treasury-v1/schema/dashboard-v1.schema.json`. Successful
+JSON GET responses include a SHA-256 `ETag` and support `If-None-Match`; the
+frontend revalidates stable dashboard/health URLs with `cache: "no-cache"`.
+Conditional requests never rewrite an original 4xx/5xx response into 304.
+
 `/api/dashboard` includes `macroLiquidity`, which is the bhadial-compatible
-Conditions Score layer: 47 tracked factors, 30 scored factors, 7 modules,
-public factor-coverage/overlap module weights, Funding EMA(5), and the public
+Conditions Score layer: 47 tracked factors, 21 active factors, 7 modules,
+public factor-coverage/overlap module weights, Funding EMA(5 months), and the public
 scoring methods (`level_percentile`, `deviation`, `target_distance`,
 `shock_only`, `risk_signal`). `macroLiquidity.benchmark` records the public
 bhadial dashboard score and local delta when the page is reachable. Keep this
@@ -88,8 +94,9 @@ make the conclusion unsuitable for a high-confidence narrative.
 The same payload includes three separate equity-risk contracts:
 `spyEarlyWarning`, `equityShortTermRisk`, and `globalLpplRisk`. `globalLpplRisk`
 is independent from `equityShortTermRisk`; it exposes current LPPL fits plus
-separate `history`, `backtest`, and validation-weighted `forwardSignal`
-payloads for each available market. The top-level LPPL score/history/backtest
+canonical `perIndexHistory`/`perIndexBacktests` maps, row-level references, and
+validation-weighted `forwardSignal` payloads for each available market. The
+top-level LPPL score/history/backtest
 are deliberately unavailable so SPY, QQQ, Korea/EWY, Hong Kong/EWH,
 Taiwan/EWT, and Japan/EWJ are not blended into one composite.
 The `/api/cross` slice includes the section-07 `historySeries` registry used by
@@ -133,13 +140,28 @@ The LaunchAgent starts the local server immediately, serves the existing
 `data/dashboard.json`, refreshes in the background at startup, and refreshes
 once per day at the configured local `HH:MM`. Successful refreshes write the
 current JSON snapshot and append/update SQLite history in
-`data/history.sqlite3`. The JSON write is atomic. If a refresh produces
+`data/history.sqlite3`. The JSON write is atomic and protected by a
+cross-process lock, so full and partial refreshes cannot replace each other.
+Independent public-source calls use a bounded six-worker executor with
+serialized provider lanes and deterministic result ordering. If a refresh produces
 real-source `error` rows while the current dashboard is healthy, the updater
 stores the candidate as `data/dashboard.failed.json` for inspection. A
 candidate with core curve, scorecard, and Conditions Score trend content still
 becomes the served snapshot and is saved to history; a candidate missing that
 core content is rejected in favor of the last healthy dashboard and is not
 added to history.
+Optional aggregate surfaces use explicit last-known-good blocks when any of
+their providers degrades. Global LPPL is preserved atomically if its available
+symbol set regresses, together with dependent regional and portfolio surfaces.
+The equity-only updater keeps a 10-day-overlap incremental market cache under
+`data/cache/market-bars-v1.json`; total cold failures and partial fallbacks stay
+visible in `sourceStatus` but do not overwrite healthy risk roots or create a
+history snapshot.
+
+SQLite retains normalized metrics for all snapshots but, by default, only the
+newest 30 full dashboard bodies. Full bodies are zlib-compressed; tune retention
+with `MARCO_HISTORY_PAYLOAD_RETAIN`, `MARCO_HISTORY_PAYLOAD_COMPRESSION`, and
+`MARCO_HISTORY_PAYLOAD_COMPRESSION_LEVEL`.
 Daily history backfill runs are recorded in SQLite as `history_backfill_runs`.
 Single-source backfill failures are recorded in that run metadata and do not
 block saving the remaining public history series.

@@ -68,19 +68,25 @@ from .signal_validation import (
 from .series_math import *  # noqa: F401,F403  (facade re-export, Phase 1 refactor)
 from .dashboard_core import *  # noqa: F401,F403  (facade re-export, Phase 1 refactor)
 from .dashboard_core import _float_or_zero  # noqa: F401  (underscore name not covered by import *)
+from .dashboard_format import *  # noqa: F401,F403  (facade re-export, shared parsing/formatting)
 from .fetch import *  # noqa: F401,F403  (facade re-export, Phase 1 refactor)
 from .indicators import *  # noqa: F401,F403  (facade re-export, Phase 1 refactor)
 from .scoring_bhadial import *  # noqa: F401,F403  (facade re-export, Phase 1 refactor)
+from .factor_groups import *  # noqa: F401,F403  (facade re-export, factor-group extraction)
 from .scoring_spy_warning import *  # noqa: F401,F403  (facade re-export, Phase 1 refactor)
 from .scoring_equity import *  # noqa: F401,F403  (facade re-export, Phase 1 refactor)
 from .scoring_lppl import *  # noqa: F401,F403  (facade re-export, Phase 1 refactor)
+from .scoring_lppl_validation import *  # noqa: F401,F403  (facade re-export, LPPL validation extraction)
+from . import scoring_lppl_history as _lppl_history
+from .scoring_lppl_history import *  # noqa: F401,F403  (facade re-export, LPPL history extraction)
 from .scoring_regional import *  # noqa: F401,F403  (facade re-export, Phase 1 refactor)
+from .investment_views import *  # noqa: F401,F403  (facade re-export, investment-view extraction)
 from .validation_build import *  # noqa: F401,F403  (facade re-export, Phase 1 refactor)
 from .advice import *  # noqa: F401,F403  (facade re-export, Phase 1 refactor)
+from .live_sources import LiveSourceTask, run_live_source_tasks
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OVERRIDES_PATH = PROJECT_ROOT / "content" / "overrides.json"
-REMOTE_COMPATIBILITY_SOURCE = "us-treasury-bonds-monitor-luffa"
 CONCLUSION_SOURCE_QUALITY = {
     "real-public": 1.0,
     "derived-public": 0.9,
@@ -101,7 +107,7 @@ REMOTE_COMPATIBILITY_FACTOR_NAMES = [
     "新老券利差",
 ]
 
-# 实际计入综合分的因子本地名(唯一真相): 去冗余后=22。覆盖率面板的 inScorecard 据此判定,
+# 实际计入综合分的因子本地名(唯一真相): 去冗余后=21。覆盖率面板的 inScorecard 据此判定,
 # 被剔除的因子仍作为原始指标展示(display)但 inScorecard=False。
 
 FRED_SERIES = [
@@ -252,8 +258,6 @@ GLOBAL_LPPL_INDEX_SPECS: list[dict[str, Any]] = [
         "weight": 0.15,
     },
 ]
-GLOBAL_LPPL_HISTORY_STEP = 1
-GLOBAL_LPPL_ALERT_THRESHOLD = 65
 def fetch_daily_bars_with_stooq_fallback(
     symbol: str,
     *,
@@ -290,6 +294,78 @@ def fetch_daily_bars_with_stooq_fallback(
 
 
 def build_live_dashboard() -> dict[str, Any]:
+    equity_end = datetime.now(timezone.utc).date()
+    equity_start = equity_end - timedelta(days=365 * 3 + 10)
+    tasks = [
+        LiveSourceTask("curve", "treasury", lambda: fetch_treasury_yield_curves()),
+        LiveSourceTask("fred", "fred", lambda: fetch_fred_series_bulk(FRED_SERIES)),
+        LiveSourceTask("auctions", "treasury", lambda: fetch_treasury_auctions()),
+        LiveSourceTask("announced-auctions", "treasury", lambda: fetch_announced_auctions()),
+        LiveSourceTask("fomc-calendar", "federal-reserve", lambda: fetch_fomc_calendar_events()),
+        LiveSourceTask("fred-calendar", "fred", lambda: fetch_fred_macro_release_events()),
+        LiveSourceTask("bea-calendar", "bea", lambda: fetch_bea_release_events()),
+        LiveSourceTask("fomc-projection", "federal-reserve", lambda: fetch_fomc_projection()),
+        LiveSourceTask("acm", "new-york-fed", lambda: fetch_acm_term_premium()),
+        LiveSourceTask("cftc", "cftc", lambda: fetch_cftc_treasury_positions()),
+        LiveSourceTask("tic", "treasury", lambda: fetch_tic_major_holders()),
+        LiveSourceTask("primary-dealer", "new-york-fed", lambda: fetch_primary_dealer_stats()),
+        LiveSourceTask("quarterly-refunding", "treasury", lambda: fetch_quarterly_refunding()),
+        LiveSourceTask("debt-limit", "treasury", lambda: fetch_debt_limit_status()),
+        LiveSourceTask("fed-funds-futures", "stooq", lambda: fetch_fed_funds_futures_quote()),
+        LiveSourceTask("gold", "stooq", lambda: fetch_gold_spot_quote()),
+    ]
+    for index, (symbol, asset_class) in enumerate(EQUITY_RISK_SYMBOLS.items()):
+        tasks.append(
+            LiveSourceTask(
+                f"equity:{symbol}",
+                f"market-{index % 3}",
+                lambda symbol=symbol, asset_class=asset_class: fetch_daily_bars_with_stooq_fallback(
+                    symbol,
+                    start=equity_start,
+                    end=equity_end,
+                    asset_class=asset_class,
+                    timeout=14,
+                    limit=900,
+                ),
+            )
+        )
+    global_fetch_specs = [
+        spec for spec in GLOBAL_LPPL_INDEX_SPECS if str(spec["symbol"]).upper() not in EQUITY_RISK_SYMBOLS
+    ]
+    for index, spec in enumerate(global_fetch_specs):
+        symbol = str(spec["symbol"]).upper()
+        if spec.get("source") == "nasdaq":
+            fetch = lambda spec=spec, symbol=symbol: fetch_daily_bars_with_stooq_fallback(
+                str(spec["sourceSymbol"]),
+                start=equity_start,
+                end=equity_end,
+                asset_class=str(spec.get("assetClass") or "etf"),
+                timeout=14,
+                limit=900,
+                fallback_symbol=str(spec.get("fallbackSymbol") or ""),
+                output_symbol=symbol,
+            )
+        elif spec.get("source") == "stooq":
+            fetch = lambda spec=spec: fetch_stooq_daily_bars(
+                str(spec["sourceSymbol"]), start=equity_start, end=equity_end, timeout=14
+            )
+        else:
+            continue
+        tasks.append(LiveSourceTask(f"global:{symbol}", f"market-{index % 3}", fetch))
+    tasks.extend(
+        [
+            LiveSourceTask("option-open-interest", "cboe", lambda: fetch_cboe_option_open_interest("SPY")),
+            LiveSourceTask("fed-news", "federal-reserve", lambda: fetch_federal_reserve_press_releases()),
+            LiveSourceTask("treasury-news", "treasury", lambda: fetch_treasury_press_releases()),
+            LiveSourceTask("benchmark", "bhadial", lambda: fetch_bhadial_public_score()),
+        ]
+    )
+
+    # Six workers bound total network concurrency.  Provider lanes serialize
+    # same-domain requests; the three market lanes deliberately cap the large
+    # equity/global symbol batch at three concurrent requests.
+    results = {result.key: result for result in run_live_source_tasks(tasks, max_workers=6)}
+
     source_status: list[dict[str, Any]] = []
     curve_records: list[YieldCurveRecord] = []
     auctions: list[dict[str, object]] = []
@@ -311,7 +387,7 @@ def build_live_dashboard() -> dict[str, Any]:
     official_news: list[NewsItem] = []
 
     try:
-        curve_records = fetch_treasury_yield_curves()
+        curve_records = results["curve"].get()
         latest = curve_records[-1].date.isoformat() if curve_records else "none"
         source_status.append({"name": "U.S. Treasury yield curve XML", "status": "ok", "latest": latest})
     except Exception as exc:  # noqa: BLE001
@@ -334,7 +410,7 @@ def build_live_dashboard() -> dict[str, Any]:
             source_status.append({"name": "U.S. Treasury yield curve XML", "status": "error", "latest": f"{exc}; FRED DGS fallback failed: {fallback_exc}"})
 
     try:
-        fred = fetch_fred_series_bulk(FRED_SERIES)
+        fred = results["fred"].get()
         for series_id in FRED_SERIES:
             series = fred.get(series_id)
             if series:
@@ -346,7 +422,7 @@ def build_live_dashboard() -> dict[str, Any]:
             source_status.append({"name": f"FRED {series_id}", "status": "error", "latest": str(exc)})
 
     try:
-        auctions = fetch_treasury_auctions()
+        auctions = results["auctions"].get()
         source_status.append({"name": "TreasuryDirect auctioned securities", "status": "ok", "latest": str(len(auctions))})
     except Exception as exc:  # noqa: BLE001
         auctions = load_historical_auction_fallback()
@@ -363,20 +439,20 @@ def build_live_dashboard() -> dict[str, Any]:
             source_status.append({"name": "TreasuryDirect auctioned securities", "status": "error", "latest": str(exc)})
 
     try:
-        announced_auctions = fetch_announced_auctions()
+        announced_auctions = results["announced-auctions"].get()
         source_status.append({"name": "TreasuryDirect announced securities", "status": "ok", "latest": str(len(announced_auctions))})
     except Exception as exc:  # noqa: BLE001
         source_status.append({"name": "TreasuryDirect announced securities", "status": "warning", "latest": str(exc)})
 
     try:
-        calendar_events = fetch_fomc_calendar_events()
+        calendar_events = results["fomc-calendar"].get()
         latest = max((event.date for event in calendar_events), default=None)
         source_status.append({"name": "Federal Reserve FOMC calendar", "status": "ok", "latest": latest.isoformat() if latest else "none"})
     except Exception as exc:  # noqa: BLE001
         source_status.append({"name": "Federal Reserve FOMC calendar", "status": "error", "latest": str(exc)})
 
     try:
-        macro_events = fetch_fred_macro_release_events()
+        macro_events = results["fred-calendar"].get()
         calendar_events.extend(macro_events)
         latest = max((event.date for event in macro_events), default=None)
         source_status.append({"name": "FRED economic release calendar", "status": "ok", "latest": latest.isoformat() if latest else "none"})
@@ -384,7 +460,7 @@ def build_live_dashboard() -> dict[str, Any]:
         source_status.append({"name": "FRED economic release calendar", "status": "error", "latest": str(exc)})
 
     try:
-        bea_events = fetch_bea_release_events()
+        bea_events = results["bea-calendar"].get()
         calendar_events.extend(bea_events)
         latest = max((event.date for event in bea_events), default=None)
         source_status.append({"name": "BEA release schedule", "status": "ok", "latest": latest.isoformat() if latest else "none"})
@@ -392,72 +468,63 @@ def build_live_dashboard() -> dict[str, Any]:
         source_status.append({"name": "BEA release schedule", "status": "error", "latest": str(exc)})
 
     try:
-        fomc_projection = fetch_fomc_projection()
+        fomc_projection = results["fomc-projection"].get()
         source_status.append({"name": "Federal Reserve SEP projections", "status": "ok", "latest": fomc_projection.release_date.isoformat()})
     except Exception as exc:  # noqa: BLE001
         source_status.append({"name": "Federal Reserve SEP projections", "status": "warning", "latest": str(exc)})
 
     try:
-        acm = fetch_acm_term_premium()
+        acm = results["acm"].get()
         source_status.append({"name": "NY Fed ACM term premium", "status": "ok", "latest": acm.date.isoformat()})
     except Exception as exc:  # noqa: BLE001
         source_status.append({"name": "NY Fed ACM term premium", "status": "error", "latest": str(exc)})
 
     try:
-        cftc_positions = fetch_cftc_treasury_positions()
+        cftc_positions = results["cftc"].get()
         latest = cftc_positions[0].report_date.isoformat() if cftc_positions else "none"
         source_status.append({"name": "CFTC financial futures COT", "status": "ok", "latest": latest})
     except Exception as exc:  # noqa: BLE001
         source_status.append({"name": "CFTC financial futures COT", "status": "error", "latest": str(exc)})
 
     try:
-        tic_holdings = fetch_tic_major_holders()
+        tic_holdings = results["tic"].get()
         source_status.append({"name": "Treasury TIC major foreign holders", "status": "ok", "latest": tic_holdings.period})
     except Exception as exc:  # noqa: BLE001
         source_status.append({"name": "Treasury TIC major foreign holders", "status": "error", "latest": str(exc)})
 
     try:
-        primary_dealer_stats = fetch_primary_dealer_stats()
+        primary_dealer_stats = results["primary-dealer"].get()
         source_status.append({"name": "NY Fed primary dealer statistics", "status": "ok", "latest": primary_dealer_stats.as_of.isoformat()})
     except Exception as exc:  # noqa: BLE001
         source_status.append({"name": "NY Fed primary dealer statistics", "status": "error", "latest": str(exc)})
 
     try:
-        quarterly_refunding = fetch_quarterly_refunding()
+        quarterly_refunding = results["quarterly-refunding"].get()
         source_status.append({"name": "U.S. Treasury quarterly refunding documents", "status": "ok", "latest": quarterly_refunding.release_date.isoformat()})
     except Exception as exc:  # noqa: BLE001
         source_status.append({"name": "U.S. Treasury quarterly refunding documents", "status": "error", "latest": str(exc)})
 
     try:
-        debt_limit_status = fetch_debt_limit_status()
+        debt_limit_status = results["debt-limit"].get()
         source_status.append({"name": "Treasury Fiscal Data debt subject to limit", "status": "ok", "latest": debt_limit_status.record_date.isoformat()})
     except Exception as exc:  # noqa: BLE001
         source_status.append({"name": "Treasury Fiscal Data debt subject to limit", "status": "error", "latest": str(exc)})
 
     try:
-        fed_funds_futures = fetch_fed_funds_futures_quote()
+        fed_funds_futures = results["fed-funds-futures"].get()
         source_status.append({"name": "Stooq 30-Day Fed Funds futures ZQ.F", "status": "ok", "latest": fed_funds_futures.date.isoformat()})
     except Exception as exc:  # noqa: BLE001
         source_status.append({"name": "Stooq 30-Day Fed Funds futures ZQ.F", "status": "warning", "latest": str(exc)})
 
     try:
-        gold_quote = fetch_gold_spot_quote()
+        gold_quote = results["gold"].get()
         source_status.append({"name": "Stooq gold spot XAUUSD", "status": "ok", "latest": gold_quote.date.isoformat()})
     except Exception as exc:  # noqa: BLE001
         source_status.append({"name": "Stooq gold spot XAUUSD", "status": "warning", "latest": str(exc)})
 
-    equity_end = datetime.now(timezone.utc).date()
-    equity_start = equity_end - timedelta(days=365 * 3 + 10)
-    for symbol, asset_class in EQUITY_RISK_SYMBOLS.items():
+    for symbol in EQUITY_RISK_SYMBOLS:
         try:
-            bars, status = fetch_daily_bars_with_stooq_fallback(
-                symbol,
-                start=equity_start,
-                end=equity_end,
-                asset_class=asset_class,
-                timeout=14,
-                limit=900,
-            )
+            bars, status = results[f"equity:{symbol}"].get()
             equity_market_bars[symbol] = bars
             source_status.append({"name": f"Nasdaq {symbol} OHLCV", **status})
         except Exception as exc:  # noqa: BLE001
@@ -473,16 +540,7 @@ def build_live_dashboard() -> dict[str, Any]:
             continue
         if spec.get("source") == "nasdaq":
             try:
-                bars, status = fetch_daily_bars_with_stooq_fallback(
-                    str(spec["sourceSymbol"]),
-                    start=equity_start,
-                    end=equity_end,
-                    asset_class=str(spec.get("assetClass") or "etf"),
-                    timeout=14,
-                    limit=900,
-                    fallback_symbol=str(spec.get("fallbackSymbol") or ""),
-                    output_symbol=symbol,
-                )
+                bars, status = results[f"global:{symbol}"].get()
                 global_lppl_market_bars[symbol] = bars
                 source_status.append({"name": f"Global LPPL {symbol} OHLCV", **status})
             except Exception as exc:  # noqa: BLE001
@@ -491,7 +549,7 @@ def build_live_dashboard() -> dict[str, Any]:
         if spec.get("source") != "stooq":
             continue
         try:
-            bars = fetch_stooq_daily_bars(str(spec["sourceSymbol"]), start=equity_start, end=equity_end, timeout=14)
+            bars = results[f"global:{symbol}"].get()
             global_lppl_market_bars[symbol] = [MarketDailyBar(symbol=symbol, date=bar.date, open=bar.open, high=bar.high, low=bar.low, close=bar.close, volume=bar.volume, source=bar.source) for bar in bars]
             latest = bars[-1].date.isoformat() if bars else "none"
             source_status.append({"name": f"Global LPPL {symbol} OHLCV", "status": "ok", "latest": latest})
@@ -499,13 +557,13 @@ def build_live_dashboard() -> dict[str, Any]:
             source_status.append({"name": f"Global LPPL {symbol} OHLCV", "status": "warning", "latest": str(exc)})
 
     try:
-        option_open_interest = fetch_cboe_option_open_interest("SPY")
+        option_open_interest = results["option-open-interest"].get()
         source_status.append({"name": "Cboe SPY option open interest", "status": "ok", "latest": option_open_interest.as_of.isoformat()})
     except Exception as exc:  # noqa: BLE001
         source_status.append({"name": "Cboe SPY option open interest", "status": "warning", "latest": str(exc)})
 
     try:
-        fed_news = fetch_federal_reserve_press_releases()
+        fed_news = results["fed-news"].get()
         official_news.extend(fed_news)
         latest = max((item.date for item in fed_news), default=None)
         source_status.append({"name": "Federal Reserve press release RSS", "status": "ok", "latest": latest.isoformat() if latest else "none"})
@@ -513,7 +571,7 @@ def build_live_dashboard() -> dict[str, Any]:
         source_status.append({"name": "Federal Reserve press release RSS", "status": "warning", "latest": str(exc)})
 
     try:
-        treasury_news = fetch_treasury_press_releases()
+        treasury_news = results["treasury-news"].get()
         official_news.extend(treasury_news)
         latest = max((item.date for item in treasury_news), default=None)
         source_status.append({"name": "U.S. Treasury press releases", "status": "ok", "latest": latest.isoformat() if latest else "none"})
@@ -543,7 +601,7 @@ def build_live_dashboard() -> dict[str, Any]:
         overrides=load_content_overrides(),
     )
     try:
-        benchmark_score = fetch_bhadial_public_score()
+        benchmark_score = results["benchmark"].get()
         macro_liquidity = dashboard.get("macroLiquidity")
         if isinstance(macro_liquidity, dict):
             local_score = optional_float(macro_liquidity.get("score"))
@@ -684,9 +742,10 @@ def build_dashboard_from_inputs(
         quarterly_refunding=quarterly_refunding,
         debt_limit_status=debt_limit_status,
         official_news=official_news or [],
+        as_of=today.date,
     )
     policy = build_policy(indicators)
-    macro_liquidity = build_macro_liquidity_score(indicators)
+    macro_liquidity = build_macro_liquidity_score(indicators, as_of=today.date)
     macro_liquidity_equity = build_macro_liquidity_equity_lead(indicators)
     spy_early_warning = build_spy_early_warning(macro_liquidity, macro_liquidity_equity, indicators.get("percentile_series", {}))
     equity_short_term_risk = build_equity_short_term_risk_index(
@@ -713,9 +772,27 @@ def build_dashboard_from_inputs(
         signal_validation=signal_validation,
         regional_monitor=regional_monitor,
     )
+    fed_path = build_fed_path(
+        indicators,
+        as_of=today.date,
+        calendar_events=calendar_events or [],
+    )
+    fed_path_audit = build_fed_path_audit(
+        indicators,
+        as_of=today.date,
+        calendar_events=calendar_events or [],
+    )
     bhadial_coverage = build_bhadial_coverage(groups)
     source_status = [
-        {"name": "Fed path", "status": "modeled", "latest": "public futures proxy + curve/macro model" if fed_funds_futures else "curve/macro proxy"},
+        {
+            "name": "Fed path",
+            "status": "modeled",
+            "latest": (
+                f"{len(fed_path_audit['futureMeetings'])} future official meetings; "
+                "qualitative modeled scenario only; probabilities unavailable"
+            ),
+            "note": fed_path_audit["reason"],
+        },
     ]
     if acm is None:
         source_status.append({"name": "NY Fed ACM term premium", "status": "modeled", "latest": "10Y minus effective policy proxy"})
@@ -745,7 +822,7 @@ def build_dashboard_from_inputs(
 
     dashboard = {
         "asOf": today.date.isoformat(),
-        "generatedAt": generated_at.replace(microsecond=0).isoformat(),
+        "generatedAt": generated_at.isoformat(),
         "meta": {
             "dataMode": "real-public-sources",
             "remoteCompatibility": {
@@ -763,7 +840,7 @@ def build_dashboard_from_inputs(
             },
             "notes": [
                 "Treasury curve, QRA documents, Fiscal Data debt-limit tables, FRED macro/liquidity/cross-market series, TreasuryDirect auctions, Federal Reserve FOMC calendar, NY Fed ACM, NY Fed primary dealer statistics, CFTC COT, and TIC are fetched from public sources when available.",
-                "Fed path probabilities are model estimates derived from public Fed Funds futures proxy, real curve, and macro pressure, not CME FedWatch official probabilities.",
+                "Fed path probabilities fail closed because the current public continuous ZQ quote cannot identify meeting-level hike/hold/cut odds. The curve, inflation, and futures gap are exposed only as a qualitative modeled scenario.",
                 "Fed and Treasury official public news headlines are fetched when available; broader full-text market news remains curated because reliable redistribution usually requires licensed feeds.",
                 "Remote-site narrative compatibility factors are preserved as explicit real/proxy/modeled/manual sourceMode rows rather than disguised as fully live market feeds.",
                 "Bhadial-style module factors are filled with real public or derived-public series where possible; unsupported ETF-relative factors are not synthesized from unrelated data.",
@@ -773,7 +850,8 @@ def build_dashboard_from_inputs(
         "conclusionSourceQuality": dict(CONCLUSION_SOURCE_QUALITY),
         "curve": curve,
         "decomposition": build_decomposition(indicators, acm=acm, fomc_projection=fomc_projection),
-        "fedPath": build_fed_path(indicators),
+        "fedPath": fed_path,
+        "fedPathAudit": fed_path_audit,
         "groups": groups,
         "conclusionAudit": conclusion_audit,
         "macroLiquidity": macro_liquidity,
@@ -800,30 +878,93 @@ def build_dashboard_from_inputs(
             conclusion_audit=conclusion_audit,
         ),
     }
-    return apply_content_overrides(dashboard, overrides or {})
+    return compact_dashboard_payload(apply_content_overrides(dashboard, overrides or {}))
+
+
+def compact_dashboard_payload(dashboard: dict[str, Any]) -> dict[str, Any]:
+    """Strip build-only diagnostics after every dependent calculation has run.
+
+    ``equityShortTermRisk.trend.points[].componentScores`` is required while the
+    backtest builds component diagnostics, but it is not consumed by the runtime
+    UI.  The backtest is already attached before this final serialization step,
+    so removing the repeated per-day component maps is lossless for users.
+    """
+    compact = dict(dashboard)
+    equity = compact.get("equityShortTermRisk")
+    if not isinstance(equity, dict):
+        return compact
+    trend = equity.get("trend")
+    if not isinstance(trend, dict) or not isinstance(trend.get("points"), list):
+        return compact
+    compact_points = []
+    for point in trend["points"]:
+        if not isinstance(point, dict):
+            compact_points.append(point)
+            continue
+        compact_point = dict(point)
+        compact_point.pop("componentScores", None)
+        compact_points.append(compact_point)
+    compact_trend = dict(trend)
+    compact_trend["points"] = compact_points
+    compact_equity = dict(equity)
+    compact_equity["trend"] = compact_trend
+    compact["equityShortTermRisk"] = compact_equity
+    return compact
+
+
+def available_indicator_value(ind: dict[str, Any], key: str) -> float | None:
+    availability = ind.get("availability")
+    if isinstance(availability, dict) and key in availability and availability[key] is not True:
+        return None
+    return optional_float(ind.get(key))
 
 
 def build_decomposition(ind: dict[str, Any], acm: AcmRecord | None = None, fomc_projection: FomcProjection | None = None) -> dict[str, Any]:
-    real_short = ind["dff"] - max(ind["breakeven_10y"], 0)
+    dff = available_indicator_value(ind, "dff")
+    breakeven = available_indicator_value(ind, "breakeven_10y")
+    real_10y = available_indicator_value(ind, "real_10y")
+    real_short = dff - max(breakeven, 0) if dff is not None and breakeven is not None else None
     if acm is not None:
         term_premium_value = f"{acm.term_premium_10y:+.2f}%"
         term_premium_note = f"NY Fed ACM 10Y期限溢价,最新日期 {acm.date.isoformat()}。"
         term_premium_driver = "NY Fed ACM"
+    elif dff is not None:
+        term_premium_value = f"{max(ind['ten_year'] - dff, -2):+.2f}%"
+        term_premium_note = "ACM拉取失败时用10Y相对短端补偿近似; 仅作未校准代理。"
+        term_premium_driver = "未校准模型代理"
     else:
-        term_premium_value = f"{max(ind['ten_year'] - ind['dff'], -2):+.2f}%"
-        term_premium_note = "ACM拉取失败时用10Y相对短端补偿近似。"
-        term_premium_driver = "模型估算"
+        term_premium_value = "--"
+        term_premium_note = "ACM与DFF均不可用,不生成期限溢价替代值。"
+        term_premium_driver = "数据不足"
+    attribution = [
+        decomposition_attribution_row(
+            ind,
+            label=label,
+            total_bp=total,
+            real_key=real_key,
+            breakeven_key=breakeven_key,
+        )
+        for label, total, real_key, breakeven_key in (
+            ("1 周", ind["ten_year_w1_change_bp"], "real_10y_w1_change_bp", "breakeven_10y_w1_change_bp"),
+            ("1 月", ind["ten_year_m1_change_bp"], "real_10y_m1_change_bp", "breakeven_10y_m1_change_bp"),
+        )
+    ]
+    measured_windows = sum(1 for row in attribution if row["measured"])
     return {
         "components": [
-            {"index": "01", "name": "短端实际利率", "en": "E[real short rate]", "value": f"~{real_short:.1f}%", "note": "由有效联邦基金利率减去10Y盈亏平衡通胀近似。", "driver": "FRED DFF + T10YIE"},
-            {"index": "02", "name": "短端通胀预期", "en": "E[π short]", "value": f"~{ind['breakeven_10y']:.2f}%", "note": "用10Y盈亏平衡通胀作为公开代理。", "driver": "FRED T10YIE"},
+            {"index": "01", "name": "短端实际利率", "en": "E[real short rate]", "value": f"~{real_short:.1f}%" if real_short is not None else "--", "note": "由有效联邦基金利率减去10Y盈亏平衡通胀近似; 任一输入缺失即停算。", "driver": "FRED DFF + T10YIE" if real_short is not None else "数据不足"},
+            {"index": "02", "name": "短端通胀预期", "en": "E[π short]", "value": f"~{breakeven:.2f}%" if breakeven is not None else "--", "note": "用10Y盈亏平衡通胀作为公开代理。", "driver": "FRED T10YIE" if breakeven is not None else "数据不足"},
             {"index": "03", "name": "实际期限溢价", "en": "Real term premium", "value": term_premium_value, "note": term_premium_note, "driver": term_premium_driver},
-            {"index": "04", "name": "通胀风险溢价", "en": "Inflation risk prem.", "value": f"{max(ind['breakeven_10y'] - 2.3, 0):+.2f}%", "note": "以盈亏平衡通胀相对2.3%锚的偏离近似。", "driver": "模型估算"},
+            {"index": "04", "name": "通胀风险溢价", "en": "Inflation risk prem.", "value": f"{max(breakeven - 2.3, 0):+.2f}%" if breakeven is not None else "--", "note": "以盈亏平衡通胀相对2.3%锚的偏离近似; T10YIE缺失即停算。", "driver": "未校准模型代理" if breakeven is not None else "数据不足"},
         ],
-        "attribution": [
-            {"window": "1 周", "total": round(ind["ten_year_w1_change_bp"]), "real": round(ind["ten_year_w1_change_bp"] * 0.65), "inflation": round(ind["ten_year_w1_change_bp"] * 0.35), "term": 0, "risk": 0, "driver": "真实利率+通胀"},
-            {"window": "1 月", "total": round(ind["ten_year_m1_change_bp"]), "real": round(ind["ten_year_m1_change_bp"] * 0.65), "inflation": round(ind["ten_year_m1_change_bp"] * 0.35), "term": 0, "risk": 0, "driver": "真实利率+通胀"},
-        ],
+        "attribution": attribution,
+        "attributionAudit": {
+            "measured": measured_windows == len(attribution),
+            "measuredWindowCount": measured_windows,
+            "productionUse": measured_windows == len(attribution),
+            "method": "DFII10 real-yield change + T10YIE breakeven change + nominal 10Y residual",
+            "limitation": "Breakeven includes expected inflation plus inflation-risk compensation; the residual also includes basis noise. Missing aligned changes fall back to an explicitly non-measured 65/35 narrative split.",
+        },
         "frameworkNote": (
             "Clarida框架:长期名义利率 = 预期短端真实利率 + 预期短端通胀 + "
             "实际期限溢价 + 通胀风险溢价。核心用途不是机械相加,而是把收益率变化翻译成叙事变化。"
@@ -831,23 +972,68 @@ def build_decomposition(ind: dict[str, Any], acm: AcmRecord | None = None, fomc_
         "regimeRead": decomposition_regime_read(ind, term_premium_value),
         "policyRead": policy_path_read(ind, fomc_projection=fomc_projection),
         "marketMeasures": {
-            "dff": f"{ind['dff']:.2f}%",
-            "real10y": f"{ind['real_10y']:.2f}%",
-            "breakeven10y": f"{ind['breakeven_10y']:.2f}%",
+            "dff": f"{dff:.2f}%" if dff is not None else "--",
+            "real10y": f"{real_10y:.2f}%" if real_10y is not None else "--",
+            "breakeven10y": f"{breakeven:.2f}%" if breakeven is not None else "--",
             "termPremium10y": term_premium_value,
         },
         "sources": build_expectation_sources(ind, fomc_projection=fomc_projection),
     }
 
 
+def decomposition_attribution_row(
+    ind: dict[str, Any],
+    *,
+    label: str,
+    total_bp: float,
+    real_key: str,
+    breakeven_key: str,
+) -> dict[str, Any]:
+    real_change = available_indicator_value(ind, real_key)
+    breakeven_change = available_indicator_value(ind, breakeven_key)
+    if real_change is not None and breakeven_change is not None:
+        return {
+            "window": label,
+            "total": round(total_bp),
+            "real": round(real_change),
+            "inflation": round(breakeven_change),
+            "term": round(total_bp - real_change - breakeven_change),
+            "risk": None,
+            "driver": "DFII10 + T10YIE同期变化; 期限/基差取残差",
+            "measured": True,
+            "productionUse": True,
+        }
+    return {
+        "window": label,
+        "total": round(total_bp),
+        "real": round(total_bp * 0.65),
+        "inflation": round(total_bp * 0.35),
+        "term": 0,
+        "risk": 0,
+        "driver": "固定65/35叙事拆分(非实测)",
+        "measured": False,
+        "productionUse": False,
+    }
+
+
 def decomposition_regime_read(ind: dict[str, Any], term_premium_value: str) -> str:
     monthly_move = ind["ten_year_m1_change_bp"]
     direction = "上行" if monthly_move >= 0 else "下行"
-    hard_combo = ind["real_10y"] >= 2.0 and ind["breakeven_10y"] >= 2.35
-    combo_text = "真实利率和通胀补偿同时偏高,这是名义久期最难缠的组合" if hard_combo else "当前更多是单一驱动,需要观察真实利率与通胀补偿是否共振"
+    real_10y = available_indicator_value(ind, "real_10y")
+    breakeven = available_indicator_value(ind, "breakeven_10y")
+    hard_combo = real_10y is not None and breakeven is not None and real_10y >= 2.0 and breakeven >= 2.35
+    combo_text = (
+        "真实利率和通胀补偿同时偏高,这是名义久期最难缠的组合"
+        if hard_combo
+        else "真实利率或通胀补偿数据不足,暂不能判断二者是否共振"
+        if real_10y is None or breakeven is None
+        else "当前更多是单一驱动,需要观察真实利率与通胀补偿是否共振"
+    )
+    real_text = f"{real_10y:.2f}%" if real_10y is not None else "--"
+    breakeven_text = f"{breakeven:.2f}%" if breakeven is not None else "--"
     return (
-        f"10Y过去一个月{direction}{monthly_move:+.0f}bp,真实利率{ind['real_10y']:.2f}%、"
-        f"通胀补偿{ind['breakeven_10y']:.2f}%、期限溢价{term_premium_value}共同解释长端定价。"
+        f"10Y过去一个月{direction}{monthly_move:+.0f}bp,真实利率{real_text}、"
+        f"通胀补偿{breakeven_text}、期限溢价{term_premium_value}。"
         f"{combo_text}; 若油价或CPI/PCE/核心PCE继续超预期,收益率上行会更像通胀冲击下的政策对峙。"
     )
 
@@ -875,20 +1061,35 @@ def build_expectation_sources(ind: dict[str, Any], fomc_projection: FomcProjecti
     else:
         sep_value = "等待Federal Reserve SEP"
         sep_note = "官方季度点阵图解析失败时不填入估计值。"
-    inflation_pressure = max(ind["cpi_yoy"], ind["pce_yoy"], ind["core_pce_yoy"], ind["trimmed_mean_pce_yoy"])
-    path_bias = "加息尾部升温" if ind["two_year_m1_change_bp"] > 10 or inflation_pressure > 3 else "持平为主"
+    inflation_values = [
+        value
+        for key in ("cpi_yoy", "pce_yoy", "core_pce_yoy", "trimmed_mean_pce_yoy")
+        if (value := available_indicator_value(ind, key)) is not None
+    ]
+    inflation_pressure = max(inflation_values) if inflation_values else None
+    if ind["two_year_m1_change_bp"] > 10 or (inflation_pressure is not None and inflation_pressure > 3):
+        path_bias = "加息尾部升温"
+    elif not inflation_values:
+        path_bias = "通胀数据不足"
+    else:
+        path_bias = "持平为主"
     futures_rate = ind.get("fed_funds_futures_implied_rate")
     if futures_rate is not None:
         futures_value = f"{ind['fed_funds_futures_symbol']} implied {futures_rate:.2f}%"
         futures_note = (
             f"Stooq public quote dated {ind['fed_funds_futures_date']}; futures price "
             f"{ind['fed_funds_futures_close']:.2f} implies average fed-funds rate near {futures_rate:.2f}%. "
-            "Meeting probabilities remain model-converted, not official CME FedWatch."
+            "This continuous-contract monthly average is used only as a directional scenario input; "
+            "meeting-level probabilities are not computed."
         )
         futures_name = "30-Day Fed Funds futures · public proxy"
     else:
         futures_value = path_bias
-        futures_note = "由2Y再定价、CPI/PCE通胀跟踪与曲线压力生成,不是CME FedWatch官方概率。"
+        futures_note = (
+            "通胀数据缺失时不把兼容字段0当作降温证据;当前仅保留2Y方向观察。"
+            if not inflation_values
+            else "由2Y再定价与CPI/PCE通胀跟踪生成定性情景;缺少逐会议合约时不计算概率。"
+        )
         futures_name = "公开曲线代理 · Fed path model"
     survey_anchor = "公开调查待接入"
     return [
@@ -898,526 +1099,31 @@ def build_expectation_sources(ind: dict[str, Any], fomc_projection: FomcProjecti
     ]
 
 
-def build_fed_path(ind: dict[str, Any]) -> list[dict[str, int | str]]:
-    inflation_pressure = max(ind["cpi_yoy"], ind["pce_yoy"], ind["core_pce_yoy"], ind["trimmed_mean_pce_yoy"])
-    pressure = max(0, min(100, int(40 + ind["two_year_m1_change_bp"] * 0.9 + (inflation_pressure - 3.0) * 12)))
-    if ind.get("fed_funds_futures_implied_rate") is not None:
-        futures_gap_bp = (ind["fed_funds_futures_implied_rate"] - ind["dff"]) * 100
-        pressure = max(0, min(100, int(pressure + futures_gap_bp * 0.35)))
-    meetings = ["6/17", "7/29", "9/16", "10/28", "12/9"]
-    path = []
-    for idx, meeting in enumerate(meetings):
-        hike = max(0, min(90, int(pressure * idx / 4)))
-        cut = max(1, int(8 - pressure / 18 - idx))
-        hold = max(0, 100 - hike - cut)
-        path.append({"m": meeting, "hike": hike, "hold": hold, "cut": cut})
-    return path
-
-
-def inflation_tracking_score(ind: dict[str, Any]) -> int:
-    broad = max(ind["cpi_yoy"], ind["pce_yoy"])
-    core = max(ind["core_pce_yoy"], ind["trimmed_mean_pce_yoy"])
-    if broad >= 3.5 or core >= 3.0:
-        return -2
-    if broad >= 2.8 or core >= 2.5:
-        return -1
-    if broad <= 2.2 and core <= 2.2:
-        return 1
-    return 0
-
-
-def build_groups(
-    ind: dict[str, Any],
-    *,
-    auctions: list[dict[str, object]],
-    cftc_positions: list[CftcTreasuryPosition],
-    tic_holdings: TicHoldings | None,
-    acm: AcmRecord | None,
-    primary_dealer_stats: PrimaryDealerStats | None,
-    quarterly_refunding: QuarterlyRefunding | None,
-    debt_limit_status: DebtLimitStatus | None,
-    official_news: list[NewsItem],
-) -> list[dict[str, Any]]:
-    inflation_score = inflation_tracking_score(ind)
-    ppi_score = -2 if ind["ppi_yoy"] >= 5.0 else -1 if ind["ppi_yoy"] >= 3.0 else 0
-    two_year_score = -2 if ind["two_year_m1_change_bp"] >= 30 else -1 if ind["two_year_m1_change_bp"] >= 10 else 0
-    sofr_spread_pct = ind["percentiles"].get("sofr_effr_spread")
-    sofr_spread_score = -1 if sofr_spread_pct is not None and sofr_spread_pct >= 80 else 0
-    bank_reserves_pct = ind["percentiles"].get("bank_reserves")
-    bank_reserves_score = -1 if bank_reserves_pct is not None and bank_reserves_pct <= 20 else 1 if bank_reserves_pct is not None and bank_reserves_pct >= 60 else 0
-    net_liquidity_pct = ind["percentiles"].get("net_liquidity")
-    net_liquidity_score = -1 if net_liquidity_pct is not None and net_liquidity_pct <= 20 else 1 if net_liquidity_pct is not None and net_liquidity_pct >= 60 else 0
-    net_liquidity_momentum_pct = ind["percentiles"].get("net_liquidity_momentum")
-    net_liquidity_momentum_score = -1 if ind["net_liquidity_m1_change_trillions"] < -0.05 else 1 if ind["net_liquidity_m1_change_trillions"] > 0.05 else 0
-    net_liquidity_13w_pct = ind["percentiles"].get("net_liquidity_13w_momentum")
-    net_liquidity_13w_score = -1 if ind["net_liquidity_13w_change_trillions"] < -0.15 else 1 if ind["net_liquidity_13w_change_trillions"] > 0.15 else 0
-    tga_deviation_pct = ind["percentiles"].get("tga_deviation")
-    tga_deviation_score = -1 if ind["tga_deviation_trillions"] > 0.15 or (tga_deviation_pct is not None and tga_deviation_pct >= 80) else 1 if ind["tga_deviation_trillions"] < -0.15 else 0
-    onrrp_buffer_risk_pct = ind["percentiles"].get("onrrp_buffer_risk")
-    onrrp_buffer_risk_score = -2 if ind["onrrp_buffer_risk"] >= 0.75 else -1 if ind["onrrp_buffer_risk"] >= 0.35 else 0
-    sofr_obfr_pct = ind["percentiles"].get("collateral_repo_friction")
-    sofr_obfr_score = high_pressure_score(sofr_obfr_pct)
-    sofr_iorb_pct = ind["percentiles"].get("corridor_sofr_iorb")
-    sofr_iorb_score = high_pressure_score(sofr_iorb_pct)
-    sofr_rrp_pct = ind["percentiles"].get("corridor_sofr_rrp")
-    sofr_rrp_score = high_pressure_score(sofr_rrp_pct)
-    effr_iorb_pct = ind["percentiles"].get("effr_iorb_spread")
-    effr_iorb_score = high_pressure_score(effr_iorb_pct)
-    cp_tbill_pct = ind["percentiles"].get("cp_tbill_spread")
-    cp_tbill_score = high_pressure_score(cp_tbill_pct)
-    fragmentation_pct = ind["percentiles"].get("funding_fragmentation")
-    fragmentation_score = high_pressure_score(fragmentation_pct)
-    real_rate_level_pct = ind["percentiles"].get("real_rate_level")
-    real_curve_pct = ind["percentiles"].get("real_curve")
-    nfci_pct = ind["percentiles"].get("nfci")
-    nfci_score = -1 if ind["nfci"] > 0 or (nfci_pct is not None and nfci_pct >= 80) else 1 if ind["nfci"] < -0.5 and (nfci_pct is None or nfci_pct <= 35) else 0
-    hy_ig_pct = ind["percentiles"].get("hy_ig_oas_spread")
-    hy_ig_score = high_pressure_score(hy_ig_pct)
-    vix_term_pct = ind["percentiles"].get("vix_term_structure")
-    vix_term_score = -1 if ind["vix_term_structure"] > 1 or (vix_term_pct is not None and vix_term_pct >= 80) else 0
-    dxy_vol_pct = ind["percentiles"].get("dxy_realized_vol")
-    dxy_vol_score = high_pressure_score(dxy_vol_pct)
-    oil_vol_dev_pct = ind["percentiles"].get("oil_vol_deviation")
-    oil_vol_dev_score = high_pressure_score(oil_vol_dev_pct)
-    natgas_pct = ind["percentiles"].get("natgas")
-    natgas_score = high_pressure_score(natgas_pct)
-    hy_credit_preference_pct = ind["percentiles"].get("hy_credit_preference")
-    hy_credit_preference_score = low_preference_score(hy_credit_preference_pct)
-    ig_credit_preference_pct = ind["percentiles"].get("ig_credit_preference")
-    ig_credit_preference_score = low_preference_score(ig_credit_preference_pct)
-    regional_bank_pct = ind["percentiles"].get("regional_bank_vs_market")
-    regional_bank_score = low_preference_score(regional_bank_pct)
-    risk_vs_safe_pct = ind["percentiles"].get("risk_vs_safe")
-    risk_vs_safe_score = low_preference_score(risk_vs_safe_pct)
-    high_beta_pct = ind["percentiles"].get("high_beta_preference")
-    high_beta_score = low_preference_score(high_beta_pct)
-    auction_signal = auction_demand_signal(auctions)
-    cftc_net = sum(item.leveraged_net for item in cftc_positions)
-    cftc_score = 1 if cftc_net < -150_000 else -1 if cftc_net > 150_000 else 0
-    cftc_tag = f"杠杆基金净{direction_word(cftc_net)} {compact_int(abs(cftc_net))}" if cftc_positions else "待接低频解析"
-    tic_change = tic_holdings.total.monthly_change_billions if tic_holdings and tic_holdings.total else None
-    tic_score = -1 if tic_change is not None and tic_change < -50 else 1 if tic_change is not None and tic_change > 50 else 0
-    tic_tag = f"{tic_holdings.period} 总量 {money_trillions_from_billions(tic_holdings.total.value_billions)}" if tic_holdings and tic_holdings.total else "待接月频解析"
-    acm_score = 1 if acm and acm.term_premium_10y > 0.35 else 0
-    acm_tag = f"ACM {acm.term_premium_10y:+.2f}%" if acm else f"10Y-EFFR {ind['ten_year'] - ind['dff']:+.2f}%"
-    if quarterly_refunding:
-        current_borrow = quarterly_refunding.current_quarter_borrowing_billions
-        next_borrow = quarterly_refunding.next_quarter_borrowing_billions
-        qra_score = -1 if current_borrow is not None and next_borrow is not None and next_borrow > current_borrow else 0
-        qra_tag = f"{quarterly_refunding.quarter} · {money_billions_value(next_borrow or current_borrow)}"
-        qra_note = qra_supply_note(quarterly_refunding)
-    else:
-        qra_score = 0
-        qra_tag = "待接Treasury QRA"
-        qra_note = "官方季度再融资文档不可用时不填入估计值。"
-    if debt_limit_status:
-        debt_headroom_score = -2 if debt_limit_status.headroom_millions < 500_000 else -1 if debt_limit_status.headroom_millions < 1_000_000 else 0
-        debt_headroom_tag = money_from_millions(debt_limit_status.headroom_millions)
-        debt_headroom_note = (
-            f"Fiscal Data {debt_limit_status.record_date.isoformat()}: statutory limit "
-            f"{money_from_millions(debt_limit_status.statutory_limit_millions)}, "
-            f"debt subject to limit {money_from_millions(debt_limit_status.debt_subject_to_limit_millions)}."
-        )
-    else:
-        debt_headroom_score = 0
-        debt_headroom_tag = "待接Fiscal Data"
-        debt_headroom_note = "DTS Debt Subject to Limit不可用时不填入估计值。"
-    return [
-        {
-            "id": "g1",
-            "name": "货币政策",
-            "en": "Monetary Policy",
-            "weight": 25,
-            "factors": [
-                {"n": "联邦基金目标利率", "tag": ind["target_range"], "v": "限制性", "score": -1, "note": f"有效联邦基金利率 {ind['dff']:.2f}%,仍处限制性区间。"},
-                {"n": "2Y 市场政策代理", "tag": f"1月 {ind['two_year_m1_change_bp']:+.0f}bp", "v": "偏鹰" if two_year_score < 0 else "中性", "score": two_year_score, "curve": 1 if two_year_score < 0 else 0, "note": "用2Y收益率月度变化代理政策路径再定价。"},
-                fed_path_compatibility_factor(ind),
-                chair_transition_compatibility_factor(official_news),
-                {"n": "SOFR 融资锚", "tag": f"{ind['sofr']:.2f}%", "v": "高位", "score": -1, "note": "SOFR 仍在限制性区间,压制久期估值。"},
-                {
-                    "n": "SOFR-EFFR利差",
-                    "tag": f"{ind['sofr_effr_spread_bp']:+.0f}bp · {percentile_label(sofr_spread_pct)}",
-                    "v": "融资压力" if sofr_spread_score < 0 else "正常",
-                    "score": sofr_spread_score,
-                    "note": "参考The Dial Funding思路,用SOFR相对EFFR利差的5年历史百分位代理担保融资压力。",
-                },
-                bhadial_factor(
-                    module="Funding",
-                    name="SOFR-OBFR回购摩擦",
-                    tag=f"{ind['sofr_obfr_spread_bp']:+.0f}bp · {percentile_label(sofr_obfr_pct)}",
-                    value="回购偏紧" if sofr_obfr_score < 0 else "正常",
-                    score=sofr_obfr_score,
-                    source_mode="derived-public",
-                    note="Bhadial Funding的Collateral/Repo Friction: SOFR-OBFR,衡量担保回购相对无担保隔夜融资的压力。",
-                ),
-                bhadial_factor(
-                    module="Funding",
-                    name="SOFR-IORB走廊摩擦",
-                    tag=f"{ind['sofr_iorb_spread_bp']:+.0f}bp · {percentile_label(sofr_iorb_pct)}",
-                    value="接近上沿" if sofr_iorb_score < 0 else "正常",
-                    score=sofr_iorb_score,
-                    source_mode="derived-public",
-                    note="Bhadial Funding的Corridor Friction 1: SOFR-IORB,衡量市场担保融资利率相对准备金利率上沿的位置。",
-                ),
-                bhadial_factor(
-                    module="Funding",
-                    name="SOFR-ON RRP走廊摩擦",
-                    tag=f"{ind['sofr_rrp_award_spread_bp']:+.0f}bp · {percentile_label(sofr_rrp_pct)}",
-                    value="高于地板" if sofr_rrp_score < 0 else "正常",
-                    score=sofr_rrp_score,
-                    source_mode="derived-public",
-                    note="Bhadial Funding的Corridor Friction 2: SOFR-ON RRP award,衡量市场利率相对美联储隔夜逆回购利率地板的压力。",
-                ),
-                bhadial_factor(
-                    module="Funding",
-                    name="EFFR-IORB利差",
-                    tag=f"{ind['effr_iorb_spread_bp']:+.0f}bp · {percentile_label(effr_iorb_pct)}",
-                    value="银行资金偏紧" if effr_iorb_score < 0 else "正常",
-                    score=effr_iorb_score,
-                    source_mode="derived-public",
-                    note="Bhadial Funding的EFFR-IORB Spread: 有效联邦基金利率相对准备金利率,观察银行间资金是否接近走廊上沿。",
-                ),
-                bhadial_factor(
-                    module="Funding",
-                    name="商票-TBill利差",
-                    tag=f"{ind['cp_tbill_spread_bp']:+.0f}bp · {percentile_label(cp_tbill_pct)}",
-                    value="短融承压" if cp_tbill_score < 0 else "正常",
-                    score=cp_tbill_score,
-                    source_mode="derived-public",
-                    note="Bhadial Funding的CP-TBill Spread: FRED 90日AA金融商票减3个月TBill,反映短期私人信用相对无风险利率的压力。",
-                ),
-                bhadial_factor(
-                    module="Funding",
-                    name="资金分裂度(21D)",
-                    tag=f"{ind['funding_fragmentation_21d']:.2f} · {percentile_label(fragmentation_pct)}",
-                    value="分裂" if fragmentation_score < 0 else "一致",
-                    score=fragmentation_score,
-                    source_mode="derived-public",
-                    note="Bhadial Funding Fragmentation近似: 对SOFR-OBFR、SOFR-IORB、SOFR-ON RRP三条走廊利差做稳健z-score离散度并用21日EMA平滑。",
-                ),
-                {"n": "SOMA Treasury持仓", "tag": f"${ind['soma_treasury_trillions']:.2f}T", "v": "QT存量约束", "score": 0, "note": "以FRED TREAST跟踪美联储持有的美国国债规模,比WALCL总资产更贴近计划中的SOMA Treasury held outright。"},
-                {"n": "资产负债表 / 总资产", "tag": f"WALCL ${ind['walcl_trillions']:.2f}T", "v": "中性", "score": 0, "note": "以FRED WALCL跟踪美联储资产负债表总规模。"},
-            ],
-        },
-        {
-            "id": "g2",
-            "name": "宏观基本面",
-            "en": "Macro Fundamentals",
-            "weight": 25,
-            "factors": [
-                {
-                    "n": "通胀跟踪",
-                    "tag": (
-                        f"CPI {ind['cpi_yoy']:.1f}% / PCE {ind['pce_yoy']:.1f}% / "
-                        f"核心PCE {ind['core_pce_yoy']:.1f}% / Dallas Trimmed PCE {ind['trimmed_mean_pce_yoy']:.1f}%"
-                    ),
-                    "v": "全面偏热" if inflation_score <= -2 else "偏热" if inflation_score < 0 else "温和",
-                    "score": inflation_score,
-                    "note": "同时跟踪FRED CPIAUCSL、PCEPI、PCEPILFE与Dallas Fed Trimmed Mean PCE(PCETRIM12M159SFRBDAL); PCE和核心PCE更贴近Fed通胀框架,Dallas Trimmed PCE过滤极端分项噪声,适合作为政策反应函数中的底层通胀趋势观察项。",
-                },
-                {"n": "PPI 生产者物价", "tag": f"{ind['ppi_yoy']:.1f}% 同比", "v": "偏热" if ppi_score < 0 else "中性", "score": ppi_score, "note": "PPIACO同比衡量生产端通胀压力。"},
-                {"n": "劳动力市场", "tag": f"失业率 {ind['unrate']:.1f}%", "v": "降温" if ind["unrate"] >= 4.2 else "韧性", "score": 1 if ind["unrate"] >= 4.2 else -1, "note": "失业率升温利多久期,劳动力韧性压制降息。"},
-                {"n": "非农就业", "tag": f"{ind['payroll_change_k']:+.0f}k", "v": "稳健" if ind["payroll_change_k"] > 100 else "降温", "score": -1 if ind["payroll_change_k"] > 100 else 1, "curve": 1 if ind["payroll_change_k"] > 100 else 0, "note": "PAYEMS月差作为新增就业代理。"},
-                growth_momentum_compatibility_factor(ind),
-            ],
-        },
-        {
-            "id": "g3",
-            "name": "供给与技术面",
-            "en": "Supply & Technicals",
-            "weight": 15,
-            "factors": [
-                long_bond_auction_compatibility_factor(auctions),
-                {"n": "发行节奏 / QRA", "tag": qra_tag, "v": "供给增加" if qra_score < 0 else "中性", "score": qra_score, "curve": 1 if qra_score < 0 else 0, "note": qra_note},
-                {"n": "债务上限空间", "tag": debt_headroom_tag, "v": "紧张" if debt_headroom_score < 0 else "充足", "score": debt_headroom_score, "curve": 1 if debt_headroom_score < 0 else 0, "note": debt_headroom_note},
-                {"n": "10Y 收益率动量", "tag": f"1月 {ind['ten_year_m1_change_bp']:+.0f}bp", "v": "上行", "score": -1 if ind["ten_year_m1_change_bp"] > 10 else 0, "curve": 1 if ind["s5s30"] > 50 else 0, "note": "10Y月度上行代表供给/期限溢价压力。"},
-                {"n": "5s30s 曲线", "tag": f"{ind['s5s30']:.0f}bp", "v": "偏陡", "score": -1 if ind["s5s30"] > 60 else 0, "curve": 1, "note": "长端相对5Y更高,供给和期限溢价压力偏强。"},
-                bhadial_factor(
-                    module="Treasury",
-                    name="10Y-3M曲线",
-                    tag=f"{ind['s10s3m']:.0f}bp",
-                    value="正斜率" if ind["s10s3m"] > 0 else "倒挂",
-                    score=0,
-                    curve=1 if ind["s10s3m"] > 100 else -1 if ind["s10s3m"] < -100 else 0,
-                    source_mode="real-public",
-                    note="Bhadial Treasury的10Y-3M Spread,用U.S. Treasury curve直接计算长短端斜率。",
-                ),
-                bhadial_factor(
-                    module="Treasury",
-                    name="30Y-10Y期限溢价",
-                    tag=f"{ind['s30s10']:.0f}bp",
-                    value="长端补偿" if ind["s30s10"] > 30 else "平坦",
-                    score=0,
-                    curve=1 if ind["s30s10"] > 45 else 0,
-                    source_mode="real-public",
-                    note="Bhadial Treasury的30Y-10Y Term Premium公开代理,用30Y减10Y衡量超长端期限补偿和需求变化。",
-                ),
-                bhadial_factor(
-                    module="Treasury",
-                    name="曲线曲率(绝对值)",
-                    tag=f"{ind['curve_curvature_abs_bp']:.0f}bp",
-                    value="曲线变形" if ind["curve_curvature_abs_bp"] > 80 else "平稳",
-                    score=-1 if ind["curve_curvature_abs_bp"] > 80 else 0,
-                    curve=1 if ind["curve_curvature_abs_bp"] > 80 else 0,
-                    source_mode="derived-public",
-                    note="Bhadial Treasury的Curve Curvature Abs近似: |2*10Y - 2Y - 30Y|,用于识别长端重新定价时的曲线折点。",
-                ),
-                {"n": "TGA 与现金管理", "tag": f"${ind['tga_trillions']:.2f}T", "v": "抽水" if ind["tga_trillions"] > 0.7 else "中性", "score": -1 if ind["tga_trillions"] > 0.7 else 0, "note": "TGA高位会边际抽走银行体系流动性。"},
-            ],
-        },
-        {
-            "id": "g4",
-            "name": "需求与持仓",
-            "en": "Demand & Positioning",
-            "weight": 15,
-            "factors": [
-                {
-                    "n": "拍卖需求",
-                    "tag": auction_signal["tag"],
-                    "v": auction_signal["label"],
-                    "score": auction_signal["score"],
-                    "note": auction_signal["note"],
-                },
-                {"n": "TIC 海外持仓", "tag": tic_tag, "v": "走弱" if tic_score < 0 else "改善" if tic_score > 0 else "中性", "score": tic_score, "curve": 1 if tic_score < 0 else 0, "note": "TIC主要海外持有者为月频且滞后,用于衡量外资边际需求。"},
-                {"n": "CFTC 杠杆基金持仓", "tag": cftc_tag, "v": "反向利多" if cftc_score > 0 else "偏空" if cftc_score < 0 else "中性", "score": cftc_score, "curve": -1 if cftc_score > 0 else 0, "note": "CFTC financial futures COT聚合国债期货杠杆基金净仓位。"},
-                primary_dealer_inventory_compatibility_factor(primary_dealer_stats),
-            ],
-        },
-        {
-            "id": "g5",
-            "name": "相对价值",
-            "en": "Relative Value",
-            "weight": 10,
-            "factors": [
-                {"n": "期限溢价 (ACM)", "tag": acm_tag, "v": "估值转吸引" if acm_score > 0 else "中性", "score": acm_score, "curve": -1 if acm_score > 0 else 0, "note": "NY Fed ACM期限溢价高位时,长端估值补偿更充分。"},
-                {"n": "实际利率", "tag": f"10Y TIPS {ind['real_10y']:.2f}%", "v": "偏高", "score": 1 if ind["real_10y"] > 2.0 else 0, "curve": -1, "note": "高实际利率提升长期债估值吸引力。"},
-                bhadial_factor(
-                    module="Rates",
-                    name="真实利率水平",
-                    tag=f"{ind['real_rate_level']:.2f}% · {percentile_label(real_rate_level_pct)}",
-                    value="融资偏紧" if ind["real_rate_level"] > 2 else "中性",
-                    score=1 if ind["real_rate_level"] > 2 else 0,
-                    curve=-1 if ind["real_rate_level"] > 2 else 0,
-                    source_mode="derived-public",
-                    note="Bhadial Rates的Real Rate Level: 60% 5Y TIPS + 40% 10Y TIPS;宏观上越高越紧,在本久期计分中代表估值补偿更高。",
-                ),
-                bhadial_factor(
-                    module="Rates",
-                    name="真实曲线(10Y-5Y)",
-                    tag=f"{ind['real_curve_10y5y_bp']:+.0f}bp · {percentile_label(real_curve_pct)}",
-                    value="正斜率" if ind["real_curve_10y5y_bp"] > 0 else "倒挂",
-                    score=0,
-                    curve=1 if ind["real_curve_10y5y_bp"] > 25 else -1 if ind["real_curve_10y5y_bp"] < -25 else 0,
-                    source_mode="derived-public",
-                    note="Bhadial Rates的Real Curve: 10Y TIPS - 5Y TIPS,用于区分真实利率曲线的增长预期与期限补偿。",
-                ),
-                {"n": "盈亏平衡通胀", "tag": f"10Y BEI {ind['breakeven_10y']:.2f}%", "v": "偏高", "score": -1 if ind["breakeven_10y"] > 2.4 else 0, "note": "通胀补偿高位不利名义久期。"},
-                {"n": "2s10s 曲线", "tag": f"{ind['s2s10']:.0f}bp", "v": "正斜率", "score": 0, "curve": 1 if ind["s2s10"] > 25 else 0, "note": "正斜率意味着衰退信号缓和,长端承压更明显。"},
-                manual_placeholder_compatibility_factor("互换利差", "待接swap spread", "手动", "原站保留互换利差维度;本地未接入授权互换曲线,默认不改变评分,可在计分卡手动调整。"),
-            ],
-        },
-        {
-            "id": "g6",
-            "name": "情绪与流动性",
-            "en": "Sentiment & Liquidity",
-            "weight": 10,
-            "factors": [
-                {
-                    "n": "10Y实现波动率",
-                    "tag": f"20D {ind['ten_year_realized_vol_20d_bp']:.1f}bp ann.",
-                    "v": "高波动" if ind["ten_year_realized_vol_20d_bp"] > 95 else "中性",
-                    "score": -1 if ind["ten_year_realized_vol_20d_bp"] > 95 else 0,
-                    "note": "由U.S. Treasury curve 10Y日度收益率变动计算20日年化实现波动率,作为MOVE授权数据不可用时的公开代理。",
-                },
-                market_liquidity_compatibility_factor(ind),
-                manual_placeholder_compatibility_factor("新老券利差", "待接on/off-run spread", "手动", "原站保留新老券利差维度;本地未接入逐券报价和融资微观数据,默认不改变评分,可手动维护。"),
-                {
-                    "n": "银行准备金",
-                    "tag": f"${ind['bank_reserves_trillions']:.2f}T · {percentile_label(bank_reserves_pct)}",
-                    "v": "宽松" if bank_reserves_score > 0 else "偏紧" if bank_reserves_score < 0 else "中性",
-                    "score": bank_reserves_score,
-                    "note": "FRED WRESBAL按5年历史百分位衡量银行体系准备金缓冲。",
-                },
-                {
-                    "n": "净流动性",
-                    "tag": f"${ind['net_liquidity_trillions']:.2f}T · {percentile_label(net_liquidity_pct)}",
-                    "v": "宽松" if net_liquidity_score > 0 else "偏紧" if net_liquidity_score < 0 else "中性",
-                    "score": net_liquidity_score,
-                    "note": "参考The Dial Net Liquidity,用WALCL - TGA - ON RRP计算公开代理并按5年历史百分位评分。",
-                },
-                {
-                    "n": "流动性动量",
-                    "tag": f"1月 {ind['net_liquidity_m1_change_trillions']:+.2f}T · {percentile_label(net_liquidity_momentum_pct)}",
-                    "v": "扩张" if net_liquidity_momentum_score > 0 else "收缩" if net_liquidity_momentum_score < 0 else "中性",
-                    "score": net_liquidity_momentum_score,
-                    "note": "净流动性1个月变化的历史百分位,用于补充The Dial Liquidity Momentum思路。",
-                },
-                bhadial_factor(
-                    module="Liquidity",
-                    name="13周净流动性动量",
-                    tag=f"13周 {ind['net_liquidity_13w_change_trillions']:+.2f}T · {percentile_label(net_liquidity_13w_pct)}",
-                    value="扩张" if net_liquidity_13w_score > 0 else "收缩" if net_liquidity_13w_score < 0 else "中性",
-                    score=net_liquidity_13w_score,
-                    source_mode="derived-public",
-                    note="Bhadial Liquidity的Net Liquidity Momentum (13W): WALCL - TGA - ON RRP的13周绝对变化,捕捉QT、财政和RRP迁移的中期动量。",
-                ),
-                bhadial_factor(
-                    module="Liquidity",
-                    name="TGA偏离度",
-                    tag=f"{ind['tga_deviation_trillions']:+.2f}T · {percentile_label(tga_deviation_pct)}",
-                    value="抽水偏强" if tga_deviation_score < 0 else "释放" if tga_deviation_score > 0 else "正常",
-                    score=tga_deviation_score,
-                    source_mode="derived-public",
-                    note="Bhadial Liquidity的TGA Deviation: TGA相对52周滚动中位数的偏离;正值代表财政现金累积并抽走准备金。",
-                ),
-                {"n": "ON RRP", "tag": f"${ind['rrp_trillions']:.3f}T", "v": "低位", "score": -1 if ind["rrp_trillions"] < 0.05 else 0, "note": "RRP接近枯竭时,流动性缓冲下降。"},
-                bhadial_factor(
-                    module="Liquidity",
-                    name="ON RRP缓冲风险",
-                    tag=f"{ind['onrrp_buffer_risk']:.2f} · {percentile_label(onrrp_buffer_risk_pct)}",
-                    value="接近耗尽" if onrrp_buffer_risk_score < 0 else "有缓冲",
-                    score=onrrp_buffer_risk_score,
-                    source_mode="derived-public",
-                    note="Bhadial Liquidity的ON RRP Buffer Risk: $100B以下用squared transformation刻画非线性耗尽风险,避免把RRP低位误读为宽松。",
-                ),
-                {"n": "信用利差", "tag": f"HY {ind['hy_oas']:.2f}% / IG {ind['ig_oas']:.2f}%", "v": "偏紧" if ind["hy_oas"] < 4 else "承压", "score": 0 if ind["hy_oas"] < 4 else -1, "note": "FRED ICE BofA OAS用于代理信用风险与风险偏好。"},
-                bhadial_factor(
-                    module="Credit",
-                    name="金融条件指数(NFCI)",
-                    tag=f"{ind['nfci']:+.2f} · {percentile_label(nfci_pct)}",
-                    value="宽松" if nfci_score > 0 else "偏紧" if nfci_score < 0 else "中性",
-                    score=nfci_score,
-                    source_mode="real-public",
-                    note="Bhadial Credit的NFCI: Chicago Fed National Financial Conditions Index,正值表示金融条件紧于均值,负值表示宽松。",
-                ),
-                bhadial_factor(
-                    module="Credit",
-                    name="HY-IG利差",
-                    tag=f"{ind['hy_ig_oas_spread_bp']:+.0f}bp · {percentile_label(hy_ig_pct)}",
-                    value="信用分层" if hy_ig_score < 0 else "正常",
-                    score=hy_ig_score,
-                    source_mode="derived-public",
-                    note="补齐Bhadial Credit的信用分层维度;本地用FRED HY OAS - IG OAS作为公开信用相对压力代理。",
-                ),
-                bhadial_factor(
-                    module="Credit",
-                    name="HY信用偏好(HY/UST)",
-                    tag=f"{ind['hy_credit_preference']:.2f} · {percentile_label(hy_credit_preference_pct)}",
-                    value="偏好改善" if hy_credit_preference_score > 0 else "信用承压" if hy_credit_preference_score < 0 else "中性",
-                    score=hy_credit_preference_score,
-                    source_mode="proxy-public",
-                    note="Bhadial HY Credit的公开代理: FRED ICE US High Yield total return index相对10Y美债价格代理,用于替代HYG/IEI ETF历史。",
-                ),
-                bhadial_factor(
-                    module="Credit",
-                    name="IG信用偏好(IG/UST)",
-                    tag=f"{ind['ig_credit_preference']:.2f} · {percentile_label(ig_credit_preference_pct)}",
-                    value="承接改善" if ig_credit_preference_score > 0 else "信用承压" if ig_credit_preference_score < 0 else "中性",
-                    score=ig_credit_preference_score,
-                    source_mode="proxy-public",
-                    note="Bhadial IG Credit的公开代理: FRED ICE US Corporate total return index相对10Y美债价格代理,用于替代LQD/IEF ETF历史。",
-                ),
-                bhadial_factor(
-                    module="Credit",
-                    name="银行股相对S&P500",
-                    tag=f"{ind['regional_bank_vs_market']:.2f} · {percentile_label(regional_bank_pct)}",
-                    value="银行改善" if regional_bank_score > 0 else "银行承压" if regional_bank_score < 0 else "中性",
-                    score=regional_bank_score,
-                    source_mode="proxy-public",
-                    note="Bhadial Regional Banks vs SPY的公开代理: FRED NASDAQ Bank Index相对S&P 500;不是KRE/SPY ETF精确替代,但能捕捉银行股相对风险偏好。",
-                ),
-                bhadial_factor(
-                    module="Risk",
-                    name="VIX期限结构",
-                    tag=f"{ind['vix_term_structure']:.2f} · VIX3M {ind['vix_3m']:.2f}",
-                    value="倒挂" if vix_term_score < 0 else "contango",
-                    score=vix_term_score,
-                    source_mode="derived-public",
-                    note="Bhadial Risk的VIX Term Structure: VIX / VIX 3M,大于1代表波动率倒挂和风险偏好承压。",
-                ),
-                bhadial_factor(
-                    module="Risk",
-                    name="风险资产/美债代理",
-                    tag=f"{ind['risk_vs_safe']:.2f} · {percentile_label(risk_vs_safe_pct)}",
-                    value="risk-on" if risk_vs_safe_score > 0 else "risk-off" if risk_vs_safe_score < 0 else "中性",
-                    score=risk_vs_safe_score,
-                    source_mode="proxy-public",
-                    note="Bhadial Risk vs Safe的公开代理: FRED S&P 500相对DGS10派生的10Y美债价格代理;用于替代SPY/TLT ETF历史。",
-                ),
-                bhadial_factor(
-                    module="Risk",
-                    name="高Beta偏好(NDX/US500)",
-                    tag=f"{ind['high_beta_preference']:.2f} · {percentile_label(high_beta_pct)}",
-                    value="高Beta占优" if high_beta_score > 0 else "高Beta退潮" if high_beta_score < 0 else "中性",
-                    score=high_beta_score,
-                    source_mode="proxy-public",
-                    note="Bhadial High-Beta Preference的公开代理: FRED Nasdaq-100 Total Return相对Nasdaq US 500 Large Cap Total Return,用于替代IWM/SPY ETF历史。",
-                ),
-                bhadial_factor(
-                    module="External",
-                    name="美元实现波动率",
-                    tag=f"{ind['dxy_realized_vol']:.1f}% · {percentile_label(dxy_vol_pct)}",
-                    value="外部冲击" if dxy_vol_score < 0 else "稳定",
-                    score=dxy_vol_score,
-                    source_mode="derived-public",
-                    note="Bhadial External的FX Realized Volatility近似: 对FRED美元广义指数计算63日年化实现波动率。",
-                ),
-                bhadial_factor(
-                    module="External",
-                    name="原油波动偏离",
-                    tag=f"{ind['oil_vol_deviation']:.1f} · {percentile_label(oil_vol_dev_pct)}",
-                    value="油市冲击" if oil_vol_dev_score < 0 else "正常",
-                    score=oil_vol_dev_score,
-                    source_mode="derived-public",
-                    note="Bhadial External的Oil Volatility Deviation: OVX相对约1年滚动中位数的正偏离,只在恐慌高于常态时计压。",
-                ),
-                bhadial_factor(
-                    module="External",
-                    name="天然气",
-                    tag=f"${ind['natgas']:.2f} · {percentile_label(natgas_pct)}",
-                    value="能源压力" if natgas_score < 0 else "正常",
-                    score=natgas_score,
-                    source_mode="real-public",
-                    note="Bhadial External的Natural Gas: FRED Henry Hub现货价格,用于补充能源冲击而非只看原油。",
-                ),
-            ],
-        },
-    ]
-
-
-def compatibility_factor(
-    *,
-    name: str,
-    tag: str,
-    value: str,
-    score: int,
-    note: str,
-    source_mode: str,
-    curve: int | None = None,
-) -> dict[str, Any]:
-    factor: dict[str, Any] = {
-        "n": name,
-        "tag": tag,
-        "v": value,
-        "score": score,
-        "note": note,
-        "sourceMode": source_mode,
-        "compatibilityWith": REMOTE_COMPATIBILITY_SOURCE,
-    }
-    if curve is not None:
-        factor["curve"] = curve
-    return factor
 
 
 def build_conclusion_audit(groups: list[dict[str, Any]], source_status: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    total_weight = sum(max(0.0, _float_or_zero(group.get("weight"))) for group in groups)
+    def eligible_factors(group: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            factor
+            for factor in group.get("factors", [])
+            if isinstance(factor, dict)
+            and factor.get("auditEligible") is not False
+            and str(factor.get("sourceMode") or "") != "manual-placeholder"
+        ]
+
+    factors_by_group = {id(group): eligible_factors(group) for group in groups}
+    total_weight = sum(
+        max(0.0, _float_or_zero(group.get("weight")))
+        for group in groups
+        if factors_by_group[id(group)]
+    )
     duration_score = 0.0
     curve_score = 0.0
     drivers: list[dict[str, Any]] = []
     group_diagnostics: list[dict[str, Any]] = []
 
     for group in groups:
-        factors = [factor for factor in group.get("factors", []) if isinstance(factor, dict)]
+        factors = factors_by_group[id(group)]
         if not factors:
             continue
         group_weight = max(0.0, _float_or_zero(group.get("weight")))
@@ -1590,223 +1296,91 @@ def _source_status(source: dict[str, Any]) -> str:
     return str(source.get("status") or "").lower()
 
 
-def high_pressure_score(percentile: int | None, *, high_score: int = -1, extreme_score: int = -2) -> int:
-    if percentile is None:
-        return 0
-    if percentile >= 95:
-        return extreme_score
-    if percentile >= 80:
-        return high_score
-    return 0
-
-
-def low_preference_score(percentile: int | None) -> int:
-    if percentile is None:
-        return 0
-    if percentile <= 10:
-        return -2
-    if percentile <= 25:
-        return -1
-    if percentile >= 80:
-        return 1
-    return 0
-
-
-def fed_path_compatibility_factor(ind: dict[str, Any]) -> dict[str, Any]:
-    path = build_fed_path(ind)
-    terminal = path[-1] if path else {"m": "--", "hike": 0, "hold": 100, "cut": 0}
-    hike = int(terminal.get("hike") or 0)
-    hold = int(terminal.get("hold") or 0)
-    cut = int(terminal.get("cut") or 0)
-    if hike >= 50:
-        score, value, curve = -2, "偏加息", 1
-    elif hike >= 20:
-        score, value, curve = -1, "加息尾部", 1
-    elif cut >= 20:
-        score, value, curve = 1, "偏降息", -1
-    else:
-        score, value, curve = 0, "中性", 0
-    return compatibility_factor(
-        name="隐含政策路径",
-        tag=f"{terminal.get('m', '--')} 加息{hike}% / 持平{hold}% / 降息{cut}%",
-        value=value,
-        score=score,
-        curve=curve,
-        source_mode="modeled",
-        note="对齐原站Fed Funds期货/OIS维度;本地用公开Fed Funds期货代理、2Y曲线再定价和通胀压力建模,非CME官方概率。",
-    )
-
-
-def chair_transition_compatibility_factor(official_news: list[NewsItem]) -> dict[str, Any]:
-    chair_news = None
-    for item in sorted(official_news, key=lambda row: row.date, reverse=True):
-        title = item.title.lower()
-        if "chair" in title and ("oath" in title or "sworn" in title or "chairman" in title or "chair pro tempore" in title):
-            chair_news = item
-            break
-    if chair_news:
-        return compatibility_factor(
-            name="新任主席倾向",
-            tag=f"{chair_news.date.strftime('%m/%d')} {chair_news.source}",
-            value="待判断",
-            score=0,
-            source_mode="official-news",
-            note="官方新闻确认主席/代理主席相关变化;政策倾向不由标题自动推断,默认中性并保留手动评分入口。",
-        )
-    return compatibility_factor(
-        name="新任主席倾向",
-        tag="未检测官方主席变动",
-        value="手动",
-        score=0,
-        source_mode="manual-placeholder",
-        note="原站包含主席倾向叙事;本地未从官方新闻检测到主席变化时不自动给方向,可手动评分。",
-    )
-
-
-def growth_momentum_compatibility_factor(ind: dict[str, Any]) -> dict[str, Any]:
-    payroll = float(ind.get("payroll_change_k") or 0)
-    unrate = float(ind.get("unrate") or 0)
-    if payroll > 125 and unrate < 4.5:
-        score, value, curve = -1, "稳健", 1
-    elif payroll < 50 or unrate >= 4.5:
-        score, value, curve = 1, "降温", -1
-    else:
-        score, value, curve = 0, "中性", 0
-    return compatibility_factor(
-        name="增长动能",
-        tag=f"PAYEMS {payroll:+.0f}k / U-3 {unrate:.1f}%",
-        value=value,
-        score=score,
-        curve=curve,
-        source_mode="proxy-public",
-        note="对齐原站增长动能因子;用公开非农月差和失业率代理活动强弱,避免主观填写。",
-    )
-
-
-def long_bond_auction_compatibility_factor(auctions: list[dict[str, object]]) -> dict[str, Any]:
-    long_bond = None
-    for row in sorted(auctions, key=lambda item: str(item.get("auctionDate") or ""), reverse=True):
-        term = str(row.get("securityTerm") or "")
-        security_type = str(row.get("securityType") or "")
-        if ("30" in term and ("Year" in term or "年" in term)) and "TIPS" not in security_type.upper():
-            long_bond = row
-            break
-    if not long_bond:
-        return compatibility_factor(
-            name="30年期拍卖",
-            tag="待接近期30Y auction",
-            value="手动",
-            score=0,
-            curve=0,
-            source_mode="manual-placeholder",
-            note="原站重点跟踪30年期拍卖质量;TreasuryDirect样本未含近期30Y时默认中性,可手动评分。",
-        )
-    bid_to_cover = parse_number(long_bond.get("bidToCoverRatio"))
-    high_yield = format_yield(str(long_bond.get("highYield") or long_bond.get("averageMedianYield") or ""))
-    score = -2 if bid_to_cover is not None and bid_to_cover < 2.35 else -1 if bid_to_cover is not None and bid_to_cover < 2.5 else 0
-    return compatibility_factor(
-        name="30年期拍卖",
-        tag=f"{high_yield} · {bid_to_cover:.2f}x" if bid_to_cover is not None else f"{high_yield} · btc待解析",
-        value="疲弱" if score < 0 else "中性",
-        score=score,
-        curve=2 if score <= -2 else 1 if score < 0 else 0,
-        source_mode="real-public",
-        note="对齐原站30年期拍卖因子;用TreasuryDirect中标利率和投标倍数衡量长端需求。",
-    )
-
-
-def primary_dealer_inventory_compatibility_factor(stats: PrimaryDealerStats | None) -> dict[str, Any]:
-    value = stats.metrics_millions.get("PDPOSGST-TOT") if stats else None
-    if value is None:
-        return compatibility_factor(
-            name="一级交易商持仓",
-            tag="待接NY Fed周频",
-            value="手动",
-            score=0,
-            source_mode="manual-placeholder",
-            note="原站保留交易商库存维度;NY Fed primary dealer数据不可用时默认中性。",
-        )
-    score = -1 if value >= 650_000 else 0
-    return compatibility_factor(
-        name="一级交易商持仓",
-        tag=f"{money_from_millions(value)} · {stats.as_of.isoformat()}",
-        value="库存高" if score < 0 else "中性",
-        score=score,
-        source_mode="real-public",
-        note="NY Fed primary dealer UST ex-TIPS净持仓;库存高可能代表交易商资产负债表承接压力。",
-    )
-
-
-def manual_placeholder_compatibility_factor(name: str, tag: str, value: str, note: str) -> dict[str, Any]:
-    return compatibility_factor(name=name, tag=tag, value=value, score=0, source_mode="manual-placeholder", note=note)
-
-
-def market_liquidity_compatibility_factor(ind: dict[str, Any]) -> dict[str, Any]:
-    realized_vol = float(ind.get("ten_year_realized_vol_20d_bp") or 0)
-    hy_oas = float(ind.get("hy_oas") or 0)
-    stressed = realized_vol > 95 or hy_oas > 4.0
-    return compatibility_factor(
-        name="市场流动性",
-        tag=f"10Y vol {realized_vol:.1f} / HY {hy_oas:.2f}%",
-        value="轻度承压" if stressed else "正常",
-        score=-1 if stressed else 0,
-        curve=1 if stressed else 0,
-        source_mode="proxy-public",
-        note="原站市场流动性因子的公开代理:10Y实现波动率和HY信用利差同时观察,暂不伪装为订单簿深度或买卖价差。",
-    )
 
 
 def build_policy(ind: dict[str, Any]) -> dict[str, list[list[str]]]:
+    dff = available_indicator_value(ind, "dff")
+    sofr = available_indicator_value(ind, "sofr")
+    sofr_effr_spread = available_indicator_value(ind, "sofr_effr_spread_bp")
+    walcl = available_indicator_value(ind, "walcl_trillions")
+    soma = available_indicator_value(ind, "soma_treasury_trillions")
+    bank_reserves = available_indicator_value(ind, "bank_reserves_trillions")
+    net_liquidity = available_indicator_value(ind, "net_liquidity_trillions")
+    rrp = available_indicator_value(ind, "rrp_trillions")
+    tga = available_indicator_value(ind, "tga_trillions")
     return {
         "rates": [
             ["联邦基金目标区间", ind["target_range"], "由DFF近似推断"],
-            ["有效联邦基金利率", f"{ind['dff']:.2f}%", "FRED DFF"],
-            ["SOFR", f"{ind['sofr']:.2f}%", "FRED SOFR"],
-            ["SOFR-EFFR利差", f"{ind['sofr_effr_spread_bp']:+.0f}bp", percentile_label(ind["percentiles"].get("sofr_effr_spread"))],
+            ["有效联邦基金利率", f"{dff:.2f}%" if dff is not None else "--", "FRED DFF"],
+            ["SOFR", f"{sofr:.2f}%" if sofr is not None else "--", "FRED SOFR"],
+            ["SOFR-EFFR利差", f"{sofr_effr_spread:+.0f}bp" if sofr_effr_spread is not None else "--", percentile_label(ind["percentiles"].get("sofr_effr_spread"))],
             ["2Y收益率", f"{ind['two_year']:.2f}%", "政策路径市场代理"],
             ["10Y收益率", f"{ind['ten_year']:.2f}%", "长端定价锚"],
             ["1月2Y变化", f"{ind['two_year_m1_change_bp']:+.0f}bp", "政策再定价"],
         ],
         "plumbing": [
-            ["美联储资产负债表", f"${ind['walcl_trillions']:.2f}T", "FRED WALCL"],
-            ["SOMA Treasury持仓", f"${ind['soma_treasury_trillions']:.2f}T", "FRED TREAST"],
-            ["银行准备金", f"${ind['bank_reserves_trillions']:.2f}T", f"FRED WRESBAL · {percentile_label(ind['percentiles'].get('bank_reserves'))}"],
-            ["净流动性", f"${ind['net_liquidity_trillions']:.2f}T", f"WALCL-TGA-RRP · {percentile_label(ind['percentiles'].get('net_liquidity'))}"],
-            ["SOFR", f"{ind['sofr']:.2f}%", "隔夜融资"],
-            ["ON RRP", f"${ind['rrp_trillions']:.3f}T", "FRED RRPONTSYD"],
-            ["财政部一般账户", f"${ind['tga_trillions']:.2f}T", "FRED WTREGEN"],
-            ["流动性结论", "边际偏紧" if ind["rrp_trillions"] < 0.05 else "中性", "公开数据代理"],
+            ["美联储资产负债表", f"${walcl:.2f}T" if walcl is not None else "--", "FRED WALCL"],
+            ["SOMA Treasury持仓", f"${soma:.2f}T" if soma is not None else "--", "FRED TREAST"],
+            ["银行准备金", f"${bank_reserves:.2f}T" if bank_reserves is not None else "--", f"FRED WRESBAL · {percentile_label(ind['percentiles'].get('bank_reserves'))}"],
+            ["净流动性", f"${net_liquidity:.2f}T" if net_liquidity is not None else "--", f"WALCL-TGA-RRP · {percentile_label(ind['percentiles'].get('net_liquidity'))}"],
+            ["SOFR", f"{sofr:.2f}%" if sofr is not None else "--", "隔夜融资"],
+            ["ON RRP", f"${rrp:.3f}T" if rrp is not None else "--", "FRED RRPONTSYD"],
+            ["财政部一般账户", f"${tga:.2f}T" if tga is not None else "--", "FRED WTREGEN"],
+            ["流动性结论", "数据不足" if rrp is None else "边际偏紧" if rrp < 0.05 else "中性", "公开数据代理"],
         ],
     }
+
+
+def _percentile_observation_value(
+    ind: dict[str, Any],
+    series_key: str,
+    value_key: str,
+    *,
+    prefix: str = "",
+    suffix: str = "",
+    digits: int = 2,
+    signed: bool = False,
+) -> str:
+    """Format a percentile input only when the underlying series was observed."""
+    series_map = ind.get("percentile_series")
+    if isinstance(series_map, dict) and series_key in series_map:
+        points = series_map.get(series_key)
+        if not isinstance(points, (list, tuple)) or not points:
+            return "--"
+    value = optional_float(ind.get(value_key))
+    if value is None:
+        return "--"
+    sign = "+" if signed else ""
+    return f"{prefix}{value:{sign}.{digits}f}{suffix}"
 
 
 def build_percentiles(ind: dict[str, Any], auctions: list[dict[str, object]]) -> dict[str, Any]:
     auction_signal = auction_demand_signal(auctions)
     items = [
-        {"name": "银行准备金", "value": f"${ind['bank_reserves_trillions']:.2f}T", "percentile": ind["percentiles"].get("bank_reserves"), "source": "FRED WRESBAL", "window": "5Y"},
-        {"name": "净流动性", "value": f"${ind['net_liquidity_trillions']:.2f}T", "percentile": ind["percentiles"].get("net_liquidity"), "source": "FRED WALCL - WTREGEN - RRPONTSYD", "window": "5Y"},
-        {"name": "流动性动量", "value": f"{ind['net_liquidity_m1_change_trillions']:+.2f}T", "percentile": ind["percentiles"].get("net_liquidity_momentum"), "source": "Net liquidity 1M change", "window": "5Y"},
-        {"name": "13周净流动性动量", "value": f"{ind['net_liquidity_13w_change_trillions']:+.2f}T", "percentile": ind["percentiles"].get("net_liquidity_13w_momentum"), "source": "Net liquidity 13W change", "window": "5Y"},
-        {"name": "TGA偏离度", "value": f"{ind['tga_deviation_trillions']:+.2f}T", "percentile": ind["percentiles"].get("tga_deviation"), "source": "FRED WTREGEN - 52W median", "window": "5Y"},
-        {"name": "ON RRP缓冲风险", "value": f"{ind['onrrp_buffer_risk']:.2f}", "percentile": ind["percentiles"].get("onrrp_buffer_risk"), "source": "FRED RRPONTSYD risk signal", "window": "5Y"},
-        {"name": "SOFR-EFFR利差", "value": f"{ind['sofr_effr_spread_bp']:+.0f}bp", "percentile": ind["percentiles"].get("sofr_effr_spread"), "source": "FRED SOFR - DFF", "window": "5Y"},
-        {"name": "商票-TBill利差", "value": f"{ind['cp_tbill_spread_bp']:+.0f}bp", "percentile": ind["percentiles"].get("cp_tbill_spread"), "source": "FRED DCPF3M - DTB3", "window": "5Y"},
-        {"name": "资金分裂度(21D)", "value": f"{ind['funding_fragmentation_21d']:.2f}", "percentile": ind["percentiles"].get("funding_fragmentation"), "source": "SOFR corridor spread dispersion", "window": "5Y"},
-        {"name": "真实利率水平", "value": f"{ind['real_rate_level']:.2f}%", "percentile": ind["percentiles"].get("real_rate_level"), "source": "60% DFII5 + 40% DFII10", "window": "5Y"},
-        {"name": "VIX", "value": f"{ind['vix']:.2f}", "percentile": ind["percentiles"].get("vix"), "source": "FRED VIXCLS", "window": "5Y"},
-        {"name": "VIX期限结构", "value": f"{ind['vix_term_structure']:.2f}", "percentile": ind["percentiles"].get("vix_term_structure"), "source": "FRED VIXCLS / VXVCLS", "window": "5Y"},
-        {"name": "HY信用利差", "value": f"{ind['hy_oas']:.2f}%", "percentile": ind["percentiles"].get("hy_oas"), "source": "FRED BAMLH0A0HYM2", "window": "5Y"},
-        {"name": "HY-IG利差", "value": f"{ind['hy_ig_oas_spread_bp']:+.0f}bp", "percentile": ind["percentiles"].get("hy_ig_oas_spread"), "source": "FRED HY OAS - IG OAS", "window": "5Y"},
-        {"name": "HY信用偏好(HY/UST)", "value": f"{ind['hy_credit_preference']:.2f}", "percentile": ind["percentiles"].get("hy_credit_preference"), "source": "FRED HY TR / DGS10 price proxy", "window": "available up to 5Y"},
-        {"name": "IG信用偏好(IG/UST)", "value": f"{ind['ig_credit_preference']:.2f}", "percentile": ind["percentiles"].get("ig_credit_preference"), "source": "FRED IG TR / DGS10 price proxy", "window": "available up to 5Y"},
-        {"name": "金融条件指数(NFCI)", "value": f"{ind['nfci']:+.2f}", "percentile": ind["percentiles"].get("nfci"), "source": "FRED NFCI", "window": "5Y"},
-        {"name": "银行股相对S&P500", "value": f"{ind['regional_bank_vs_market']:.2f}", "percentile": ind["percentiles"].get("regional_bank_vs_market"), "source": "FRED NASDAQBANK / SP500", "window": "5Y"},
-        {"name": "风险资产/美债代理", "value": f"{ind['risk_vs_safe']:.2f}", "percentile": ind["percentiles"].get("risk_vs_safe"), "source": "FRED SP500 / DGS10 price proxy", "window": "5Y"},
-        {"name": "高Beta偏好(NDX/US500)", "value": f"{ind['high_beta_preference']:.2f}", "percentile": ind["percentiles"].get("high_beta_preference"), "source": "FRED NASDAQXNDX / NASDAQNQUS500LCT", "window": "5Y"},
-        {"name": "美元广义指数", "value": f"{ind['dxy']:.2f}", "percentile": ind["percentiles"].get("dxy"), "source": "FRED DTWEXBGS", "window": "5Y"},
-        {"name": "美元实现波动率", "value": f"{ind['dxy_realized_vol']:.1f}%", "percentile": ind["percentiles"].get("dxy_realized_vol"), "source": "FRED DTWEXBGS 63D realized vol", "window": "5Y"},
-        {"name": "原油波动偏离", "value": f"{ind['oil_vol_deviation']:.1f}", "percentile": ind["percentiles"].get("oil_vol_deviation"), "source": "FRED OVXCLS - rolling median", "window": "5Y"},
-        {"name": "天然气", "value": f"${ind['natgas']:.2f}", "percentile": ind["percentiles"].get("natgas"), "source": "FRED DHHNGSP", "window": "5Y"},
+        {"name": "银行准备金", "value": _percentile_observation_value(ind, "bank_reserves", "bank_reserves_trillions", prefix="$", suffix="T"), "percentile": ind["percentiles"].get("bank_reserves"), "source": "FRED WRESBAL", "window": "5Y"},
+        {"name": "净流动性", "value": _percentile_observation_value(ind, "net_liquidity", "net_liquidity_trillions", prefix="$", suffix="T"), "percentile": ind["percentiles"].get("net_liquidity"), "source": "FRED WALCL - WTREGEN - RRPONTSYD", "window": "5Y"},
+        {"name": "流动性动量", "value": _percentile_observation_value(ind, "net_liquidity_momentum", "net_liquidity_m1_change_trillions", suffix="T", signed=True), "percentile": ind["percentiles"].get("net_liquidity_momentum"), "source": "Net liquidity 1M change", "window": "5Y"},
+        {"name": "13周净流动性动量", "value": _percentile_observation_value(ind, "net_liquidity_13w_momentum", "net_liquidity_13w_change_trillions", suffix="T", signed=True), "percentile": ind["percentiles"].get("net_liquidity_13w_momentum"), "source": "Net liquidity 13W change", "window": "5Y"},
+        {"name": "TGA偏离度", "value": _percentile_observation_value(ind, "tga_deviation", "tga_deviation_trillions", suffix="T", signed=True), "percentile": ind["percentiles"].get("tga_deviation"), "source": "FRED WTREGEN - 52W median", "window": "5Y"},
+        {"name": "ON RRP缓冲风险", "value": _percentile_observation_value(ind, "onrrp_buffer_risk", "onrrp_buffer_risk"), "percentile": ind["percentiles"].get("onrrp_buffer_risk"), "source": "FRED RRPONTSYD risk signal", "window": "5Y"},
+        {"name": "SOFR-EFFR利差", "value": _percentile_observation_value(ind, "sofr_effr_spread", "sofr_effr_spread_bp", suffix="bp", digits=0, signed=True), "percentile": ind["percentiles"].get("sofr_effr_spread"), "source": "FRED SOFR - DFF", "window": "5Y"},
+        {"name": "商票-TBill利差", "value": _percentile_observation_value(ind, "cp_tbill_spread", "cp_tbill_spread_bp", suffix="bp", digits=0, signed=True), "percentile": ind["percentiles"].get("cp_tbill_spread"), "source": "FRED DCPF3M - DTB3", "window": "5Y"},
+        {"name": "资金分裂度(21D)", "value": _percentile_observation_value(ind, "funding_fragmentation", "funding_fragmentation_21d"), "percentile": ind["percentiles"].get("funding_fragmentation"), "source": "SOFR corridor spread dispersion", "window": "5Y"},
+        {"name": "真实利率水平", "value": _percentile_observation_value(ind, "real_rate_level", "real_rate_level", suffix="%"), "percentile": ind["percentiles"].get("real_rate_level"), "source": "60% DFII5 + 40% DFII10", "window": "5Y"},
+        {"name": "VIX", "value": _percentile_observation_value(ind, "vix", "vix"), "percentile": ind["percentiles"].get("vix"), "source": "FRED VIXCLS", "window": "5Y"},
+        {"name": "VIX期限结构", "value": _percentile_observation_value(ind, "vix_term_structure", "vix_term_structure"), "percentile": ind["percentiles"].get("vix_term_structure"), "source": "FRED VIXCLS / VXVCLS", "window": "5Y"},
+        {"name": "HY信用利差", "value": _percentile_observation_value(ind, "hy_oas", "hy_oas", suffix="%"), "percentile": ind["percentiles"].get("hy_oas"), "source": "FRED BAMLH0A0HYM2", "window": "5Y"},
+        {"name": "HY-IG利差", "value": _percentile_observation_value(ind, "hy_ig_oas_spread", "hy_ig_oas_spread_bp", suffix="bp", digits=0, signed=True), "percentile": ind["percentiles"].get("hy_ig_oas_spread"), "source": "FRED HY OAS - IG OAS", "window": "5Y"},
+        {"name": "HY信用偏好(HY/UST)", "value": _percentile_observation_value(ind, "hy_credit_preference", "hy_credit_preference"), "percentile": ind["percentiles"].get("hy_credit_preference"), "source": "FRED HY TR 63/126D relative return vs DGS10 duration proxy", "window": "available up to 5Y"},
+        {"name": "IG信用偏好(IG/UST)", "value": _percentile_observation_value(ind, "ig_credit_preference", "ig_credit_preference"), "percentile": ind["percentiles"].get("ig_credit_preference"), "source": "FRED IG TR 63/126D relative return vs DGS10 duration proxy", "window": "available up to 5Y"},
+        {"name": "金融条件指数(NFCI)", "value": _percentile_observation_value(ind, "nfci", "nfci", signed=True), "percentile": ind["percentiles"].get("nfci"), "source": "FRED NFCI", "window": "5Y"},
+        {"name": "银行股相对S&P500", "value": _percentile_observation_value(ind, "regional_bank_vs_market", "regional_bank_vs_market"), "percentile": ind["percentiles"].get("regional_bank_vs_market"), "source": "FRED NASDAQBANK / SP500", "window": "5Y"},
+        {"name": "风险资产/美债代理", "value": _percentile_observation_value(ind, "risk_vs_safe", "risk_vs_safe"), "percentile": ind["percentiles"].get("risk_vs_safe"), "source": "FRED SP500 63/126D relative return vs DGS10 duration proxy", "window": "5Y"},
+        {"name": "高Beta偏好(NDX/US500)", "value": _percentile_observation_value(ind, "high_beta_preference", "high_beta_preference"), "percentile": ind["percentiles"].get("high_beta_preference"), "source": "FRED NASDAQXNDX / NASDAQNQUS500LCT", "window": "5Y"},
+        {"name": "美元广义指数", "value": _percentile_observation_value(ind, "dxy", "dxy"), "percentile": ind["percentiles"].get("dxy"), "source": "FRED DTWEXBGS", "window": "5Y"},
+        {"name": "美元实现波动率", "value": _percentile_observation_value(ind, "dxy_realized_vol", "dxy_realized_vol", suffix="%", digits=1), "percentile": ind["percentiles"].get("dxy_realized_vol"), "source": "FRED DTWEXBGS 63D realized vol", "window": "5Y"},
+        {"name": "原油波动偏离", "value": _percentile_observation_value(ind, "oil_vol_deviation", "oil_vol_deviation", digits=1), "percentile": ind["percentiles"].get("oil_vol_deviation"), "source": "FRED OVXCLS - rolling median", "window": "5Y"},
+        {"name": "天然气", "value": _percentile_observation_value(ind, "natgas", "natgas", prefix="$"), "percentile": ind["percentiles"].get("natgas"), "source": "FRED DHHNGSP", "window": "5Y"},
         {"name": "拍卖投标倍数", "value": auction_signal["value"], "percentile": auction_signal["percentile"], "source": "TreasuryDirect auctioned securities", "window": "available sample"},
     ]
     trends = build_percentile_trends(ind, auctions)
@@ -1819,18 +1393,23 @@ def build_percentiles(ind: dict[str, Any], auctions: list[dict[str, object]]) ->
     }
 
 
-def build_macro_liquidity_score(ind: dict[str, Any]) -> dict[str, Any]:
-    snapshot = bhadial_conditions_snapshot(ind)
+def build_macro_liquidity_score(
+    ind: dict[str, Any],
+    *,
+    as_of: date | None = None,
+) -> dict[str, Any]:
+    snapshot = bhadial_conditions_snapshot(ind, as_of=as_of)
     score = snapshot["score"]
     components = snapshot["components"]
     modules = snapshot["modules"]
-    drivers = sorted(components, key=lambda item: abs(item["contribution"]), reverse=True)[:4]
-    constraint = min(components, key=lambda item: item["contribution"]) if components else {}
-    offset = max(components, key=lambda item: item["contribution"]) if components else {}
-    drag_components = [item for item in components if item["contribution"] < -0.01]
-    buffer_components = [item for item in components if item["contribution"] > 0.01]
-    neutral_components = [item for item in components if -0.01 <= item["contribution"] <= 0.01]
-    focus_components = sorted(components, key=lambda item: abs(item["contribution"]), reverse=True)[:5]
+    eligible_components = [item for item in components if item.get("scoreEligible")]
+    drivers = sorted(eligible_components, key=lambda item: abs(item["contribution"]), reverse=True)[:4]
+    constraint = min(eligible_components, key=lambda item: item["contribution"]) if eligible_components else {}
+    offset = max(eligible_components, key=lambda item: item["contribution"]) if eligible_components else {}
+    drag_components = [item for item in eligible_components if item["contribution"] < -0.01]
+    buffer_components = [item for item in eligible_components if item["contribution"] > 0.01]
+    neutral_components = [item for item in eligible_components if -0.01 <= item["contribution"] <= 0.01]
+    focus_components = sorted(eligible_components, key=lambda item: abs(item["contribution"]), reverse=True)[:5]
     balance = [
         {
             "label": "拖累",
@@ -1860,8 +1439,16 @@ def build_macro_liquidity_score(ind: dict[str, Any]) -> dict[str, Any]:
         "sourceUrl": BHADIAL_SCORE_SOURCE_URL,
         "moduleCount": len(BHADIAL_CONDITION_MODULES),
         "totalFactorCount": sum(int(module["scored"]) + int(module["display"]) for module in BHADIAL_FACTOR_COVERAGE),
-        "scoredFactorCount": sum(len(module["factors"]) for module in BHADIAL_CONDITION_MODULES),
+        "activeFactorCount": snapshot["factorCount"],
+        "scoredFactorCount": snapshot["scoredFactorCount"],
         "observedFactorCount": snapshot["observedFactorCount"],
+        "coveragePct": snapshot["coveragePct"],
+        "scoredCoveragePct": snapshot["scoredCoveragePct"],
+        "effectiveWeightCoveragePct": snapshot["effectiveWeightCoveragePct"],
+        "legacyFixedScore": snapshot["legacyFixedScore"],
+        "observedOnlyScore": snapshot["observedOnlyScore"],
+        "reliabilityScore": snapshot["reliabilityScore"],
+        "scoreContract": "legacy-fixed-weight-compatible",
         "proxyFactorCount": 5,
         "modules": modules,
         "summary": macro_liquidity_summary(score, constraint, offset, trend),
@@ -1870,7 +1457,7 @@ def build_macro_liquidity_score(ind: dict[str, Any]) -> dict[str, Any]:
         "offset": offset,
         "balance": balance,
         "focusComponents": focus_components,
-        "hiddenComponentCount": max(0, len(components) - len(focus_components)),
+        "hiddenComponentCount": max(0, len(eligible_components) - len(focus_components)),
         "implications": macro_liquidity_implications(score, constraint, offset),
         "components": components,
         "drivers": drivers,
@@ -1889,6 +1476,7 @@ def build_macro_liquidity_trend(ind: dict[str, Any], current_score: float) -> di
             "percentile3mChange": None,
             "direction": "不足",
             "summary": "综合评分历史样本不足",
+            "regimeCalibration": unavailable_macro_regime_calibration(),
             "points": [],
         }
     latest = points[-1]
@@ -1911,14 +1499,74 @@ def build_macro_liquidity_trend(ind: dict[str, Any], current_score: float) -> di
         "percentile3mChange": percentile_3m_change,
         "direction": direction,
         "summary": macro_liquidity_trend_summary(latest_percentile, score_3m_change, percentile_3m_change, direction),
+        "regimeCalibration": build_macro_regime_calibration(points, current_score),
         "points": points,
     }
 
 
+def unavailable_macro_regime_calibration() -> dict[str, Any]:
+    return {
+        "available": False,
+        "mode": "shadow-only",
+        "sampleSize": 0,
+        "fixedThresholds": [30, 45, 55, 70],
+        "empiricalThresholds": [],
+        "currentEmpiricalRegime": None,
+        "fixedRegimeOccupancy": {},
+        "dormantFixedRegimes": [],
+        "summary": "历史样本不足,固定阈值暂不做分布校准诊断。",
+    }
+
+
+def nearest_rank_value(values: list[float], percentile: float) -> float | None:
+    clean = sorted(float(value) for value in values if math.isfinite(float(value)))
+    if not clean:
+        return None
+    index = max(0, min(len(clean) - 1, math.ceil(percentile * len(clean)) - 1))
+    return round(clean[index], 1)
+
+
+def build_macro_regime_calibration(points: list[dict[str, Any]], current_score: float) -> dict[str, Any]:
+    scores = [
+        float(point["score"])
+        for point in points
+        if isinstance(point, dict) and isinstance(point.get("score"), (int, float))
+    ]
+    if len(scores) < 12:
+        return unavailable_macro_regime_calibration()
+    empirical = [nearest_rank_value(scores, percentile) for percentile in (0.2, 0.4, 0.6, 0.8)]
+    if any(value is None for value in empirical):
+        return unavailable_macro_regime_calibration()
+    thresholds = [float(value) for value in empirical if value is not None]
+    empirical_labels = ["历史紧缩尾部", "历史偏紧", "历史中位", "历史偏松", "历史宽松尾部"]
+    empirical_index = sum(1 for threshold in thresholds if current_score > threshold)
+    fixed_regimes = ["紧缩压力", "偏紧", "中性", "边际宽松", "流动性宽松"]
+    occupancy = {regime: 0 for regime in fixed_regimes}
+    for score in scores:
+        occupancy[macro_liquidity_regime(score)] += 1
+    dormant = [regime for regime, count in occupancy.items() if count == 0]
+    return {
+        "available": True,
+        "mode": "shadow-only",
+        "sampleSize": len(scores),
+        "fixedThresholds": [30, 45, 55, 70],
+        "empiricalThresholds": thresholds,
+        "currentEmpiricalRegime": empirical_labels[empirical_index],
+        "fixedRegimeOccupancy": occupancy,
+        "dormantFixedRegimes": dormant,
+        "summary": (
+            f"近{len(scores)}个月经验分位阈值为"
+            f"{thresholds[0]:.1f}/{thresholds[1]:.1f}/{thresholds[2]:.1f}/{thresholds[3]:.1f}; "
+            "仅作分布诊断,生产状态仍使用固定30/45/55/70阈值。"
+        ),
+    }
+
+
 def macro_liquidity_history_points(series: dict[str, list[SeriesPoint]]) -> list[dict[str, Any]]:
+    prepared = prepare_bhadial_series(series)
     dated_component_points: list[SeriesPoint] = []
     for key in BHADIAL_CONDITION_SERIES_KEYS:
-        dated_component_points.extend(clean_points(series.get(key, [])))
+        dated_component_points.extend(prepared.get(key, []))
     if not dated_component_points:
         return []
     latest_date = max(point.date for point in dated_component_points)
@@ -1930,7 +1578,7 @@ def macro_liquidity_history_points(series: dict[str, list[SeriesPoint]]) -> list
         month_ends[(point.date.year, point.date.month)] = point.date
     raw_points: list[dict[str, Any]] = []
     for target in sorted(set(month_ends.values())):
-        score_row = macro_liquidity_score_at(series, target)
+        score_row = macro_liquidity_score_at(prepared, target)
         if score_row is None:
             continue
         raw_points.append(
@@ -2133,7 +1781,12 @@ def build_global_lppl_risk_index(
     index_rows = attach_global_lppl_factor_validation(index_rows, bars_by_symbol, per_index_history)
     available_rows = [row for row in index_rows if row.get("available") and optional_float(row.get("score")) is not None]
     if not available_rows:
-        return unavailable_global_lppl_risk(index_rows, "全球LPPL逐市场评估需要至少一个可回放指数样本; 当前公开日线源不足。")
+        return unavailable_global_lppl_risk(
+            index_rows,
+            "全球LPPL逐市场评估需要至少一个可回放指数样本; 当前公开日线源不足。",
+            per_index_history=per_index_history,
+            per_index_backtests=per_index_backtests,
+        )
 
     latest_date = latest_global_lppl_date(available_rows)
     breadth_confirmation = build_global_lppl_breadth_confirmation(index_rows)
@@ -2230,6 +1883,7 @@ def global_lppl_payload(
     per_index_backtests: dict[str, Any],
     breadth_confirmation: dict[str, Any],
 ) -> dict[str, Any]:
+    serialized_index_rows = compact_global_lppl_index_payloads(index_rows)
     return {
         "available": True,
         "title": "Global LPPL Risk · 全球指数泡沫临界风险",
@@ -2242,20 +1896,20 @@ def global_lppl_payload(
         "asOf": latest_date.isoformat(),
         "summary": global_lppl_summary(available_rows, index_rows),
         "method": "LPPL grid search over constrained tc/m/omega with linear least-squares fit; each market is scored, charted, and backtested separately.",
-        "indices": index_rows,
+        "indices": serialized_index_rows,
         "indexValidation": index_validation,
         "breadthConfirmation": breadth_confirmation,
         "history": {
             "available": False,
             "points": [],
-            "summary": "Top-level aggregate LPPL history is disabled; use perIndexHistory or indices[].history.",
+            "summary": "Top-level aggregate LPPL history is disabled; use perIndexHistory (indices carry historyRef only).",
         },
         "backtest": {
             "available": False,
             "sampleSize": 0,
             "threshold": GLOBAL_LPPL_ALERT_THRESHOLD,
             "horizonTests": [],
-            "summary": "Top-level aggregate LPPL backtest is disabled; use perIndexBacktests or indices[].backtest.",
+            "summary": "Top-level aggregate LPPL backtest is disabled; use perIndexBacktests (indices carry backtestRef only).",
         },
         "perIndexHistory": per_index_history,
         "perIndexBacktests": per_index_backtests,
@@ -2342,7 +1996,13 @@ def build_global_lppl_breadth_confirmation(index_rows: list[dict[str, Any]]) -> 
     }
 
 
-def unavailable_global_lppl_risk(index_rows: list[dict[str, Any]], reason: str) -> dict[str, Any]:
+def unavailable_global_lppl_risk(
+    index_rows: list[dict[str, Any]],
+    reason: str,
+    *,
+    per_index_history: dict[str, Any] | None = None,
+    per_index_backtests: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
         "available": False,
         "title": "Global LPPL Risk · 全球指数泡沫临界风险",
@@ -2353,7 +2013,7 @@ def unavailable_global_lppl_risk(index_rows: list[dict[str, Any]], reason: str) 
         "asOf": "",
         "summary": reason,
         "method": "LPPL grid search over constrained tc/m/omega with linear least-squares fit.",
-        "indices": index_rows,
+        "indices": compact_global_lppl_index_payloads(index_rows),
         "indexValidation": {"available": False, "rows": [], "summary": reason},
         "breadthConfirmation": {
             "available": False,
@@ -2369,119 +2029,9 @@ def unavailable_global_lppl_risk(index_rows: list[dict[str, Any]], reason: str) 
         },
         "history": {"available": False, "points": [], "summary": "Top-level aggregate LPPL history is disabled; use per-index histories."},
         "backtest": {"available": False, "sampleSize": 0, "threshold": GLOBAL_LPPL_ALERT_THRESHOLD, "horizonTests": [], "summary": "Top-level aggregate LPPL backtest is disabled; use per-index backtests."},
-        "perIndexHistory": {},
-        "perIndexBacktests": {},
+        "perIndexHistory": per_index_history or {},
+        "perIndexBacktests": per_index_backtests or {},
         "lookAheadGuard": {"scoreUse": "independent; not included in equityShortTermRisk."},
-    }
-
-
-def global_lppl_index_row(
-    spec: dict[str, Any],
-    bars: list[MarketDailyBar],
-    *,
-    as_of: date | None = None,
-    fast: bool = False,
-) -> dict[str, Any]:
-    symbol = str(spec.get("symbol") or "").upper()
-    clean = normalize_market_bars({symbol: bars}).get(symbol, [])
-    target_index = bar_index_at_or_before(clean, as_of) if as_of else (len(clean) - 1 if clean else None)
-    if target_index is None or target_index + 1 < GLOBAL_LPPL_MIN_OBSERVATIONS:
-        return {
-            "symbol": symbol,
-            "name": str(spec.get("name") or symbol),
-            "region": str(spec.get("region") or ""),
-        "regionKey": str(spec.get("regionKey") or ""),
-        "regionName": str(spec.get("regionName") or spec.get("region") or ""),
-        "regionNameCn": str(spec.get("regionNameCn") or ""),
-        "proxyNote": str(spec.get("proxyNote") or ""),
-        "proxyNoteCn": str(spec.get("proxyNoteCn") or ""),
-            "available": False,
-            "score": None,
-            "confidence": 0.0,
-            "status": "missing",
-            "statusCn": "缺失",
-            "criticalDate": None,
-            "daysToCritical": None,
-            "fitR2": None,
-            "windowDays": None,
-            "observations": len(clean),
-            "source": str(spec.get("source") or ""),
-            "sourceSymbol": str(spec.get("sourceSymbol") or symbol),
-            "sourceQuality": str(spec.get("sourceQuality") or "low"),
-            "reason": "source unavailable or sample shorter than LPPL minimum window",
-        }
-    fit = fit_global_lppl_signal(clean[: target_index + 1], fast=fast)
-    latest = clean[target_index]
-    if not fit.get("available"):
-        return {
-            "symbol": symbol,
-            "name": str(spec.get("name") or symbol),
-            "region": str(spec.get("region") or ""),
-        "regionKey": str(spec.get("regionKey") or ""),
-        "regionName": str(spec.get("regionName") or spec.get("region") or ""),
-        "regionNameCn": str(spec.get("regionNameCn") or ""),
-        "proxyNote": str(spec.get("proxyNote") or ""),
-        "proxyNoteCn": str(spec.get("proxyNoteCn") or ""),
-            "available": False,
-            "score": None,
-            "confidence": 0.0,
-            "status": "missing",
-            "statusCn": "缺失",
-            "criticalDate": None,
-            "daysToCritical": None,
-            "fitR2": None,
-            "windowDays": None,
-            "observations": target_index + 1,
-            "source": str(spec.get("source") or ""),
-            "sourceSymbol": str(spec.get("sourceSymbol") or symbol),
-            "sourceQuality": str(spec.get("sourceQuality") or "low"),
-            "asOf": latest.date.isoformat(),
-            "reason": str(fit.get("reason") or "LPPL fit unavailable"),
-        }
-    score = bounded_score(float(fit["score"]))
-    confidence = max(0.0, min(1.0, float(fit.get("confidence") or 0.0)))
-    status, status_cn = global_lppl_status(score, confidence)
-    days_to_critical = int(fit["daysToCritical"])
-    critical_date = latest.date + timedelta(days=days_to_critical)
-    return {
-        "symbol": symbol,
-        "name": str(spec.get("name") or symbol),
-        "region": str(spec.get("region") or ""),
-        "regionKey": str(spec.get("regionKey") or ""),
-        "regionName": str(spec.get("regionName") or spec.get("region") or ""),
-        "regionNameCn": str(spec.get("regionNameCn") or ""),
-        "proxyNote": str(spec.get("proxyNote") or ""),
-        "proxyNoteCn": str(spec.get("proxyNoteCn") or ""),
-        "available": True,
-        "score": round(score, 1),
-        "confidence": round(confidence, 2),
-        "status": status,
-        "statusCn": status_cn,
-        "criticalDate": critical_date.isoformat(),
-        "daysToCritical": days_to_critical,
-        "daysToCriticalRange": fit.get("daysToCriticalRange"),
-        "fitR2": round(float(fit["fitR2"]), 3),
-        "fitSse": round(float(fit.get("fitSse") or 0.0), 6),
-        "lpplImprovementPct": round(float(fit.get("lpplImprovementPct") or 0.0), 1),
-        "oscillationCount": round(float(fit.get("oscillationCount") or 0.0), 2),
-        "passesLpplCoreDiagnostics": bool(fit.get("passesLpplCoreDiagnostics")),
-        "passesLpplDiagnostics": bool(fit.get("passesLpplDiagnostics")),
-        "residualDiagnostics": fit.get("residualDiagnostics"),
-        "fitEnsemble": fit.get("fitEnsemble"),
-        "windowDays": int(fit["windowDays"]),
-        "windowDaysRange": fit.get("windowDaysRange"),
-        "selectionBasis": str(fit.get("selectionBasis") or "fit_quality"),
-        "observations": target_index + 1,
-        "asOf": latest.date.isoformat(),
-        "source": str(spec.get("source") or ""),
-        "sourceSymbol": str(spec.get("sourceSymbol") or symbol),
-        "sourceQuality": str(spec.get("sourceQuality") or "low"),
-        "weight": float(spec.get("weight") or 0.0),
-        "trailingReturn63d": pct_metric(fit.get("trailingReturn63d")),
-        "acceleration": pct_metric(fit.get("acceleration")),
-        "bubbleCoefficient": round(float(fit.get("bubbleCoefficient") or 0.0), 4),
-        "oscillationAmplitude": round(float(fit.get("oscillationAmplitude") or 0.0), 4),
-        "reason": str(fit.get("reason") or ""),
     }
 
 
@@ -2489,168 +2039,26 @@ def build_global_lppl_per_index_histories(
     index_rows: list[dict[str, Any]],
     bars_by_symbol: dict[str, list[MarketDailyBar]],
 ) -> dict[str, Any]:
-    histories: dict[str, Any] = {}
-    for row in index_rows:
-        symbol = str(row.get("symbol") or "").upper()
-        if not symbol:
-            continue
-        histories[symbol] = build_global_lppl_single_index_history(row, bars_by_symbol.get(symbol, []))
-    return histories
+    """Facade wrapper preserving the patch seam for global_lppl_index_row."""
+    return _lppl_history.build_global_lppl_per_index_histories(
+        index_rows,
+        bars_by_symbol,
+        row_builder=global_lppl_index_row,
+        history_points_builder=build_single_index_lppl_history_points,
+    )
 
 
 def build_global_lppl_single_index_history(
     index_row: dict[str, Any],
     bars: list[MarketDailyBar],
 ) -> dict[str, Any]:
-    symbol = str(index_row.get("symbol") or "").upper()
-    clean = normalize_market_bars({symbol: bars}).get(symbol, [])
-    if len(clean) < GLOBAL_LPPL_MIN_OBSERVATIONS:
-        return {"available": False, "symbol": symbol, "points": [], "summary": "source unavailable or sample shorter than LPPL minimum window"}
-    score_points = build_single_index_lppl_history_points(symbol, clean)
-    if not score_points:
-        return {"available": False, "symbol": symbol, "points": [], "summary": "LPPL history replay produced no valid fit points"}
-    first_index = bar_index_at_or_before(clean, parse_lppl_point_date(score_points[0].get("date")) or clean[0].date)
-    base_close = clean[first_index if first_index is not None else 0].close
-    points: list[dict[str, Any]] = []
-    for point in score_points:
-        point_date = parse_lppl_point_date(point.get("date"))
-        bar_index = bar_index_at_or_before(clean, point_date) if point_date else None
-        if bar_index is None:
-            continue
-        close = clean[bar_index].close
-        enriched = {
-            "date": clean[bar_index].date.isoformat(),
-            "score": point["score"],
-            "close": round(close, 2),
-            "indexedClose": round(100 * close / base_close, 2) if base_close > 0 else None,
-        }
-        for key in (
-            "criticalDate",
-            "daysToCritical",
-            "passesLpplCoreDiagnostics",
-            "passesLpplDiagnostics",
-            "lpplImprovementPct",
-            "oscillationCount",
-        ):
-            if key in point:
-                enriched[key] = point[key]
-        points.append(enriched)
-    if len(points) < 2:
-        return {"available": False, "symbol": symbol, "points": points, "summary": "LPPL history replay has fewer than two chartable points"}
-    clip_state = build_lppl_clip_state(points)
-    return {
-        "available": True,
-        "symbol": symbol,
-        "name": str(index_row.get("name") or symbol),
-        "sourceSymbol": str(index_row.get("sourceSymbol") or symbol),
-        "summary": f"{symbol} LPPL replay; risk score and indexed own-market price are shown on separate axes.",
-        "points": points,
-        "dateRange": {"start": points[0]["date"], "end": points[-1]["date"]},
-        "clipState": clip_state,
-    }
-
-
-def parse_lppl_point_date(value: Any) -> date | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        return date.fromisoformat(value)
-    except ValueError:
-        return None
-
-
-def build_lppl_clip_state(points: list[dict[str, Any]], *, lookback: int = 20) -> dict[str, Any]:
-    observations: list[dict[str, Any]] = []
-    for point in points:
-        if not isinstance(point, dict):
-            continue
-        point_date = parse_lppl_point_date(point.get("date"))
-        critical_date = parse_lppl_point_date(point.get("criticalDate"))
-        if point_date is None or critical_date is None:
-            continue
-        observations.append(
-            {
-                "date": point_date,
-                "criticalDate": critical_date,
-                "score": optional_float(point.get("score")),
-                "passesCore": bool(point.get("passesLpplCoreDiagnostics")),
-            }
-        )
-    if len(observations) < 5:
-        return {
-            "available": False,
-            "clipLock": False,
-            "status": "insufficient",
-            "statusCn": "样本不足",
-            "sampleSize": len(observations),
-            "summary": "CLIP requires at least five replay points with critical dates.",
-        }
-    recent = observations[-max(5, lookback):]
-    critical_ordinals = sorted(item["criticalDate"].toordinal() for item in recent)
-    q20 = lppl_percentile(critical_ordinals, 0.20)
-    q50 = lppl_percentile(critical_ordinals, 0.50)
-    q80 = lppl_percentile(critical_ordinals, 0.80)
-    tc_window_days = max(0, int(round(q80 - q20)))
-    latest_observation = max(item["date"] for item in recent)
-    median_lead_days = int(round(q50 - latest_observation.toordinal()))
-    core_pass_ratio = sum(1 for item in recent if item["passesCore"]) / len(recent)
-    clip_lock = tc_window_days <= 30 and 5 <= median_lead_days <= 180 and core_pass_ratio >= 0.50
-    converging = tc_window_days <= 60 and 5 <= median_lead_days <= 252 and core_pass_ratio >= 0.35
-    if clip_lock:
-        status, status_cn = "locked", "CLIP锁定"
-    elif converging:
-        status, status_cn = "converging", "CLIP收敛"
-    elif median_lead_days < 0:
-        status, status_cn = "expired", "临界已过"
-    else:
-        status, status_cn = "scattered", "临界分散"
-    return {
-        "available": True,
-        "clipLock": clip_lock,
-        "status": status,
-        "statusCn": status_cn,
-        "sampleSize": len(recent),
-        "lookback": max(5, lookback),
-        "tcMedian": date.fromordinal(int(round(q50))).isoformat(),
-        "tcQ20": date.fromordinal(int(round(q20))).isoformat(),
-        "tcQ80": date.fromordinal(int(round(q80))).isoformat(),
-        "tcWindowDays": tc_window_days,
-        "medianLeadDays": median_lead_days,
-        "corePassRatio": round(core_pass_ratio, 3),
-        "summary": (
-            f"CLIP {status_cn}: recent tc 20-80% window {tc_window_days} days, "
-            f"median lead {median_lead_days} days, core pass {core_pass_ratio:.0%}."
-        ),
-    }
-
-
-def build_global_lppl_per_index_backtests(
-    histories: dict[str, Any],
-    bars_by_symbol: dict[str, list[MarketDailyBar]],
-) -> dict[str, Any]:
-    backtests: dict[str, Any] = {}
-    for symbol, history in histories.items():
-        points = history.get("points", []) if isinstance(history, dict) else []
-        backtests[symbol] = build_global_lppl_backtest(points, bars_by_symbol.get(symbol, []), symbol=symbol)
-    return backtests
-
-
-def attach_global_lppl_per_index_payloads(
-    index_rows: list[dict[str, Any]],
-    histories: dict[str, Any],
-    backtests: dict[str, Any],
-) -> list[dict[str, Any]]:
-    enriched_rows: list[dict[str, Any]] = []
-    for row in index_rows:
-        enriched = dict(row)
-        symbol = str(enriched.get("symbol") or "").upper()
-        enriched["history"] = histories.get(symbol, {"available": False, "symbol": symbol, "points": []})
-        enriched["backtest"] = backtests.get(symbol, {"available": False, "sampleSize": 0, "horizonTests": []})
-        history_clip = enriched["history"].get("clipState") if isinstance(enriched.get("history"), dict) else None
-        if isinstance(history_clip, dict):
-            enriched["clipState"] = history_clip
-        enriched_rows.append(enriched)
-    return enriched_rows
+    """Facade wrapper preserving the patch seam for global_lppl_index_row."""
+    return _lppl_history.build_global_lppl_single_index_history(
+        index_row,
+        bars,
+        row_builder=global_lppl_index_row,
+        history_points_builder=build_single_index_lppl_history_points,
+    )
 
 
 def attach_global_lppl_tc_aggregations(index_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3078,20 +2486,31 @@ def build_global_lppl_forward_signal(row: dict[str, Any]) -> dict[str, Any]:
     score_momentum_20d = lppl_history_score_delta(history_points, 20)
     clip_state = row.get("clipState") if isinstance(row.get("clipState"), dict) else history.get("clipState") if isinstance(history, dict) else {}
     clip_lock = bool(clip_state.get("clipLock")) if isinstance(clip_state, dict) else False
-    backtest = row.get("backtest") if isinstance(row.get("backtest"), dict) else {}
     validation = row.get("validation") if isinstance(row.get("validation"), dict) else {}
-    threshold = optional_float(backtest.get("threshold") if isinstance(backtest, dict) else None)
+    production_evidence_available = validation.get("productionEvidenceAvailable") is True
+    threshold = (
+        optional_float(validation.get("productionThreshold"))
+        if production_evidence_available
+        else None
+    )
+    if threshold is None and production_evidence_available:
+        threshold = optional_float(validation.get("threshold"))
     if threshold is None:
-        threshold = optional_float(validation.get("threshold") if isinstance(validation, dict) else None)
-    if threshold is None:
+        # Per-index backtests are intentionally descriptive full-sample audits.
+        # They must never select the live forward-signal threshold.
         threshold = GLOBAL_LPPL_ALERT_THRESHOLD
     threshold_distance = model_score - threshold
     days_to_critical = optional_float(row.get("daysToCritical"))
     confidence = max(0.0, min(1.0, optional_float(row.get("confidence")) or 0.0))
-    validation_multiplier = optional_float(validation.get("effectiveWeightMultiplier")) if isinstance(validation, dict) else None
-    if validation_multiplier is None:
-        validation_multiplier = optional_float(row.get("effectiveWeightMultiplier"))
-    validation_multiplier = max(0.0, min(1.0, validation_multiplier if validation_multiplier is not None else 0.75))
+    validation_multiplier = (
+        optional_float(validation.get("productionEffectiveWeightMultiplier"))
+        if production_evidence_available
+        else None
+    )
+    if validation_multiplier is None and production_evidence_available:
+        validation_multiplier = optional_float(validation.get("effectiveWeightMultiplier"))
+    # No untouched OOS evidence means no validation credit in production.
+    validation_multiplier = max(0.0, min(1.0, validation_multiplier if validation_multiplier is not None else 0.0))
     ensemble_multiplier = global_lppl_ensemble_multiplier(row)
     threshold_pressure = risk_linear(threshold_distance, -15.0, 10.0)
     momentum_pressure = risk_linear(score_momentum_20d if score_momentum_20d is not None else 0.0, -8.0, 12.0)
@@ -3139,6 +2558,11 @@ def build_global_lppl_forward_signal(row: dict[str, Any]) -> dict[str, Any]:
         "scoreMomentum5d": round(score_momentum_5d, 1) if score_momentum_5d is not None else None,
         "scoreMomentum20d": round(score_momentum_20d, 1) if score_momentum_20d is not None else None,
         "threshold": int(threshold),
+        "thresholdSource": (
+            str(validation.get("productionThresholdSource") or "purged_calibration_first_65pct")
+            if production_evidence_available
+            else "fixed_prior_no_oos"
+        ),
         "thresholdDistance": round(threshold_distance, 1),
         "daysToCritical": int(days_to_critical) if days_to_critical is not None else None,
         "clipLock": clip_lock,
@@ -3209,7 +2633,7 @@ def apply_global_lppl_index_validation(
             adjusted["validation"] = validation_row
             adjusted["effectiveWeightMultiplier"] = validation_row.get("effectiveWeightMultiplier")
         elif adjusted.get("available"):
-            adjusted["effectiveWeightMultiplier"] = 0.75
+            adjusted["effectiveWeightMultiplier"] = 0.0
         adjusted_rows.append(adjusted)
     return adjusted_rows
 
@@ -3235,7 +2659,11 @@ def build_global_lppl_index_validation(
         return {"available": False, "rows": [], "summary": "No index-level LPPL validation samples were available."}
     validated = sum(1 for row in rows if row.get("validationRole") == "validated")
     weak = sum(1 for row in rows if row.get("validationRole") == "weak")
-    summary = f"{len(rows)} indices replayed; {validated} validated, {weak} weak by own-market 15D drawdown audit."
+    unvalidated = sum(1 for row in rows if not row.get("productionEvidenceAvailable"))
+    summary = (
+        f"{len(rows)} indices replayed; {validated} validated, {weak} weak, {unvalidated} unavailable "
+        "by purged-calibration / untouched-OOS own-market 15D drawdown audit."
+    )
     return {"available": True, "rows": rows, "summary": summary}
 
 
@@ -3254,273 +2682,95 @@ def build_global_lppl_single_index_validation(
     observations = build_global_lppl_validation_observations(points, clean, drawdown_threshold_pct)
     if not observations:
         return None
-    calibration_grid = [
+    descriptive_calibration_grid = [
         equity_backtest_threshold_test(candidate_threshold, observations, drawdown_threshold_pct, horizon=15)
         for candidate_threshold in (55, 60, 65, 70, 75, 80, 85, 90)
     ]
-    recommended = global_lppl_recommended_threshold(calibration_grid, len(observations))
-    threshold = int(recommended.get("threshold") or GLOBAL_LPPL_ALERT_THRESHOLD)
-    test_15d = equity_backtest_threshold_test(threshold, observations, drawdown_threshold_pct, horizon=15)
-    multiplier, role, role_cn = global_lppl_validation_weight(test_15d)
-    precision = optional_float(test_15d.get("precision"))
-    recall = optional_float(test_15d.get("recall"))
-    payload = {
-        "symbol": symbol,
-        "sourceSymbol": str(index_row.get("sourceSymbol") or symbol),
-        "sampleSize": len(observations),
-        "historyPoints": len(points),
-        "threshold": threshold,
-        "alertDays": int(test_15d.get("alertDays") or 0),
-        "truePositives": int(test_15d.get("truePositives") or 0),
-        "falsePositives": int(test_15d.get("falsePositives") or 0),
-        "precision15d": round(precision, 1) if precision is not None else None,
-        "recall15d": round(recall, 1) if recall is not None else None,
-        "baseRate15d": test_15d.get("baseRate"),
-        "avgMaxDrawdown15dWhenAlert": test_15d.get("avgMaxDrawdownWhenAlert"),
-        "avgDrawdownLeadDaysWhenHit": test_15d.get("avgDrawdownLeadDaysWhenHit"),
-        "effectiveWeightMultiplier": multiplier,
-        "validationRole": role,
-        "validationRoleCn": role_cn,
-        "summary": global_lppl_validation_summary(symbol, test_15d, multiplier, role_cn),
-    }
-    payload.update(global_lppl_oos_validation_fields(observations, drawdown_threshold_pct))
-    return payload
-
-
-def global_lppl_oos_validation_fields(
-    observations: list[dict[str, Any]],
-    drawdown_threshold_pct: float,
-) -> dict[str, Any]:
-    """Out-of-sample audit: the recommended threshold is chosen on the first 65%
-    of the replay and then evaluated only on the untouched last 35%."""
-    split_index = max(1, min(len(observations) - 1, int(len(observations) * SIGNAL_VALIDATION_OOS_SPLIT)))
-    calibration_obs = observations[:split_index]
-    evaluation_obs = observations[split_index:]
-    if len(calibration_obs) < 20 or len(evaluation_obs) < 10:
-        return {"oosAvailable": False}
-    oos_grid = [
-        equity_backtest_threshold_test(candidate_threshold, calibration_obs, drawdown_threshold_pct, horizon=15)
-        for candidate_threshold in (55, 60, 65, 70, 75, 80, 85, 90)
-    ]
-    oos_recommended = global_lppl_recommended_threshold(oos_grid, len(calibration_obs))
-    oos_threshold = int(oos_recommended.get("threshold") or GLOBAL_LPPL_ALERT_THRESHOLD)
-    oos_test = equity_backtest_threshold_test(oos_threshold, evaluation_obs, drawdown_threshold_pct, horizon=15)
-    oos_precision = optional_float(oos_test.get("precision"))
-    oos_recall = optional_float(oos_test.get("recall"))
-    return {
-        "oosAvailable": True,
-        "oosThreshold": oos_threshold,
-        "oosSampleSize": len(evaluation_obs),
-        "oosAlertDays": int(oos_test.get("alertDays") or 0),
-        "precision15dOos": round(oos_precision, 1) if oos_precision is not None else None,
-        "recall15dOos": round(oos_recall, 1) if oos_recall is not None else None,
-        "baseRate15dOos": oos_test.get("baseRate"),
-    }
-
-
-def build_single_index_lppl_history_points(symbol: str, bars: list[MarketDailyBar]) -> list[dict[str, Any]]:
-    if len(bars) < GLOBAL_LPPL_MIN_OBSERVATIONS:
-        return []
-    points: list[dict[str, Any]] = []
-    start_index = GLOBAL_LPPL_MIN_OBSERVATIONS - 1
-    step = max(1, GLOBAL_LPPL_HISTORY_STEP)
-    replay_indices = list(range(start_index, len(bars), step))
-    if replay_indices[-1] != len(bars) - 1:
-        replay_indices.append(len(bars) - 1)
-    spec = {"symbol": symbol, "name": symbol, "region": symbol, "sourceQuality": "validation", "sourceSymbol": symbol}
-    for index in replay_indices:
-        target = bars[index].date
-        row = global_lppl_index_row(spec, bars, as_of=target, fast=True)
-        score = optional_float(row.get("score"))
-        if row.get("available") and score is not None:
-            point = {"date": target.isoformat(), "score": round(bounded_score(score), 1)}
-            for key in (
-                "criticalDate",
-                "daysToCritical",
-                "passesLpplCoreDiagnostics",
-                "passesLpplDiagnostics",
-                "lpplImprovementPct",
-                "oscillationCount",
-            ):
-                if key in row:
-                    point[key] = row[key]
-            points.append(point)
-    return points
-
-
-def build_global_lppl_validation_observations(
-    points: list[dict[str, Any]],
-    bars: list[MarketDailyBar],
-    drawdown_threshold_pct: float,
-) -> list[dict[str, Any]]:
-    index_by_date = {bar.date: index for index, bar in enumerate(bars)}
-    observations: list[dict[str, Any]] = []
-    for point in points:
-        try:
-            point_date = date.fromisoformat(str(point.get("date") or ""))
-        except ValueError:
-            continue
-        score = optional_float(point.get("score"))
-        index = index_by_date.get(point_date)
-        if score is None or index is None or index + 1 >= len(bars):
-            continue
-        row = {"date": point_date.isoformat(), "score": round(bounded_score(score), 1)}
-        for horizon in (5, 10, 15, 20):
-            row[f"forward{horizon}d"] = equity_forward_return_pct(bars, index, horizon)
-            drawdown = equity_forward_max_drawdown_pct(bars, index, horizon)
-            row[f"maxDrawdown{horizon}d"] = drawdown
-            row[f"drawdownEvent{horizon}d"] = drawdown is not None and drawdown <= drawdown_threshold_pct
-            row[f"drawdownLeadDays{horizon}d"] = equity_forward_drawdown_lead_days(bars, index, horizon, drawdown_threshold_pct)
-        observations.append(row)
-    return observations
-
-
-def global_lppl_validation_weight(test_15d: dict[str, Any]) -> tuple[float, str, str]:
-    alert_days = optional_float(test_15d.get("alertDays")) or 0.0
-    precision = optional_float(test_15d.get("precision"))
-    base_rate = optional_float(test_15d.get("baseRate")) or 0.0
-    if alert_days < 3 or precision is None:
-        return 0.75, "thin", "样本偏少"
-    if precision >= max(60.0, base_rate + 15.0):
-        return 1.0, "validated", "验证支持"
-    if precision >= base_rate + 5.0:
-        return 0.85, "mixed", "部分支持"
-    return 0.60, "weak", "历史偏弱"
-
-
-def global_lppl_validation_summary(symbol: str, test_15d: dict[str, Any], multiplier: float, role_cn: str) -> str:
-    return (
-        f"{symbol} own-market 15D audit: threshold {test_15d.get('threshold')}, "
-        f"precision {format_optional_percent_value(test_15d.get('precision'))}, "
-        f"recall {format_optional_percent_value(test_15d.get('recall'))}, "
-        f"false {test_15d.get('falsePositives', 0)}, weight x{multiplier:.2f} ({role_cn})."
+    descriptive_recommended = global_lppl_recommended_threshold(
+        descriptive_calibration_grid,
+        len(observations),
     )
-
-
-def global_lppl_status(score: float, confidence: float) -> tuple[str, str]:
-    if score >= GLOBAL_LPPL_ALERT_THRESHOLD and confidence >= 0.35:
-        return "risk", "泡沫风险"
-    if score >= 45:
-        return "watch", "观察"
-    return "quiet", "低风险"
-
-
-def global_lppl_regime(score: float) -> tuple[str, str]:
-    if score >= 70:
-        return "High Risk", "高风险"
-    if score >= GLOBAL_LPPL_ALERT_THRESHOLD:
-        return "Risk", "泡沫风险"
-    if score >= 45:
-        return "Watch", "观察"
-    return "Quiet", "低风险"
-
-
-def build_global_lppl_backtest(
-    history_points: list[dict[str, Any]],
-    market_bars: list[MarketDailyBar],
-    *,
-    symbol: str = "SPY",
-    threshold: int = GLOBAL_LPPL_ALERT_THRESHOLD,
-    drawdown_threshold_pct: float = -2.0,
-) -> dict[str, Any]:
-    symbol = symbol.upper()
-    clean_bars = normalize_market_bars({symbol: market_bars}).get(symbol, [])
-    if len(clean_bars) < 30 or not history_points:
-        return {"available": False, "sampleSize": 0, "threshold": threshold, "horizonTests": [], "summary": f"{symbol}或LPPL历史样本不足。"}
-    index_by_date = {bar.date: index for index, bar in enumerate(clean_bars)}
-    observations: list[dict[str, Any]] = []
-    for point in history_points:
-        try:
-            point_date = date.fromisoformat(str(point.get("date") or ""))
-        except ValueError:
-            continue
-        score = optional_float(point.get("score"))
-        index = index_by_date.get(point_date)
-        if score is None or index is None or index + 1 >= len(clean_bars):
-            continue
-        row = {"date": point_date.isoformat(), "score": round(bounded_score(score), 1)}
-        for horizon in (5, 10, 15, 20):
-            row[f"forward{horizon}d"] = equity_forward_return_pct(clean_bars, index, horizon)
-            drawdown = equity_forward_max_drawdown_pct(clean_bars, index, horizon)
-            row[f"maxDrawdown{horizon}d"] = drawdown
-            row[f"drawdownEvent{horizon}d"] = drawdown is not None and drawdown <= drawdown_threshold_pct
-            row[f"drawdownLeadDays{horizon}d"] = equity_forward_drawdown_lead_days(clean_bars, index, horizon, drawdown_threshold_pct)
-        observations.append(row)
-    if not observations:
-        return {"available": False, "sampleSize": 0, "threshold": threshold, "horizonTests": [], "summary": f"LPPL历史点没有足够后续{symbol}交易日。"}
-    calibration_grid = [
-        equity_backtest_threshold_test(candidate_threshold, observations, drawdown_threshold_pct, horizon=15)
-        for candidate_threshold in (55, 60, 65, 70, 75, 80, 85, 90)
-    ]
-    recommended_threshold_test = global_lppl_recommended_threshold(calibration_grid, len(observations))
-    threshold = int(recommended_threshold_test.get("threshold") or threshold)
-    horizon_tests = [
-        equity_backtest_threshold_test(threshold, observations, drawdown_threshold_pct, horizon=horizon)
-        for horizon in (5, 10, 15, 20)
-    ]
-    preferred = next((row for row in horizon_tests if row["horizon"] == 15), horizon_tests[-1])
-    alert_cluster_test = equity_backtest_alert_cluster_test(
-        threshold,
+    descriptive_threshold = int(
+        descriptive_recommended.get("threshold") or GLOBAL_LPPL_ALERT_THRESHOLD
+    )
+    descriptive_test_15d = equity_backtest_threshold_test(
+        descriptive_threshold,
         observations,
         drawdown_threshold_pct,
         horizon=15,
     )
-    summary = (
-        f"{symbol} LPPL score≥{threshold}历史告警{preferred.get('alertDays', 0)}次; "
-        f"15D精确率{format_optional_percent_value(preferred.get('precision'))}, "
-        f"误报{preferred.get('falsePositives', 0)}次; "
-        f"最大误报簇{alert_cluster_test.get('maxFalseClusterDays', 0)}个点。"
+    descriptive_multiplier, descriptive_role, descriptive_role_cn = global_lppl_validation_weight(
+        descriptive_test_15d
     )
-    return {
-        "available": True,
-        "sampleSize": len(observations),
+
+    oos_fields = global_lppl_oos_validation_fields(observations, drawdown_threshold_pct)
+    production_available = oos_fields.get("productionEvidenceAvailable") is True
+    threshold = int(
+        optional_float(oos_fields.get("productionThreshold"))
+        or GLOBAL_LPPL_ALERT_THRESHOLD
+    )
+    production_test_15d = (
+        oos_fields.get("oosTest15d")
+        if production_available and isinstance(oos_fields.get("oosTest15d"), dict)
+        else {}
+    )
+    multiplier = optional_float(oos_fields.get("productionEffectiveWeightMultiplier")) or 0.0
+    role = str(oos_fields.get("productionValidationRole") or "unvalidated")
+    role_cn = str(oos_fields.get("productionValidationRoleCn") or "OOS证据不足")
+    precision = optional_float(production_test_15d.get("precision"))
+    recall = optional_float(production_test_15d.get("recall"))
+    payload = {
+        "symbol": symbol,
+        "sourceSymbol": str(index_row.get("sourceSymbol") or symbol),
+        "sampleSize": int(production_test_15d.get("sampleSize") or 0),
+        "historyPoints": len(points),
         "threshold": threshold,
-        "drawdownEvent": f"next 5/10/15/20 trading days max drawdown <= {drawdown_threshold_pct:.1f}%",
-        "horizonTests": horizon_tests,
-        "calibrationGrid": calibration_grid,
-        "recommendedThreshold": recommended_threshold_test,
-        "alertClusterTest": alert_cluster_test,
-        "summary": summary,
+        "alertDays": int(production_test_15d.get("alertDays") or 0),
+        "truePositives": int(production_test_15d.get("truePositives") or 0),
+        "falsePositives": int(production_test_15d.get("falsePositives") or 0),
+        "precision15d": round(precision, 1) if precision is not None else None,
+        "recall15d": round(recall, 1) if recall is not None else None,
+        "baseRate15d": production_test_15d.get("baseRate"),
+        "avgMaxDrawdown15dWhenAlert": production_test_15d.get("avgMaxDrawdownWhenAlert"),
+        "avgDrawdownLeadDaysWhenHit": production_test_15d.get("avgDrawdownLeadDaysWhenHit"),
+        "effectiveWeightMultiplier": multiplier,
+        "validationRole": role,
+        "validationRoleCn": role_cn,
+        "summary": (
+            global_lppl_validation_summary(symbol, production_test_15d, multiplier, role_cn)
+            if production_available
+            else f"{symbol} production validation disabled: untouched OOS evidence is insufficient."
+        ),
+        "descriptiveFullSample": {
+            "productionUse": False,
+            "sampleSize": int(descriptive_test_15d.get("sampleSize") or 0),
+            "threshold": descriptive_threshold,
+            "alertDays": int(descriptive_test_15d.get("alertDays") or 0),
+            "precision15d": descriptive_test_15d.get("precision"),
+            "recall15d": descriptive_test_15d.get("recall"),
+            "baseRate15d": descriptive_test_15d.get("baseRate"),
+            "effectiveWeightMultiplier": descriptive_multiplier,
+            "validationRole": descriptive_role,
+            "validationRoleCn": descriptive_role_cn,
+            "recommendedThreshold": descriptive_recommended,
+            "calibrationGrid": descriptive_calibration_grid,
+            "test15d": descriptive_test_15d,
+        },
     }
+    payload.update(oos_fields)
+    return payload
 
 
-def global_lppl_recommended_threshold(calibration_grid: list[dict[str, Any]], sample_size: int) -> dict[str, Any]:
-    candidates = [
-        row
-        for row in calibration_grid
-        if (optional_float(row.get("alertDays")) or 0.0) >= max(3.0, min(10.0, sample_size / 25.0))
-    ]
-    if not candidates:
-        candidates = [
-            row
-            for row in calibration_grid
-            if (optional_float(row.get("alertDays")) or 0.0) > 0
-        ]
-    if not candidates:
-        return {}
-    base_rate = max(optional_float(row.get("baseRate")) or 0.0 for row in candidates)
-    min_precision = max(45.0, base_rate + 8.0)
-    qualifying = [row for row in candidates if (optional_float(row.get("precision")) or 0.0) >= min_precision]
-    if not qualifying:
-        qualifying = candidates
-
-    def threshold_score(row: dict[str, Any]) -> tuple[float, float, float, float]:
-        precision = optional_float(row.get("precision")) or 0.0
-        recall = optional_float(row.get("recall")) or 0.0
-        alert_days = optional_float(row.get("alertDays")) or 0.0
-        threshold = optional_float(row.get("threshold")) or 0.0
-        return (precision, recall, alert_days, threshold)
-
-    selected = dict(max(qualifying, key=threshold_score))
-    selected.update(
-        {
-            "key": "globalLpplRecommendedThreshold",
-            "label": "LPPL推荐告警阈值",
-            "labelEn": "Global LPPL Recommended Threshold",
-            "useCase": "用历史SPY前瞻回撤验证后选择; 优先提高精确率,再考虑覆盖率。",
-        }
+def build_single_index_lppl_history_points(
+    symbol: str,
+    bars: list[MarketDailyBar],
+) -> list[dict[str, Any]]:
+    """Facade wrapper preserving the patch seam for global_lppl_index_row."""
+    return _lppl_history.build_single_index_lppl_history_points(
+        symbol,
+        bars,
+        row_builder=global_lppl_index_row,
     )
-    return selected
 
 
 def parse_payload_date(value: Any) -> bool:
@@ -3533,11 +2783,22 @@ def parse_payload_date(value: Any) -> bool:
         return False
 
 
-def macro_liquidity_score_at(series: dict[str, list[SeriesPoint]], target: date) -> dict[str, Any] | None:
+def macro_liquidity_score_at(
+    series: dict[str, list[SeriesPoint]] | PreparedBhadialSeries,
+    target: date,
+) -> dict[str, Any] | None:
     row = bhadial_conditions_score_at(series, target)
-    if row is None or row.get("observedFactorCount", 0) < 5:
+    if (
+        row is None
+        or row.get("scoredFactorCount", 0) < 5
+        or float(row.get("effectiveWeightCoverage") or 0.0) < 0.25
+    ):
         return None
-    return {"score": row["score"], "coverage": row["observedFactorCount"]}
+    return {
+        "score": row["score"],
+        "coverage": row["scoredFactorCount"],
+        "effectiveWeightCoverage": row["effectiveWeightCoverage"],
+    }
 
 
 def add_macro_liquidity_equity_deltas(rows: list[dict[str, Any]]) -> None:
@@ -3944,11 +3205,11 @@ def build_percentile_trends(ind: dict[str, Any], auctions: list[dict[str, object
         ("VIX期限结构", "FRED VIXCLS / VXVCLS", "5Y", series.get("vix_term_structure", []), 1, 2, ""),
         ("HY信用利差", "FRED BAMLH0A0HYM2", "5Y", series.get("hy_oas", []), 1, 2, "%"),
         ("HY-IG利差", "FRED HY OAS - IG OAS", "5Y", series.get("hy_ig_oas_spread", []), 1, 1, "bp"),
-        ("HY信用偏好(HY/UST)", "FRED HY TR / DGS10 price proxy", "available up to 5Y", series.get("hy_credit_preference", []), 1, 2, ""),
-        ("IG信用偏好(IG/UST)", "FRED IG TR / DGS10 price proxy", "available up to 5Y", series.get("ig_credit_preference", []), 1, 2, ""),
+        ("HY信用偏好(HY/UST)", "FRED HY TR 63/126D relative return vs DGS10 duration proxy", "available up to 5Y", series.get("hy_credit_preference", []), 1, 2, ""),
+        ("IG信用偏好(IG/UST)", "FRED IG TR 63/126D relative return vs DGS10 duration proxy", "available up to 5Y", series.get("ig_credit_preference", []), 1, 2, ""),
         ("金融条件指数(NFCI)", "FRED NFCI", "5Y", series.get("nfci", []), 1, 2, ""),
         ("银行股相对S&P500", "FRED NASDAQBANK / SP500", "5Y", series.get("regional_bank_vs_market", []), 1, 2, ""),
-        ("风险资产/美债代理", "FRED SP500 / DGS10 price proxy", "5Y", series.get("risk_vs_safe", []), 1, 2, ""),
+        ("风险资产/美债代理", "FRED SP500 63/126D relative return vs DGS10 duration proxy", "5Y", series.get("risk_vs_safe", []), 1, 2, ""),
         ("高Beta偏好(NDX/US500)", "FRED NASDAQXNDX / NASDAQNQUS500LCT", "5Y", series.get("high_beta_preference", []), 1, 2, ""),
         ("美元广义指数", "FRED DTWEXBGS", "5Y", series.get("dxy", []), 1, 2, ""),
         ("美元实现波动率", "FRED DTWEXBGS 63D realized vol", "5Y", series.get("dxy_realized_vol", []), 1, 1, "%"),
@@ -3980,31 +3241,6 @@ def percentile_trend_payload(name: str, source: str, window: str, unit: str, poi
         "change": change,
         "points": points,
     }
-
-
-def auction_percentile_points(auctions: list[dict[str, object]], display_years: int = 3, max_points: int = 52) -> list[dict[str, Any]]:
-    dated: list[tuple[date, float]] = []
-    for auction in auctions:
-        auction_date = parse_dashboard_date(auction.get("auctionDate"))
-        btc = parse_number(auction.get("bidToCoverRatio"))
-        if auction_date is not None and btc is not None and math.isfinite(btc):
-            dated.append((auction_date, btc))
-    dated.sort(key=lambda item: item[0])
-    if not dated:
-        return []
-    display_start = window_start(dated[-1][0], years=display_years)
-    visible_indices = [index for index, item in enumerate(dated) if item[0] >= display_start]
-    sampled_visible_indices = sampled_indices(len(visible_indices), max_points)
-    rows: list[dict[str, Any]] = []
-    for visible_index in sampled_visible_indices:
-        index = visible_indices[visible_index]
-        auction_date, btc = dated[index]
-        values = [item[1] for item in dated[: index + 1]]
-        percentile = historical_percentile(btc, values)
-        if percentile is None:
-            continue
-        rows.append({"date": auction_date.isoformat(), "value": round(btc, 2), "percentile": percentile})
-    return rows
 
 
 def build_percentile_movers(trends: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
@@ -4050,39 +3286,6 @@ def build_percentile_alerts(items: list[dict[str, Any]]) -> list[dict[str, Any]]
     return rows
 
 
-def auction_demand_signal(auctions: list[dict[str, object]]) -> dict[str, Any]:
-    dated: list[tuple[date, float, str]] = []
-    for auction in auctions:
-        auction_date = parse_dashboard_date(auction.get("auctionDate"))
-        btc = parse_number(auction.get("bidToCoverRatio"))
-        if auction_date is None or btc is None:
-            continue
-        security_term = str(auction.get("securityTerm") or auction.get("term") or "").strip()
-        security_type = str(auction.get("securityType") or auction.get("type") or "").strip()
-        label = " ".join(part for part in (security_term, security_type) if part) or "Treasury auction"
-        dated.append((auction_date, btc, label))
-    if not dated:
-        return {
-            "tag": "TreasuryDirect",
-            "label": "待结果",
-            "score": 0,
-            "note": "TreasuryDirect拍卖数据不可用时不填入历史百分位。",
-            "value": "--",
-            "percentile": None,
-        }
-    dated.sort(key=lambda item: item[0])
-    latest_date, latest_btc, latest_label = dated[-1]
-    percentile = historical_percentile(latest_btc, [item[1] for item in dated])
-    score = 1 if percentile is not None and percentile >= 70 else -1 if percentile is not None and percentile <= 30 else 0
-    label = "强劲" if score > 0 else "偏弱" if score < 0 else "中性"
-    return {
-        "tag": f"{latest_label} BTC {latest_btc:.2f} · {percentile_label(percentile)}",
-        "label": label,
-        "score": score,
-        "note": f"TreasuryDirect最新拍卖 {latest_date.isoformat()} bid-to-cover相对可用历史样本的百分位。",
-        "value": f"{latest_btc:.2f}",
-        "percentile": percentile,
-    }
 
 
 def build_auctions(auctions: list[dict[str, object]]) -> list[dict[str, str]]:
@@ -4119,42 +3322,8 @@ def money_billions(raw: str) -> str:
         return "--"
 
 
-def money_billions_value(value: float | None) -> str:
-    if value is None:
-        return "--"
-    return f"${value:.0f}B"
 
 
-def qra_supply_note(refunding: QuarterlyRefunding) -> str:
-    parts = [f"官方QRA {refunding.release_date.isoformat()}"]
-    if refunding.current_quarter_borrowing_billions is not None:
-        parts.append(f"本季借款 {money_billions_value(refunding.current_quarter_borrowing_billions)}")
-    if refunding.next_quarter_borrowing_billions is not None:
-        parts.append(f"下季借款 {money_billions_value(refunding.next_quarter_borrowing_billions)}")
-    if refunding.refunding_new_cash_billions is not None:
-        parts.append(f"refunding新现金 {money_billions_value(refunding.refunding_new_cash_billions)}")
-    if refunding.coupon_stance:
-        parts.append(refunding.coupon_stance)
-    return "; ".join(parts)
-
-
-def parse_number(raw: object) -> float | None:
-    if raw is None:
-        return None
-    try:
-        return float(str(raw).replace(",", "").strip())
-    except ValueError:
-        return None
-
-
-def parse_dashboard_date(raw: object) -> date | None:
-    if raw is None:
-        return None
-    text = str(raw).strip()[:10]
-    try:
-        return datetime.strptime(text, "%Y-%m-%d").date()
-    except ValueError:
-        return None
 
 
 def money_from_raw_dollars(value: float) -> str:
@@ -4165,12 +3334,6 @@ def money_from_raw_dollars(value: float) -> str:
     return f"${value / 1_000_000:.0f}M"
 
 
-def format_yield(raw: str) -> str:
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return "--"
-    return f"{value:.3f}%"
 
 
 def auction_rating(raw_btc: str) -> str:
@@ -4307,6 +3470,16 @@ def primary_dealer_rows(stats: PrimaryDealerStats) -> list[list[str]]:
     return rows or [["Primary dealers", "本期关键指标未披露", stats.as_of.isoformat()]]
 
 
+def format_optional_market_price(value: Any) -> str:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return "--"
+    if not math.isfinite(numeric) or numeric <= 0:
+        return "--"
+    return f"${numeric:.2f}"
+
+
 def build_cross_market(ind: dict[str, Any]) -> dict[str, Any]:
     return {
         "yields": [
@@ -4329,7 +3502,7 @@ def build_cross_market(ind: dict[str, Any]) -> dict[str, Any]:
             ["10年盈亏平衡通胀", f"{ind['breakeven_10y']:.2f}%", "FRED T10YIE"],
             ["10年实际利率", f"{ind['real_10y']:.2f}%", "FRED DFII10"],
             ["WTI 原油", f"${ind['wti']:.2f}", "FRED DCOILWTICO"],
-            ["黄金现货", f"${ind['gold_spot']:.2f}", "Stooq XAUUSD"],
+            ["黄金现货", format_optional_market_price(ind.get("gold_spot")), "Stooq XAUUSD"],
             ["原油/黄金波动", f"OVX {ind['oil_vol']:.2f} / GVZ {ind['gold_vol']:.2f}", "CBOE volatility indexes via FRED"],
         ],
         "historySeries": build_cross_market_history_series(),
@@ -4513,315 +3686,8 @@ def build_news(
     return rows
 
 
-def build_ideas(
-    ind: dict[str, Any],
-    *,
-    macro_liquidity: dict[str, Any] | None = None,
-    macro_liquidity_equity: dict[str, Any] | None = None,
-    quarterly_refunding: QuarterlyRefunding | None = None,
-    conclusion_audit: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
-    liquidity_score = optional_float(macro_liquidity.get("score")) if macro_liquidity else None
-    liquidity_regime = macro_liquidity.get("regime") if macro_liquidity else "待评分"
-    liquidity_text = f"宏观环境评分{liquidity_score:.1f}({liquidity_regime})" if isinstance(liquidity_score, (int, float)) else f"宏观环境{liquidity_regime}"
-    qra_text = "QRA待接入"
-    qra_borrowing = None
-    if quarterly_refunding:
-        qra_borrowing = quarterly_refunding.next_quarter_borrowing_billions
-        next_borrow = money_billions_value(qra_borrowing)
-        next_date = quarterly_refunding.next_policy_statement_date.isoformat() if quarterly_refunding.next_policy_statement_date else "待公布"
-        qra_text = f"QRA下季借款{next_borrow},下一次政策声明{next_date}"
-    inflation_tracker = (
-        f"CPI {ind['cpi_yoy']:.1f}% / PCE {ind['pce_yoy']:.1f}% / "
-        f"核心PCE {ind['core_pce_yoy']:.1f}% / Dallas Trimmed PCE {ind['trimmed_mean_pce_yoy']:.1f}%"
-    )
-    inflation_max = max(ind["cpi_yoy"], ind["pce_yoy"], ind["core_pce_yoy"], ind["trimmed_mean_pce_yoy"], ind["ppi_yoy"])
-    inflation_core_max = max(ind["pce_yoy"], ind["core_pce_yoy"], ind["trimmed_mean_pce_yoy"])
-    inflation_hot = inflation_max >= 3.0
-    inflation_cool = inflation_core_max <= 2.4 and ind["ppi_yoy"] <= 2.5
-    two_year_change = ind["two_year_m1_change_bp"]
-    macro_tight = liquidity_score is not None and liquidity_score < 45
-    qra_supply_heavy = qra_borrowing is not None and qra_borrowing >= 500
-    qra_supply_light = qra_borrowing is not None and qra_borrowing <= 350
-    curve_already_steep = ind["s5s30"] >= 95
-    two_year_vs_effr_bp = (ind["two_year"] - ind["dff"]) * 100
-    cuts_priced = two_year_vs_effr_bp <= -60 and two_year_change <= -25
-    energy_hot = ind["wti"] >= 80 or ind.get("wti_shock", 0.0) >= 0.10
-    energy_soft = ind["wti"] <= 75 or ind.get("wti_shock", 0.0) <= -0.10
-    bei_rich = ind["breakeven_10y"] >= 2.55
-
-    if inflation_cool and two_year_change <= -15 and not macro_tight:
-        duration_idea = {
-            "title": "加回久期",
-            "tag": "LONG 久期",
-            "text": (
-                f"{inflation_tracker}进入反通胀组合,2Y月变动{two_year_change:+.0f}bp显示政策路径向降息重新定价。"
-                f"{liquidity_text}改善了承接环境,可把组合久期逐步加回至基准附近;若核心PCE或Dallas Trimmed PCE重新上行,暂停加仓。"
-            ),
-            "source": "货币政策 · 宏观基本面 · 宏观环境评分",
-        }
-    elif inflation_hot or two_year_change >= 15 or macro_tight:
-        duration_idea = {
-            "title": "战术减久期",
-            "tag": "SHORT 久期",
-            "text": (
-                f"{inflation_tracker}仍对久期不友好,2Y月变动{two_year_change:+.0f}bp显示政策路径重新定价。"
-                f"{liquidity_text}提示承接环境不算宽松,组合久期维持低于基准,等待PCE/核心PCE降温或2Y回落再加回。"
-            ),
-            "source": "货币政策 · 宏观基本面 · 宏观环境评分",
-        }
-    else:
-        duration_idea = {
-            "title": "久期区间防守",
-            "tag": "HOLD 久期",
-            "text": (
-                f"{inflation_tracker}与2Y月变动{two_year_change:+.0f}bp没有形成单边信号。"
-                f"{liquidity_text}要求久期保持接近基准,用PCE/核心PCE和2Y再定价确认下一次方向。"
-            ),
-            "source": "货币政策 · 宏观基本面 · 宏观环境评分",
-        }
-
-    if qra_supply_light and curve_already_steep:
-        curve_idea = {
-            "title": "5s30s转区间交易",
-            "tag": "CURVE 观望",
-            "text": (
-                f"5s30s已在{ind['s5s30']:.0f}bp,{qra_text}; 曲线已充分反映长端供给压力,不追做陡。"
-                "更适合逢陡降风险或用期权表达尾部供给风险,等待QRA重新上修或长端回落后再加仓。"
-            ),
-            "source": "供给与技术面 · QRA · 期限溢价",
-        }
-    elif qra_supply_heavy and curve_already_steep:
-        curve_idea = {
-            "title": "做陡持有但降杠杆",
-            "tag": "CURVE 降杠杆",
-            "text": (
-                f"5s30s当前{ind['s5s30']:.0f}bp,{qra_text}; 供给压力仍在,但曲线已经偏陡。"
-                "保留核心做陡逻辑,同时降低新增追价,用QRA和长端拍卖结果确认是否续持。"
-            ),
-            "source": "供给与技术面 · QRA · 期限溢价",
-        }
-    elif qra_supply_heavy or ind["s5s30"] <= 45:
-        curve_idea = {
-            "title": "做陡 5s30s 曲线",
-            "tag": "CURVE 做陡",
-            "text": (
-                f"5s30s当前{ind['s5s30']:.0f}bp,{qra_text}; 前端由政策锚定,长端更直接承受赤字、息票供给和期限溢价压力。"
-                "若长端空头挤压或QRA低于预期,需要降低做陡敞口。"
-            ),
-            "source": "供给与技术面 · QRA · 期限溢价",
-        }
-    else:
-        curve_idea = {
-            "title": "5s30s轻仓观察",
-            "tag": "CURVE 中性",
-            "text": (
-                f"5s30s当前{ind['s5s30']:.0f}bp,{qra_text}; 供给信号和曲线位置没有给出足够不对称性。"
-                "维持轻仓或用事件驱动交易,等QRA、30Y拍卖和期限溢价方向确认。"
-            ),
-            "source": "供给与技术面 · QRA · 期限溢价",
-        }
-
-    if cuts_priced:
-        front_end_idea = {
-            "title": "前端谨慎 · 降息预期已定价",
-            "tag": "FRONT-END 谨慎",
-            "text": (
-                f"2Y收益率{ind['two_year']:.2f}%已较EFFR低{abs(two_year_vs_effr_bp):.0f}bp,且月变动{two_year_change:+.0f}bp,说明降息预期已经较多反映。"
-                "前端仍可用于防守,但不应简单视作高确定性carry;若就业或核心PCE反弹,前端回撤风险会放大。"
-            ),
-            "source": "货币政策 · SOFR/EFFR · 前端曲线",
-        }
-    elif ind["two_year"] >= 3.0 and ind["sofr"] >= 3.0 and ind["dff"] >= 3.0:
-        front_end_idea = {
-            "title": "前端持有 · 吃 carry",
-            "tag": "LONG 前端",
-            "text": (
-                f"2Y收益率{ind['two_year']:.2f}%,SOFR {ind['sofr']:.2f}%、EFFR {ind['dff']:.2f}%仍提供前端票息。"
-                "相对长端,前端对供给冲击和期限溢价更不敏感,适合作为风险预算内的现金替代。"
-            ),
-            "source": "货币政策 · SOFR/EFFR · 前端曲线",
-        }
-    else:
-        front_end_idea = {
-            "title": "前端中性 · 等待再定价",
-            "tag": "FRONT-END 中性",
-            "text": (
-                f"2Y收益率{ind['two_year']:.2f}%,SOFR {ind['sofr']:.2f}%、EFFR {ind['dff']:.2f}%没有形成明确carry优势。"
-                "前端更适合作为流动性仓位,等待政策路径或资金利率重新拉开风险补偿。"
-            ),
-            "source": "货币政策 · SOFR/EFFR · 前端曲线",
-        }
-
-    if inflation_cool and energy_soft and bei_rich:
-        breakeven_idea = {
-            "title": "降低盈亏平衡通胀",
-            "tag": "RV 降通胀补偿",
-            "text": (
-                f"{inflation_tracker}降温,WTI ${ind['wti']:.2f}未提供能源上行确认,但10Y BEI仍有{ind['breakeven_10y']:.2f}%。"
-                "盈亏平衡通胀的风险回报转弱,更适合减仓或等待能源/核心PCE重新加速。"
-            ),
-            "source": "跨市场 · T10YIE · WTI",
-        }
-    elif inflation_hot and (energy_hot or not bei_rich):
-        breakeven_idea = {
-            "title": "战术做多盈亏平衡通胀",
-            "tag": "RV 通胀",
-            "text": (
-                f"10Y BEI {ind['breakeven_10y']:.2f}%、WTI ${ind['wti']:.2f}共同跟踪通胀补偿。"
-                "若能源冲击或进口价格继续传导,盈亏平衡比名义久期更直接;油价回落或PCE/核心PCE降温是退出信号。"
-            ),
-            "source": "跨市场 · T10YIE · WTI",
-        }
-    elif bei_rich and not inflation_hot:
-        breakeven_idea = {
-            "title": "通胀补偿转防守",
-            "tag": "RV 观望",
-            "text": (
-                f"10Y BEI {ind['breakeven_10y']:.2f}%已经偏高,而{inflation_tracker}没有同步恶化。"
-                "盈亏平衡更适合等待回调后再布局,或只保留小额尾部对冲。"
-            ),
-            "source": "跨市场 · T10YIE · WTI",
-        }
-    else:
-        breakeven_idea = {
-            "title": "小仓位通胀对冲",
-            "tag": "RV 对冲",
-            "text": (
-                f"10Y BEI {ind['breakeven_10y']:.2f}%、WTI ${ind['wti']:.2f}没有形成强单边信号。"
-                "保留小仓位通胀对冲即可,加仓需要能源冲击或PCE/核心PCE重新上行确认。"
-            ),
-            "source": "跨市场 · T10YIE · WTI",
-        }
-    confidence_fields = investment_view_confidence_fields(conclusion_audit)
-    equity_impact = investment_view_equity_impact(macro_liquidity_equity)
-    return [
-        {**idea, "horizon": "3-6M", "horizonCn": "3-6个月", **confidence_fields, "equityImpact": equity_impact}
-        for idea in [
-        duration_idea,
-        curve_idea,
-        front_end_idea,
-        breakeven_idea,
-        ]
-    ]
 
 
-def investment_view_equity_impact(panel: dict[str, Any] | None, *, min_sample: int = 6) -> dict[str, Any]:
-    if not isinstance(panel, dict) or not panel.get("available"):
-        return unavailable_equity_impact("S&P 500历史样本不可用,不形成SPY影响结论。")
-    rows = [row for row in panel.get("series", []) if isinstance(row, dict)]
-    current_signal = panel.get("currentSignal") if isinstance(panel.get("currentSignal"), dict) else {}
-    current_level = str(current_signal.get("levelBucket") or "")
-    current_change = str(current_signal.get("changeBucket") or "")
-    if not rows or not current_level or not current_change:
-        return unavailable_equity_impact("同类宏观环境标签缺失,不形成SPY影响结论。")
-    usable = [
-        row
-        for row in rows
-        if row.get("forward3m") is not None
-        and row.get("score3mChange") is not None
-        and optional_float(row.get("liquidityScore")) is not None
-    ]
-    change_rows = [row for row in usable if optional_float(row.get("score3mChange")) is not None]
-    sample = []
-    for row in usable:
-        level_label = bucket_label_by_rank(rows, "liquidityScore", optional_float(row.get("liquidityScore")), ["低评分", "中位评分", "高评分"])
-        change_label = bucket_label_by_rank(change_rows, "score3mChange", optional_float(row.get("score3mChange")), ["评分下行", "变化不大", "评分上行"])
-        if level_label == current_level and change_label == current_change:
-            sample.append(row)
-    if len(sample) < min_sample:
-        return unavailable_equity_impact(
-            f"历史同类环境样本不足({len(sample)}/{min_sample}),不形成SPY影响结论。"
-        )
-    forward_1m = numeric_values(sample, "forward1m")
-    forward_3m = numeric_values(sample, "forward3m")
-    forward_6m = numeric_values(sample, "forward6m")
-    drawdowns = numeric_values(sample, "forward3mMaxDrawdown")
-    median_3m = median(forward_3m)
-    hit_rate_3m = (sum(1 for value in forward_3m if value > 0) / len(forward_3m)) * 100
-    avg_drawdown = sum(drawdowns) / len(drawdowns) if drawdowns else None
-    confidence = equity_impact_confidence(len(sample), forward_3m, str(current_signal.get("confidence") or ""))
-    tone = "positive" if median_3m > 0.5 and hit_rate_3m >= 55 else "negative" if median_3m < -0.5 and hit_rate_3m <= 45 else "mixed"
-    return {
-        "available": True,
-        "proxy": "S&P 500 price-index proxy for SPY",
-        "basis": "同类宏观评分水平 + 3M评分变化",
-        "levelBucket": current_level,
-        "changeBucket": current_change,
-        "sampleSize": len(sample),
-        "forward1mMedian": round(median(forward_1m), 2) if forward_1m else None,
-        "forward3mMedian": round(median_3m, 2),
-        "forward6mMedian": round(median(forward_6m), 2) if forward_6m else None,
-        "hitRate3m": round(hit_rate_3m),
-        "avgMaxDrawdown3m": round(avg_drawdown, 2) if avg_drawdown is not None else None,
-        "confidence": confidence["key"],
-        "confidenceLabel": confidence["label"],
-        "tone": tone,
-        "summary": (
-            f"历史同类环境下,S&P 500价格指数代理SPY未来3M中位回报{median_3m:+.2f}%,"
-            f"胜率{hit_rate_3m:.0f}%,样本{len(sample)}; 仅为历史统计,不构成方向承诺。"
-        ),
-    }
-
-
-def numeric_values(rows: list[dict[str, Any]], key: str) -> list[float]:
-    values: list[float] = []
-    for row in rows:
-        value = optional_float(row.get(key))
-        if value is not None:
-            values.append(value)
-    return values
-
-
-def investment_view_confidence_fields(conclusion_audit: dict[str, Any] | None) -> dict[str, str]:
-    confidence = conclusion_audit.get("confidence") if isinstance(conclusion_audit, dict) else {}
-    confidence = confidence if isinstance(confidence, dict) else {}
-    level = str(confidence.get("level") or "medium")
-    if level not in {"high", "medium", "low"}:
-        level = "medium"
-    label = {"high": "高可信", "medium": "中等可信", "low": "低可信"}[level]
-    evidence_quality = optional_float(confidence.get("evidenceQuality"))
-    proxy_share = optional_float(confidence.get("proxyContributionShare"))
-    concentration = optional_float(confidence.get("concentration"))
-    note_parts: list[str] = []
-    if evidence_quality is not None:
-        note_parts.append(f"证据质量 {evidence_quality:.2f}")
-    if proxy_share is not None:
-        note_parts.append(f"代理/模型占比 {proxy_share:.0%}")
-    if concentration is not None:
-        note_parts.append(f"单因子集中度 {concentration:.0%}")
-    recommendation = conclusion_audit.get("weightRecommendation") if isinstance(conclusion_audit, dict) else None
-    if isinstance(recommendation, str) and recommendation:
-        note_parts.append(recommendation)
-    return {
-        "confidenceLevel": level,
-        "confidenceLabel": label,
-        "confidenceNote": "; ".join(note_parts) if note_parts else "结论审计暂无异常。",
-    }
-
-
-def direction_word(value: float) -> str:
-    return "多" if value >= 0 else "空"
-
-
-def compact_int(value: float) -> str:
-    if value >= 1_000_000:
-        return f"{value / 1_000_000:.1f}M"
-    if value >= 1_000:
-        return f"{value / 1_000:.0f}k"
-    return f"{value:.0f}"
-
-
-def money_trillions_from_billions(value: float) -> str:
-    return f"${value / 1_000:.2f}T"
-
-
-def money_from_millions(value: float) -> str:
-    if abs(value) >= 1_000_000:
-        return f"${value / 1_000_000:.2f}T"
-    if abs(value) >= 1_000:
-        return f"${value / 1_000:.1f}B"
-    return f"${value:.0f}M"
 
 
 def importance_rank(value: str) -> int:
@@ -4874,4 +3740,3 @@ def apply_content_overrides(dashboard: dict[str, Any], overrides: dict[str, Any]
 
 def rounded(value: float) -> float:
     return round(value, 2)
-

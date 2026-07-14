@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import hashlib
 import http.server
 import json
 import sys
@@ -17,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.update_data import DEFAULT_OUTPUT, run_update  # noqa: E402
+from scripts.update_data import DEFAULT_OUTPUT, failed_output_path, parse_snapshot_generated_at, run_update  # noqa: E402
 from scripts.update_equity_risk import run_equity_update as run_equity_update_only  # noqa: E402
 from treasury_data.build_dashboard import window_start  # noqa: E402
 from treasury_data.history_backfill import backfill_public_history  # noqa: E402
@@ -59,6 +60,79 @@ def previous_weekday(day: date) -> date:
     return cursor
 
 
+def _observed_fixed_holiday(month: int, day: int, year: int) -> date:
+    holiday = date(year, month, day)
+    if holiday.weekday() == 5:
+        return holiday - timedelta(days=1)
+    if holiday.weekday() == 6:
+        return holiday + timedelta(days=1)
+    return holiday
+
+
+def _nth_weekday(year: int, month: int, weekday: int, occurrence: int) -> date:
+    cursor = date(year, month, 1)
+    offset = (weekday - cursor.weekday()) % 7
+    return cursor + timedelta(days=offset + 7 * (occurrence - 1))
+
+
+def _last_weekday(year: int, month: int, weekday: int) -> date:
+    next_month = date(year + (month == 12), 1 if month == 12 else month + 1, 1)
+    cursor = next_month - timedelta(days=1)
+    return cursor - timedelta(days=(cursor.weekday() - weekday) % 7)
+
+
+def _easter_sunday(year: int) -> date:
+    """Gregorian Easter date (Anonymous Gregorian computus)."""
+
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = (h + l - 7 * m + 114) % 31 + 1
+    return date(year, month, day)
+
+
+def us_equity_market_holidays(year: int) -> set[date]:
+    holidays = {
+        _observed_fixed_holiday(1, 1, year),
+        _nth_weekday(year, 1, 0, 3),  # Martin Luther King Jr. Day
+        _nth_weekday(year, 2, 0, 3),  # Washington's Birthday
+        _easter_sunday(year) - timedelta(days=2),
+        _last_weekday(year, 5, 0),  # Memorial Day
+        _observed_fixed_holiday(7, 4, year),
+        _nth_weekday(year, 9, 0, 1),  # Labor Day
+        _nth_weekday(year, 11, 3, 4),  # Thanksgiving
+        _observed_fixed_holiday(12, 25, year),
+    }
+    if year >= 2022:
+        holidays.add(_observed_fixed_holiday(6, 19, year))
+    return holidays
+
+
+def is_us_equity_session(day: date) -> bool:
+    if day.weekday() >= 5:
+        return False
+    # New Year's Day can be observed in the adjacent calendar year.
+    holidays = set().union(*(us_equity_market_holidays(year) for year in (day.year - 1, day.year, day.year + 1)))
+    return day not in holidays
+
+
+def previous_us_equity_session(day: date) -> date:
+    cursor = day - timedelta(days=1)
+    while not is_us_equity_session(cursor):
+        cursor -= timedelta(days=1)
+    return cursor
+
+
 def _ceil_positive_minutes(delta: timedelta) -> int:
     return max(0, int((delta.total_seconds() + 59) // 60))
 
@@ -79,18 +153,18 @@ def equity_bar_timing(
     ny_today = ny_now.date()
     close_time = ny_now.replace(hour=16, minute=0, second=0, microsecond=0)
     ready_time = close_time + timedelta(minutes=after_close_lag_minutes)
-    if ny_today.weekday() >= 5:
-        expected = previous_weekday(ny_today)
+    if not is_us_equity_session(ny_today):
+        expected = previous_us_equity_session(ny_today)
         phase = "non_trading_day"
         minutes_until_expected = None
         minutes_since_expected = None
     elif ny_now < close_time:
-        expected = previous_weekday(ny_today)
+        expected = previous_us_equity_session(ny_today)
         phase = "trading_session"
         minutes_until_expected = _ceil_positive_minutes(ready_time - ny_now)
         minutes_since_expected = None
     elif ny_now < ready_time:
-        expected = previous_weekday(ny_today)
+        expected = previous_us_equity_session(ny_today)
         phase = "post_close_wait"
         minutes_until_expected = _ceil_positive_minutes(ready_time - ny_now)
         minutes_since_expected = None
@@ -103,7 +177,7 @@ def equity_bar_timing(
         "expectedDate": expected,
         "marketDate": ny_today,
         "marketTime": ny_now.isoformat(),
-        "readyAt": ready_time.isoformat() if ny_today.weekday() < 5 else None,
+        "readyAt": ready_time.isoformat() if is_us_equity_session(ny_today) else None,
         "phase": phase,
         "minutesUntilExpected": minutes_until_expected,
         "minutesSinceExpected": minutes_since_expected,
@@ -136,11 +210,21 @@ class NoStoreHandler(http.server.SimpleHTTPRequestHandler):
 
     def end_headers(self) -> None:
         if self.path.startswith("/data/") or self.path.startswith("/api/"):
-            self.send_header("Cache-Control", "no-store")
+            # Permit conditional validation while still requiring clients to
+            # revalidate before using a snapshot.
+            self.send_header("Cache-Control", "private, no-cache, max-age=0")
         super().end_headers()
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/data/dashboard.json":
+            try:
+                body = self.dashboard_output.read_bytes()
+            except OSError as exc:
+                self.write_json_response(500, {"error": str(exc)})
+                return
+            self.write_bytes_response(200, body, "application/json; charset=utf-8")
+            return
         if parsed.path.startswith("/api/history"):
             try:
                 status, payload = history_payload_for_path(parsed.path, self.resolved_history_db_path(), parse_qs(parsed.query))
@@ -148,19 +232,20 @@ class NoStoreHandler(http.server.SimpleHTTPRequestHandler):
                 status = 500
                 payload = {"error": str(exc)}
             body = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self.write_bytes_response(status, body, "application/json; charset=utf-8")
             return
         if parsed.path == "/api/health":
             try:
                 dashboard = read_dashboard_json(self.dashboard_output)
                 payload = build_health_payload(dashboard)
+                normalize_health_source_status(payload, dashboard)
                 history = history_summary(self.resolved_history_db_path())
                 payload["history"] = history
                 warnings = history_backfill_warnings(history)
+                warnings.extend(last_known_good_refresh_warnings(dashboard))
+                rejected_warning = rejected_refresh_warning(self.dashboard_output, dashboard)
+                if rejected_warning is not None:
+                    warnings.append(rejected_warning)
                 risk = dashboard.get("equityShortTermRisk") if isinstance(dashboard.get("equityShortTermRisk"), dict) else {}
                 if risk.get("asOf"):
                     freshness = equity_risk_freshness(
@@ -187,11 +272,7 @@ class NoStoreHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 status = 200
             body = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self.write_bytes_response(status, body, "application/json; charset=utf-8")
             return
         if parsed.path.startswith("/api/"):
             try:
@@ -201,11 +282,7 @@ class NoStoreHandler(http.server.SimpleHTTPRequestHandler):
                 status = 500
                 content_type = "application/json; charset=utf-8"
                 body = json.dumps({"error": str(exc)}, ensure_ascii=False, sort_keys=True).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self.write_bytes_response(status, body, content_type)
             return
         super().do_GET()
 
@@ -274,11 +351,28 @@ class NoStoreHandler(http.server.SimpleHTTPRequestHandler):
 
     def write_json_response(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self.write_bytes_response(status, body, "application/json; charset=utf-8")
+
+    def write_bytes_response(self, status: int, body: bytes, content_type: str) -> None:
+        etag = f'"{hashlib.sha256(body).hexdigest()}"'
+        try:
+            if status == 200 and self.command == "GET" and self.headers.get("If-None-Match") == etag:
+                self.send_response(304)
+                self.send_header("ETag", etag)
+                self.end_headers()
+                return
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("ETag", etag)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # Browsers can abandon an in-flight response during reload, tab close,
+            # or server shutdown. Treat that as a normal client disconnect rather
+            # than surfacing a noisy request-handler traceback.
+            return
 
 
 def read_dashboard_json(path: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
@@ -334,6 +428,102 @@ def history_backfill_warnings(history: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return warnings
+
+
+def normalize_health_source_status(payload: dict[str, Any], dashboard: dict[str, Any]) -> None:
+    """Keep health classification case-insensitive and fail closed on error rows."""
+
+    rows = dashboard.get("sourceStatus") if isinstance(dashboard.get("sourceStatus"), list) else []
+    counts: dict[str, int] = {}
+    errors: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "unknown").strip().lower() or "unknown"
+        counts[status] = counts.get(status, 0) + 1
+        if status == "error":
+            errors.append(row)
+    payload["sourceCounts"] = counts
+    payload["errors"] = errors
+    if errors:
+        payload["status"] = "degraded"
+
+
+def last_known_good_refresh_warnings(dashboard: dict[str, Any]) -> list[dict[str, Any]]:
+    meta = dashboard.get("meta") if isinstance(dashboard.get("meta"), dict) else {}
+    full_blocks = meta.get("lastKnownGoodBlocks") if isinstance(meta.get("lastKnownGoodBlocks"), list) else []
+    equity_meta = meta.get("equityRefresh") if isinstance(meta.get("equityRefresh"), dict) else {}
+    equity_blocks = (
+        equity_meta.get("lastKnownGoodBlocks")
+        if isinstance(equity_meta.get("lastKnownGoodBlocks"), list)
+        else []
+    )
+    block_names = sorted(
+        {
+            str(item.get("key") if isinstance(item, dict) else item)
+            for item in [*full_blocks, *equity_blocks]
+            if (item.get("key") if isinstance(item, dict) else item)
+        }
+    )
+    if not block_names:
+        return []
+    return [
+        {
+            "name": "Last-known-good dashboard blocks",
+            "status": "warning",
+            "latest": ", ".join(block_names),
+            "scope": "refresh_last_known_good",
+        }
+    ]
+
+
+def rejected_refresh_warning(output: Path, dashboard: dict[str, Any]) -> dict[str, Any] | None:
+    """Expose a newer rejected candidate without replacing the healthy snapshot."""
+
+    rejected_path = failed_output_path(output)
+    if not rejected_path.exists():
+        return None
+    try:
+        rejected = read_dashboard_json(rejected_path)
+    except Exception:  # noqa: BLE001 - a corrupt failure artifact is itself health evidence
+        try:
+            is_newer = rejected_path.stat().st_mtime > output.stat().st_mtime
+        except OSError:
+            is_newer = True
+        if not is_newer:
+            return None
+        return {
+            "name": "Latest dashboard refresh",
+            "status": "warning",
+            "latest": "rejected candidate is unreadable",
+            "scope": "refresh_gate",
+        }
+
+    rejected_generated_at = parse_snapshot_generated_at(rejected.get("generatedAt"))
+    served_generated_at = parse_snapshot_generated_at(dashboard.get("generatedAt"))
+    if rejected_generated_at is not None and served_generated_at is not None:
+        if rejected_generated_at <= served_generated_at:
+            return None
+    else:
+        try:
+            if rejected_path.stat().st_mtime <= output.stat().st_mtime:
+                return None
+        except OSError:
+            pass
+
+    meta = rejected.get("meta") if isinstance(rejected.get("meta"), dict) else {}
+    refresh_gate = meta.get("refreshGate") if isinstance(meta.get("refreshGate"), dict) else {}
+    equity_meta = meta.get("equityRefresh") if isinstance(meta.get("equityRefresh"), dict) else {}
+    equity_gate = equity_meta.get("refreshGate") if isinstance(equity_meta.get("refreshGate"), dict) else {}
+    issues = refresh_gate.get("issues") if isinstance(refresh_gate.get("issues"), list) else equity_gate.get("issues")
+    issue_text = "; ".join(str(item) for item in issues[:3]) if isinstance(issues, list) else ""
+    return {
+        "name": "Latest dashboard refresh",
+        "status": "warning",
+        "latest": str(rejected.get("generatedAt") or "rejected candidate"),
+        "scope": "refresh_gate",
+        **({"detail": issue_text} if issue_text else {}),
+    }
 
 
 def default_history_start_date(db_path: Path, years: int) -> str:

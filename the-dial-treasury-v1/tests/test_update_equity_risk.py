@@ -75,7 +75,7 @@ class EquityRiskUpdateTests(unittest.TestCase):
             "sourceStatus": [{"name": "Nasdaq SPY OHLCV", "status": "ok", "latest": "old"}],
         }
         market_bars = {
-            symbol: self.make_bars(symbol, start_price=100 + offset * 5)
+            symbol: self.make_bars(symbol, start_price=100 + offset * 5, days=240)
             for offset, symbol in enumerate(EQUITY_RISK_SYMBOLS)
         }
 
@@ -88,6 +88,8 @@ class EquityRiskUpdateTests(unittest.TestCase):
         risk = updated["equityShortTermRisk"]
         self.assertTrue(risk["available"])
         self.assertTrue(risk["backtest"]["available"])
+        self.assertEqual(risk["trend"]["warmupSessions"], 86)
+        self.assertEqual(risk["trend"]["excludedIncompleteCoreSnapshots"], 0)
         self.assertGreaterEqual(len(risk["trend"]["points"]), 50)
         self.assertGreaterEqual(risk["backtest"]["sampleSize"], 45)
         self.assertEqual(updated["generatedAt"], "2026-06-07T10:30:00+00:00")

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.marcomonitor.invalid/schema/dashboard-v1.schema.json",
+  "title": "MarcoMonitor Treasury Dashboard",
+  "type": "object",
+  "required": ["schemaVersion", "asOf", "generatedAt"],
+  "properties": {
+    "schemaVersion": {"const": "1.0.0"},
+    "asOf": {"type": "string", "minLength": 1},
+    "generatedAt": {"type": "string", "minLength": 1},
+    "sourceStatus": {"type": "array", "items": {"type": "object"}},
+    "curve": {
+      "type": "object",
+      "properties": {"tenors": {"type": "array", "items": {"type": "string"}}},
+      "additionalProperties": true
+    },
+    "groups": {"type": "array"},
+    "ideas": {"type": "array"},
+    "macroLiquidity": {"type": "object"},
+    "macroLiquidityEquity": {"type": "object"},
+    "spyEarlyWarning": {"type": "object"},
+    "equityShortTermRisk": {"type": "object"},
+    "globalLpplRisk": {"type": "object"},
+    "regionalMonitor": {"type": "object"}
+  },
+  "additionalProperties": true
+}

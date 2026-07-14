@@ -5,17 +5,124 @@ from scripts.smoke_check import (
     REQUIRED_EQUITY_COMPONENT_KEYS,
     REQUIRED_EQUITY_PANEL_COMPONENT_KEYS,
     REQUIRED_EQUITY_SOURCE_STATUS_NAMES,
+    has_equity_score_adjustments_contract,
     has_equity_short_term_risk_contract,
+    has_equity_volatility_estimator_audit_contract,
     has_global_lppl_risk_contract,
     has_spy_early_warning_contract,
+    macro_liquidity_reliability_issues,
+    signal_validation_research_issues,
     validate_health_payload,
     validate_dashboard,
 )
 
 
 class SmokeCheckTests(unittest.TestCase):
+    def test_macro_liquidity_reliability_contract_rejects_legacy_factor_rows(self):
+        legacy = {"score": 50.0, "components": [{"id": "x", "score": 50.0}]}
+        self.assertTrue(macro_liquidity_reliability_issues(legacy))
+
+        current = {
+            "score": 50.0,
+            "legacyFixedScore": 50.0,
+            "observedOnlyScore": 51.0,
+            "reliabilityScore": 50.5,
+            "effectiveWeightCoveragePct": 50,
+            "scoredCoveragePct": 48,
+            "components": [{
+                "id": "x",
+                "scoreEligible": True,
+                "observationDate": "2026-07-10",
+                "ageDays": 0,
+                "freshnessStatus": "fresh",
+                "scoringStatus": "scored",
+                "effectiveSampleCount": 60,
+                "minSampleCount": 20,
+                "cadence": "business_daily",
+                "maxAgeDays": 7,
+            }],
+        }
+        self.assertEqual(macro_liquidity_reliability_issues(current), [])
+
+    def test_signal_validation_research_contract_is_fail_closed(self):
+        legacy = {"available": True, "factors": [{"id": "x", "robust": True}]}
+        self.assertTrue(signal_validation_research_issues(legacy))
+
+        current = {
+            "available": True,
+            "validationStatus": "research-validation",
+            "independentHoldout": False,
+            "multipleTesting": {"method": "Benjamini-Hochberg"},
+            "factors": [{
+                "id": "x",
+                "actionableRobust": False,
+                "fdrQValue3m": 0.2,
+                "foldStability3m": {"stablePositive": False},
+                "oosSampleSize3m": 18,
+            }],
+            "composites": [{
+                "id": "spyEarlyWarning",
+                "actionableRobust": False,
+                "fdrQValue3m": 0.4,
+                "foldStability3m": {"stablePositive": False},
+                "oosSampleSize3m": 18,
+            }],
+        }
+        self.assertEqual(signal_validation_research_issues(current), [])
+
+    def test_equity_score_adjustment_contract_reconciles_score_and_rules(self):
+        adjustments = {
+            "baseScore": 70.0,
+            "amplifier": 9.0,
+            "dampener": -14.0,
+            "scoreFloor": 0.0,
+            "adjustedBeforeFloor": 65.0,
+            "floorApplied": False,
+            "finalScore": 65.0,
+            "rules": [
+                {"key": "broadHighRiskBreadth", "label": "多因子高风险共振", "kind": "amplifier", "scoreBoost": 5.0},
+                {"key": "rotationWithoutVolConfirmation", "label": "轮动缺少确认", "kind": "dampener", "scoreOffset": -14.0},
+            ],
+        }
+
+        self.assertTrue(has_equity_score_adjustments_contract(adjustments, score=65.0, base_score=70.0))
+        adjustments["finalScore"] = 66.0
+        self.assertFalse(has_equity_score_adjustments_contract(adjustments, score=65.0, base_score=70.0))
+
+    def test_equity_volatility_estimator_audit_contract_keeps_production_explicit(self):
+        audit = {
+            "available": True,
+            "productionEstimator": "legacyMean",
+            "candidateEstimator": "standardRms",
+            "productionUnchanged": True,
+            "method": "same inputs, different aggregation",
+            "current": {
+                "production": {"riskScore": 60.3, "volComponentScore": 55.0},
+                "candidate": {"riskScore": 61.2, "volComponentScore": 60.0},
+                "riskScoreDelta": 0.9,
+                "volComponentScoreDelta": 5.0,
+            },
+            "backtest": {
+                "production": {"sampleSize": 737, "threshold": 75},
+                "candidate": {"sampleSize": 737, "threshold": 75},
+                "fullPrecisionDelta": 1.2,
+                "oosPrecisionDelta": None,
+                "oosLiftDelta": None,
+                "oosFalsePositiveDelta": 0,
+            },
+            "verdict": "insufficientEvidence",
+            "verdictCn": "证据不足",
+            "recommendedAction": "retainProduction",
+            "summary": "候选OOS告警不足,保留当前口径。",
+        }
+
+        self.assertTrue(has_equity_volatility_estimator_audit_contract(audit, score=60.3))
+        audit["productionUnchanged"] = False
+        self.assertFalse(has_equity_volatility_estimator_audit_contract(audit, score=60.3))
+
     def test_validate_dashboard_accepts_complete_real_public_snapshot(self):
         dashboard = {
+            "schemaVersion": "1.0.0",
             "asOf": "2026-05-19",
             "generatedAt": "2026-05-20T15:30:34+00:00",
             "meta": {"dataMode": "real-public-sources"},
@@ -761,6 +868,22 @@ class SmokeCheckTests(unittest.TestCase):
 
         self.assertEqual(validate_dashboard(dashboard), [])
 
+        equity_backtest = dashboard["equityShortTermRisk"]["backtest"]
+        equity_backtest["highPrecisionThresholdTest"] = {
+            "available": False,
+            "minimumPrecision": 75.0,
+            "reason": "No threshold met the high-precision requirement.",
+        }
+        self.assertTrue(has_equity_short_term_risk_contract(dashboard["equityShortTermRisk"]))
+        equity_backtest["highPrecisionThresholdTest"].pop("reason")
+        self.assertFalse(has_equity_short_term_risk_contract(dashboard["equityShortTermRisk"]))
+
+        lppl_validation_row = dashboard["globalLpplRisk"]["indexValidation"]["rows"][0]
+        lppl_validation_row["effectiveWeightMultiplier"] = 0.0
+        self.assertTrue(has_global_lppl_risk_contract(dashboard["globalLpplRisk"]))
+        lppl_validation_row["effectiveWeightMultiplier"] = -0.1
+        self.assertFalse(has_global_lppl_risk_contract(dashboard["globalLpplRisk"]))
+
     def test_global_lppl_risk_contract_rejects_missing_scores_as_available(self):
         payload = {
             "available": True,
@@ -795,7 +918,7 @@ class SmokeCheckTests(unittest.TestCase):
 
         issues = validate_dashboard(dashboard)
 
-        self.assertIn("equity daily OHLCV source monitoring incomplete", issues[0])
+        self.assertTrue(any("equity daily OHLCV source monitoring incomplete" in issue for issue in issues))
 
     def test_validate_dashboard_reports_non_ok_equity_daily_source_name(self):
         dashboard = {

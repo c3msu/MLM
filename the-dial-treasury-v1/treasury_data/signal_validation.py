@@ -25,6 +25,7 @@ DEFAULT_BOOTSTRAP_SEED = 20260612
 MIN_IC_OBSERVATIONS = 8
 FORWARD_POINT_TOLERANCE_DAYS = 10
 ALERT_EPISODE_GAP_DAYS = 14
+DEFAULT_FDR_ALPHA = 0.10
 
 
 def window_start(end: date, years: int = 5) -> date:
@@ -76,21 +77,49 @@ class SortedSeries:
         return self.values[index] if index is not None else None
 
     def value_at_or_after(self, target: date, *, tolerance_days: int = FORWARD_POINT_TOLERANCE_DAYS) -> float | None:
+        index = self.index_at_or_after(target, tolerance_days=tolerance_days)
+        return self.values[index] if index is not None else None
+
+    def index_at_or_after(self, target: date, *, tolerance_days: int = FORWARD_POINT_TOLERANCE_DAYS) -> int | None:
+        """Return the first observation on/after ``target`` within tolerance.
+
+        Forward labels use this as their completeness gate.  Requiring the
+        calendar-horizon endpoint prevents a one-day tail from being silently
+        reported as a complete 3M outcome while still allowing weekends and
+        market holidays to roll to the next available close.
+        """
         index = bisect_left(self.dates, target)
         if index >= len(self.dates):
             return None
         if self.dates[index] > target + timedelta(days=tolerance_days):
             return None
-        return self.values[index]
+        return index
 
-    def percentile_at(self, target: date, *, years: int = 5) -> int | None:
+    def percentile_with_sample_count_at(
+        self,
+        target: date,
+        *,
+        years: int = 5,
+    ) -> tuple[int | None, int]:
+        """Return the trailing percentile and its finite point count as of ``target``.
+
+        Validation replays need the count as well as the percentile so they can
+        apply the same explicit warm-up gate as the live Conditions scorer.  The
+        lookup stays point-in-time: neither the current value nor the trailing
+        sample can include an observation dated after ``target``.
+        """
         end_index = self.index_at_or_before(target)
         if end_index is None:
-            return None
+            return None, 0
         start_index = bisect_left(self.dates, window_start(target, years=years))
         if start_index > end_index:
             start_index = end_index
-        return rank_percentile(self.values[end_index], self.values[start_index : end_index + 1])
+        sample = self.values[start_index : end_index + 1]
+        return rank_percentile(self.values[end_index], sample), len(sample)
+
+    def percentile_at(self, target: date, *, years: int = 5) -> int | None:
+        percentile, _ = self.percentile_with_sample_count_at(target, years=years)
+        return percentile
 
     def forward_return_pct(self, start: date, *, days: int) -> float | None:
         current = self.value_at_or_before(start)
@@ -104,8 +133,10 @@ class SortedSeries:
         if start_index is None or self.values[start_index] == 0:
             return None
         end = start + timedelta(days=days)
-        end_index = bisect_right(self.dates, end)
-        future_values = self.values[start_index + 1 : end_index]
+        endpoint_index = self.index_at_or_after(end)
+        if endpoint_index is None or endpoint_index <= start_index:
+            return None
+        future_values = self.values[start_index + 1 : endpoint_index + 1]
         if not future_values:
             return None
         return min(0.0, (min(future_values) / self.values[start_index] - 1) * 100)
@@ -115,8 +146,10 @@ class SortedSeries:
         if start_index is None:
             return None
         end = start + timedelta(days=days)
-        end_index = bisect_right(self.dates, end)
-        window = range(start_index + 1, end_index)
+        endpoint_index = self.index_at_or_after(end)
+        if endpoint_index is None or endpoint_index <= start_index:
+            return None
+        window = range(start_index + 1, endpoint_index + 1)
         if not window:
             return None
         trough_index = min(window, key=lambda index: self.values[index])
@@ -185,6 +218,152 @@ def spearman_ic(signal_values: list[float | None], forward_returns: list[float |
     if len(pairs) < min_observations:
         return None
     return pearson_correlation(average_ranks([pair[0] for pair in pairs]), average_ranks([pair[1] for pair in pairs]))
+
+
+def approximate_correlation_p_value(correlation: float | None, sample_size: int) -> float | None:
+    """Two-sided large-sample p-value used only for multiple-test diagnostics.
+
+    The bootstrap interval remains the primary uncertainty estimate.  Fisher's
+    z approximation gives the factor family a common statistic for BH/FDR
+    correction without introducing a heavy scientific-Python dependency.
+    """
+    if correlation is None or sample_size < 4 or not math.isfinite(correlation):
+        return None
+    bounded = max(-0.999999, min(0.999999, float(correlation)))
+    z_score = abs(math.atanh(bounded)) * math.sqrt(sample_size - 3)
+    return max(0.0, min(1.0, math.erfc(z_score / math.sqrt(2.0))))
+
+
+def apply_benjamini_hochberg(
+    rows: list[dict[str, Any]],
+    *,
+    p_key: str = "pValue3m",
+    alpha: float = DEFAULT_FDR_ALPHA,
+    family_size: int | None = None,
+) -> None:
+    """Attach monotone BH q-values and a conservative actionable verdict.
+
+    ``family_size`` is the pre-registered hypothesis count.  It may exceed the
+    number of reportable rows when one or more inputs lack enough history; those
+    unavailable hypotheses remain in the multiplicity denominator as implicit
+    p-values of one instead of shrinking the family after observing coverage.
+    """
+    indexed = []
+    missing_p_value: set[int] = set()
+    for index, row in enumerate(rows):
+        raw_p_value = row.get(p_key)
+        if isinstance(raw_p_value, (int, float)) and math.isfinite(float(raw_p_value)):
+            p_value = max(0.0, min(1.0, float(raw_p_value)))
+        else:
+            # The family is pre-registered.  An unavailable test remains in its
+            # multiplicity denominator as p=1 instead of making the remaining
+            # rows look more significant by shrinking the family post hoc.
+            p_value = 1.0
+            missing_p_value.add(index)
+        indexed.append((index, p_value))
+    ranked = sorted(indexed, key=lambda item: item[1])
+    count = max(len(ranked), int(family_size or 0))
+    adjusted: dict[int, float] = {}
+    running = 1.0
+    # Implicit unavailable hypotheses all have p=1 and sort after the reported
+    # rows, so they initialize the reverse monotonic pass at one without
+    # needing materialized placeholder rows.
+    for rank_index in range(len(ranked) - 1, -1, -1):
+        original_index, p_value = ranked[rank_index]
+        rank = rank_index + 1
+        running = min(running, p_value * count / rank)
+        adjusted[original_index] = max(0.0, min(1.0, running))
+    for index, row in enumerate(rows):
+        q_value = adjusted.get(index)
+        row["fdrFamilySize"] = count
+        row["fdrAlpha"] = alpha
+        row["fdrQValue3m"] = round(q_value, 4) if q_value is not None else None
+        row["fdrSignificant3m"] = bool(
+            index not in missing_p_value
+            and q_value is not None
+            and q_value <= alpha
+        )
+        fold_stability = row.get("foldStability3m") if isinstance(row.get("foldStability3m"), dict) else {}
+        row["actionableRobust"] = bool(
+            row.get("robust")
+            and row["fdrSignificant3m"]
+            and fold_stability.get("stablePositive")
+        )
+
+
+def fold_ic_stability(
+    signal_points: list[SeriesPoint],
+    price_points: list[SeriesPoint],
+    *,
+    horizon_days: int = 91,
+    direction: str = "higher_risk",
+    folds: int = 3,
+    initial_fraction: float = DEFAULT_OOS_SPLIT,
+    oos_start_date: date | None = None,
+) -> dict[str, Any]:
+    """Report contiguous evaluation-fold stability for a fixed signal definition.
+
+    This is deliberately labelled a stability diagnostic, not an independent
+    holdout: factor definitions and weights may have been informed by earlier
+    research.  Each fold is evaluated separately so one favorable tail slice
+    cannot hide sign reversals.
+    """
+    signal = SortedSeries(signal_points)
+    prices = SortedSeries(price_points)
+    observations = [
+        (signal_date, signal_value, prices.forward_return_pct(signal_date, days=horizon_days))
+        for signal_date, signal_value in zip(signal.dates, signal.values)
+    ]
+    observations = [row for row in observations if row[2] is not None and math.isfinite(float(row[2]))]
+    if len(observations) < MIN_IC_OBSERVATIONS * 2:
+        return {"available": False, "reason": "sample too small", "folds": []}
+    if oos_start_date is None:
+        start = max(MIN_IC_OBSERVATIONS, int(len(observations) * initial_fraction))
+    else:
+        start = bisect_left([row[0] for row in observations], oos_start_date)
+    evaluation = observations[start:]
+    if len(evaluation) < MIN_IC_OBSERVATIONS:
+        return {"available": False, "reason": "evaluation sample too small", "folds": []}
+    fold_count = max(2, min(folds, len(evaluation) // MIN_IC_OBSERVATIONS))
+    base_size, remainder = divmod(len(evaluation), fold_count)
+    cursor = 0
+    fold_rows: list[dict[str, Any]] = []
+    for index in range(fold_count):
+        size = base_size + (1 if index < remainder else 0)
+        sample = evaluation[cursor : cursor + size]
+        cursor += size
+        raw_ic = spearman_ic([row[1] for row in sample], [row[2] for row in sample])
+        oriented = oriented_ic(raw_ic, direction)
+        fold_rows.append(
+            {
+                "fold": index + 1,
+                "start": sample[0][0].isoformat(),
+                "end": sample[-1][0].isoformat(),
+                "sampleSize": len(sample),
+                "ic": round_optional(oriented),
+            }
+        )
+    finite_ics = [float(row["ic"]) for row in fold_rows if row.get("ic") is not None]
+    if not finite_ics:
+        return {"available": False, "reason": "fold IC unavailable", "folds": fold_rows}
+    positive = sum(1 for value in finite_ics if value > 0)
+    sign_consistency = positive / len(finite_ics)
+    return {
+        "available": True,
+        "horizonDays": horizon_days,
+        "oosStartDate": oos_start_date.isoformat() if oos_start_date is not None else evaluation[0][0].isoformat(),
+        "initialResearchPct": round(start / len(observations) * 100, 1),
+        "foldCount": len(finite_ics),
+        "medianIc": round_optional(float(median(finite_ics))),
+        "worstIc": round_optional(min(finite_ics)),
+        "positiveFoldPct": round(sign_consistency * 100, 1),
+        "stablePositive": bool(
+            len(finite_ics) >= 2
+            and median(finite_ics) > 0
+            and positive == len(finite_ics)
+        ),
+        "folds": fold_rows,
+    }
 
 
 def block_bootstrap_ci(
@@ -317,6 +496,7 @@ def evaluate_signal(
     drawdown_horizon_days: int = 91,
     alert_percentile: float = 80.0,
     bootstrap_horizon_days: int = 91,
+    oos_start_date: date | None = None,
 ) -> dict[str, Any]:
     signal = SortedSeries(signal_points)
     prices = SortedSeries(price_points)
@@ -331,42 +511,53 @@ def evaluate_signal(
         row["forwardDrawdown"] = prices.forward_max_drawdown_pct(signal_date, days=drawdown_horizon_days)
         observations.append(row)
 
-    split_index = max(1, min(len(observations) - 1, int(len(observations) * oos_split)))
+    if oos_start_date is None:
+        split_index = max(1, min(len(observations) - 1, int(len(observations) * oos_split)))
+    else:
+        split_index = bisect_left(signal.dates, oos_start_date)
     calibration = observations[:split_index]
     evaluation = observations[split_index:]
 
     horizon_rows: list[dict[str, Any]] = []
     for horizon in horizons:
         key = f"forward{horizon}"
-        raw_full = spearman_ic([row["signal"] for row in observations], [row[key] for row in observations])
-        raw_calibration = spearman_ic([row["signal"] for row in calibration], [row[key] for row in calibration])
-        raw_oos = spearman_ic([row["signal"] for row in evaluation], [row[key] for row in evaluation])
+        full_pairs = finite_pairs([row["signal"] for row in observations], [row[key] for row in observations])
+        calibration_pairs = finite_pairs([row["signal"] for row in calibration], [row[key] for row in calibration])
+        oos_pairs = finite_pairs([row["signal"] for row in evaluation], [row[key] for row in evaluation])
+        raw_full = spearman_ic([row[0] for row in full_pairs], [row[1] for row in full_pairs])
+        raw_calibration = spearman_ic([row[0] for row in calibration_pairs], [row[1] for row in calibration_pairs])
+        raw_oos = spearman_ic([row[0] for row in oos_pairs], [row[1] for row in oos_pairs])
+        spacing = typical_spacing_days(signal.dates)
+        overlap_block_len = max(1, int(round(horizon / max(spacing, 1.0))))
         horizon_row: dict[str, Any] = {
             "days": horizon,
             "ic": round_optional(oriented_ic(raw_full, direction)),
             "icCalibration": round_optional(oriented_ic(raw_calibration, direction)),
             "icOos": round_optional(oriented_ic(raw_oos, direction)),
+            "sampleSize": len(full_pairs),
+            "calibrationSampleSize": len(calibration_pairs),
+            "oosSampleSize": len(oos_pairs),
+            "overlapBlockLength": overlap_block_len,
+            "oosEffectiveSampleSize": max(3, math.ceil(len(oos_pairs) / overlap_block_len)) if oos_pairs else 0,
         }
         if horizon == bootstrap_horizon_days:
-            spacing = typical_spacing_days(signal.dates)
-            block_len = max(1, int(round(horizon / max(spacing, 1.0))))
-            pairs = finite_pairs([row["signal"] for row in observations], [row[key] for row in observations])
-            interval = block_bootstrap_ci(pairs, block_len=block_len)
+            block_len = overlap_block_len
+            interval = block_bootstrap_ci(full_pairs, block_len=block_len)
             if interval is not None:
                 horizon_row["ci"] = oriented_interval(interval, direction)
             # OOS-aligned CI: bootstrap ONLY the out-of-sample slice so the interval
-            # qualifies the headline icOos rather than the full-sample IC. robustOos is
-            # True only when this OOS CI excludes zero (the IC is statistically
-            # distinguishable from no-skill on held-out data — guards against reading a
-            # noisy single-slice point estimate as real predictive power).
-            oos_pairs = finite_pairs([row["signal"] for row in evaluation], [row[key] for row in evaluation])
+            # qualifies the headline icOos rather than the full-sample IC.  Because ICs
+            # are already oriented so positive means useful, a wholly negative interval
+            # is statistically non-zero but explicitly wrong-way, never "robust".
             oos_interval = block_bootstrap_ci(oos_pairs, block_len=block_len)
             if oos_interval is not None:
                 ci_oos = oriented_interval(oos_interval, direction)
                 horizon_row["ciOos"] = ci_oos
                 low, high = ci_oos
                 if low is not None and high is not None:
-                    horizon_row["robustOos"] = bool(low > 0 or high < 0)
+                    horizon_row["statisticallyNonzeroOos"] = bool(low > 0 or high < 0)
+                    horizon_row["wrongWayOos"] = bool(high < 0)
+                    horizon_row["robustOos"] = bool(low > 0)
             regime = regime_conditional_split(observations, key, prices, direction=direction, block_len=block_len)
             if regime is not None:
                 horizon_row["regimeSplit"] = regime
@@ -390,6 +581,8 @@ def evaluate_signal(
         "calibrationCount": len(calibration),
         "evaluationCount": len(evaluation),
         "oosSplit": oos_split,
+        "oosStartDate": oos_start_date.isoformat() if oos_start_date is not None else evaluation[0]["date"].isoformat(),
+        "evaluationStartDate": evaluation[0]["date"].isoformat() if evaluation else None,
         "horizons": horizon_rows,
         "alert": alert,
     }
@@ -690,6 +883,7 @@ def signal_validation_metric_row(
     direction: str,
     drawdown_threshold_pct: float = SIGNAL_VALIDATION_DRAWDOWN_PCT,
     drawdown_horizon_days: int = SIGNAL_VALIDATION_DRAWDOWN_DAYS,
+    oos_start_date: date | None = None,
 ) -> dict[str, Any] | None:
     if len(signal_points) < MIN_SIGNAL_VALIDATION_POINTS:
         return None
@@ -701,6 +895,7 @@ def signal_validation_metric_row(
         direction=direction,
         drawdown_threshold_pct=drawdown_threshold_pct,
         drawdown_horizon_days=drawdown_horizon_days,
+        oos_start_date=oos_start_date,
     )
     if not evaluation.get("available"):
         return None
@@ -722,6 +917,17 @@ def signal_validation_metric_row(
         ]
     forward_ic = max(forward_candidates, key=abs) if forward_candidates else None
     alert = evaluation.get("alert", {})
+    horizon_3m = horizons.get(91, {})
+    oos_ic_3m = horizon_3m.get("icOos")
+    oos_sample_size_3m = int(horizon_3m.get("oosSampleSize") or 0)
+    oos_effective_sample_size_3m = int(horizon_3m.get("oosEffectiveSampleSize") or 0)
+    fold_stability = fold_ic_stability(
+        signal_points,
+        price_points,
+        horizon_days=91,
+        direction=direction,
+        oos_start_date=oos_start_date,
+    )
     return {
         "id": row_id,
         "label": label,
@@ -729,15 +935,28 @@ def signal_validation_metric_row(
         "module": module,
         "direction": direction,
         "observationCount": evaluation["observationCount"],
+        "calibrationCount": evaluation["calibrationCount"],
+        "evaluationCount": evaluation["evaluationCount"],
+        "oosStartDate": evaluation.get("oosStartDate"),
         "ic1w": horizons.get(7, {}).get("ic"),
         "ic1m": horizons.get(30, {}).get("ic"),
         "ic3m": horizons.get(91, {}).get("ic"),
         "oosIc1m": horizons.get(30, {}).get("icOos"),
-        "oosIc3m": horizons.get(91, {}).get("icOos"),
+        "oosIc3m": oos_ic_3m,
+        "oosSampleSize3m": oos_sample_size_3m,
+        "oosEffectiveSampleSize3m": oos_effective_sample_size_3m,
+        "pValue3m": round_optional(
+            approximate_correlation_p_value(oos_ic_3m, oos_effective_sample_size_3m),
+            digits=4,
+        ),
+        "pValue3mMethod": "Fisher z with horizon-overlap effective sample size",
         "ci3m": horizons.get(91, {}).get("ci"),
         "oosCi3m": horizons.get(91, {}).get("ciOos"),
         "robust": horizons.get(91, {}).get("robustOos"),
+        "statisticallyNonzero": horizons.get(91, {}).get("statisticallyNonzeroOos"),
+        "wrongWay": horizons.get(91, {}).get("wrongWayOos"),
         "regimeSplit": horizons.get(91, {}).get("regimeSplit"),
+        "foldStability3m": fold_stability,
         "hitRateOos": alert.get("oosHitRate"),
         "baseRate": alert.get("baseRate"),
         "lift": alert.get("lift"),
