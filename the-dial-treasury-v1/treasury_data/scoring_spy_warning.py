@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from .sources import SeriesPoint, TimeSeries
+from .dashboard_contract import CURRENT_SPY_WARNING_RULES_VERSION
 from .dashboard_core import *  # noqa: F401,F403
 from .series_math import *  # noqa: F401,F403
 from .signal_validation import SortedSeries
@@ -20,35 +21,35 @@ SPY_WARNING_COMPONENT_SLEEVES: list[dict[str, Any]] = [
         "key": "liquidityStress",
         "label": "流动性压力",
         "weight": 0.16,
-        "weightBasis": "领先(OOS IC 3M +0.38): Fed净流动性/准备金领先股市数周; 2026-06-13上调0.10→0.16",
+        "weightBasis": "2026-06-19 prior-spec research audit reported positive 3M OOS IC; retained as a fixed research weight pending fresh v3 validation.",
         "componentIds": ["fed_net_liquidity", "delta_net_liq_13w", "tga_dev_signed"],
     },
     {
         "key": "fundingStress",
         "label": "融资压力",
         "weight": 0.24,
-        "weightBasis": "稳健领先(OOS CI[0.24,0.56]排除0, lift 1.62, 提前90日): 融资市场先于股市收紧; 2026-06-19上调0.14→0.24",
+        "weightBasis": "2026-06-19 prior-spec research audit reported a positive OOS interval; retained as a fixed research weight pending fresh v3 validation.",
         "componentIds": ["corridor_friction_1", "cp_tbill_spread", "fragmentation_21d"],
     },
     {
         "key": "ratesCurveStress",
         "label": "利率/曲线压力",
         "weight": 0.30,
-        "weightBasis": "稳健领先(OOS CI[0.13,0.55]排除0): 真实曲线/期限溢价领先股市; 2026-06-19上调0.20→0.30",
+        "weightBasis": "2026-06-19 prior-spec research audit reported a positive OOS interval; retained as a fixed research weight pending fresh v3 validation.",
         "componentIds": ["dgs30_dgs10", "dgs10_vol_21d", "curve_curvature_abs", "real_curve", "t10yie"],
     },
     {
         "key": "creditVolStress",
         "label": "信用/波动压力(同步上下文)",
         "weight": 0.0,
-        "weightBasis": "稳健反向(OOS CI[-0.78,-0.20]整体<0): VIX/OAS/NFCI是同步-反指(回撤中后才飙升),结构上不适合做前瞻预警→2026-06-19从前瞻聚合剔除(权重0),仅作\"当前压力\"上下文展示",
+        "weightBasis": "2026-06-19 prior-spec research audit found this sleeve coincident/anti-predictive; weight remains zero and the sleeve is context-only pending fresh v3 validation.",
         "componentIds": ["nfci", "hy_credit", "vix", "vix_term_structure", "risk_vs_safe"],
     },
     {
         "key": "externalShock",
         "label": "外部冲击",
         "weight": 0.10,
-        "weightBasis": "连续IC弱但告警版lift 1.62; 权重维持0.10",
+        "weightBasis": "Prior-spec research found weak continuous IC but some alert lift; retained at a fixed 0.10 pending fresh v3 validation.",
         "componentIds": ["dxy", "fx_vol", "wti", "ovx_dev", "natgas"],
     },
 ]
@@ -72,7 +73,7 @@ SPY_WARNING_FRAGILE_LOW_SCORE_BOOST = 0.0
 SPY_WARNING_RALLY_FRAGILITY_BOOST = 3.0
 
 
-SPY_WARNING_RULES_VERSION = "2026-06-12-v2"
+SPY_WARNING_RULES_VERSION = CURRENT_SPY_WARNING_RULES_VERSION
 
 
 def build_spy_early_warning(
@@ -97,6 +98,12 @@ def spy_early_warning_snapshot(macro_liquidity: dict[str, Any], macro_liquidity_
     components = [item for item in macro_liquidity.get("components", []) if isinstance(item, dict)]
     if not components:
         return unavailable_spy_early_warning("宏观环境分项缺失,暂不能生成SPY预警指标。")
+    # A coverage-shrunk Conditions score of 50 means unknown, not observed
+    # neutrality. Keep the compatibility score as the replay-calibrated scale,
+    # but require its coverage contract to be decision-usable before publishing
+    # a warning score or numeric allocation.
+    if bhadial_usable_reliability_score(macro_liquidity) is None:
+        return unavailable_spy_early_warning("宏观因子有效覆盖不足,暂不能生成可执行SPY预警指标。")
     component_by_id = {str(item.get("id")): item for item in components if item.get("id") is not None}
     current_signal = macro_liquidity_equity.get("currentSignal", {}) if isinstance(macro_liquidity_equity, dict) else {}
     sleeves: list[dict[str, Any]] = [
@@ -127,11 +134,14 @@ def spy_early_warning_snapshot(macro_liquidity: dict[str, Any], macro_liquidity_
     return {
         "available": True,
         "title": "SPY Early Warning Index",
+        "rulesVersion": SPY_WARNING_RULES_VERSION,
+        "scoreUse": "research_only",
+        "actionable": False,
         "score": round(score, 1),
         "baseScore": round(base_score, 1),
         "regime": allocation["regime"],
         "regimeCn": allocation["regimeCn"],
-        "method": "Equity-specific 0-100 warning index from existing macro Conditions Score components plus 3M score deterioration and calibrated nonlinear risk amplifiers; higher means greater SPY/SPX drawdown risk. Sleeve weights restructured 2026-06-19 on OOS-aligned bootstrap robustness: creditVolStress is robustly anti-predictive/coincident (OOS CI entirely <0) so it is EXCLUDED from the forward aggregate (weight 0, shown as current-stress context); the robustly-leading fundingStress & ratesCurveStress carry the freed weight; macroDeterioration (lagging-derived) demoted — see each sleeve's weightBasis. Weights remain quasi-in-sample (the OOS slice motivated them); revalidate on fresh data and do not cite the aggregate's post-restructure OOS as independent confirmation.",
+        "method": "Equity-specific 0-100 research warning index from eligible macro Conditions Score components plus 3M score deterioration and fixed nonlinear rules; higher means greater SPY/SPX drawdown risk. Weights were informed by a prior-spec 2026-06-19 research audit, keep creditVolStress at zero as context, and are not independent evidence for the current rulesVersion. Only the separately published current signalValidation contract may promote an allocation; otherwise this score and its band remain research context.",
         "asOf": str(current_signal.get("date") or macro_liquidity_equity.get("asOf") if isinstance(macro_liquidity_equity, dict) else ""),
         "summary": summary,
         "allocation": allocation,
@@ -151,6 +161,12 @@ def spy_early_warning_snapshot(macro_liquidity: dict[str, Any], macro_liquidity_
         "dampeners": dampeners,
         "drivers": drivers,
         "backtest": spy_warning_backtest_payload(macro_liquidity_equity),
+        "inputEvidence": {
+            "effectiveWeightCoveragePct": optional_float(macro_liquidity.get("effectiveWeightCoveragePct")),
+            "scoredFactorCount": int(macro_liquidity.get("scoredFactorCount") or 0),
+            "coverageGatePassed": True,
+            "componentEligibility": "Only scoreEligible factors enter explicit-contract sleeves; legacy fixtures without eligibility metadata remain compatible.",
+        },
     }
 
 
@@ -158,6 +174,9 @@ def unavailable_spy_early_warning(reason: str) -> dict[str, Any]:
     return {
         "available": False,
         "title": "SPY Early Warning Index",
+        "rulesVersion": SPY_WARNING_RULES_VERSION,
+        "scoreUse": "unavailable",
+        "actionable": False,
         "score": None,
         "regime": "Unavailable",
         "regimeCn": "不可用",
@@ -269,10 +288,15 @@ def build_spy_early_warning_trend(
 
 def spy_macro_liquidity_snapshot_at(series: dict[str, list[SeriesPoint]], target: date) -> dict[str, Any] | None:
     score_row = bhadial_conditions_score_at(series, target, include_components=True)
-    if score_row is None or int(score_row.get("observedFactorCount", 0)) < 5:
+    if score_row is None or bhadial_usable_reliability_score(score_row) is None:
         return None
     return {
         "score": round(float(score_row["score"]), 1),
+        "reliabilityScore": round(float(score_row["reliabilityScore"]), 1),
+        "effectiveWeightCoverage": float(score_row["effectiveWeightCoverage"]),
+        "effectiveWeightCoveragePct": round(100 * float(score_row["effectiveWeightCoverage"]), 1),
+        "scoredFactorCount": int(score_row["scoredFactorCount"]),
+        "scoreContract": "legacy-fixed-weight-compatible",
         "components": spy_components_from_bhadial_score_row(score_row),
     }
 
@@ -301,6 +325,10 @@ def spy_components_from_bhadial_score_row(score_row: dict[str, Any]) -> list[dic
                     "remoteName": str(spec["remoteName"]),
                     "name": str(spec["name"]),
                     "score": round(component_score, 1),
+                    "observed": raw.get("observed") is True,
+                    "scoreEligible": raw.get("scoreEligible") is True,
+                    "freshnessStatus": str(raw.get("freshnessStatus") or "unavailable"),
+                    "scoringStatus": str(raw.get("scoringStatus") or "unavailable"),
                     "value": "",
                     "source": str(spec["source"]),
                 }
@@ -527,6 +555,10 @@ def build_spy_component_sleeve(spec: dict[str, Any], component_by_id: dict[str, 
         component = component_by_id.get(str(component_id))
         if component is None:
             continue
+        # Modern payloads distinguish observed neutral evidence from an
+        # unavailable/stale factor whose compatibility placeholder is 50.
+        if component.get("scoreEligible") is False:
+            continue
         component_score = optional_float(component.get("score"))
         if component_score is None:
             continue
@@ -673,10 +705,12 @@ def spy_warning_backtest_payload(macro_liquidity_equity: dict[str, Any] | None) 
         "target": "3M SPX drawdown and negative forward-return warning",
         "sample": "Monthly 5Y S&P 500 price-index proxy observations",
         "sampleSize": observation_count,
+        "validationStatus": "research-only",
+        "rulesVersion": SPY_WARNING_RULES_VERSION,
         "evidence": [
-            "score>45 and 3M score change<=-2.9 historically isolated the weakest forward-return state better than low score alone",
-            "VIX, CP-TBill, curve inversion, WTI/oil-volatility shock, and NFCI ranked highest in simple 3M drawdown diagnostics",
-            "The signal is a risk control overlay, not a standalone return forecast",
+            "The current score is replayed under one rulesVersion with point-in-time factor eligibility and a fixed 3M endpoint.",
+            "Weights and nonlinear rules were informed by earlier research, so this block is not an independent holdout or production proof.",
+            "The signal is a risk-control overlay, not a standalone return forecast; production action requires the separate current signalValidation gate.",
         ],
     }
 
@@ -718,9 +752,13 @@ def build_spy_warning_rule_audit(
         scored = [(target, event) for target, event in scored if event is not None]
         hit_rate = (sum(1 for _, event in scored if event) / len(scored)) if scored else None
         lift = (hit_rate / base_rate) if hit_rate is not None and base_rate else None
+        # Compare the rule with the OOS base on the same evaluation population.
+        # Mixing calibration fires into this mean while ``baseForward3m`` is OOS
+        # can reverse the apparent value of a rule even though the hit-rate
+        # verdict itself is correctly evaluated out of sample.
         forward_values = [
             value
-            for value in (prices_sorted.forward_return_pct(target, days=91) for target in fire_dates)
+            for value in (prices_sorted.forward_return_pct(target, days=91) for target in oos_fire_dates)
             if value is not None
         ]
         forward_after_fire = sum(forward_values) / len(forward_values) if forward_values else None
@@ -747,6 +785,8 @@ def build_spy_warning_rule_audit(
                 "baseRate": round(base_rate, 3) if base_rate is not None else None,
                 "lift": round(lift, 2) if lift is not None else None,
                 "avgForward3mAfterFire": round(forward_after_fire, 2) if forward_after_fire is not None else None,
+                "avgForward3mSample": "oos_complete_91d",
+                "avgForward3mSampleSize": len(forward_values),
                 "avgTrailing3mAtFire": round(trailing_at_fire, 2) if trailing_at_fire is not None else None,
                 "leadTimeDays": round(lead_time, 1) if lead_time is not None else None,
                 "verdict": spy_warning_rule_verdict(meta["kind"], len(scored), lift),

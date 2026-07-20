@@ -22,8 +22,9 @@ class BhadialWeeklyReplay:
     """Point-in-time weekly factor replay over pre-sorted score series.
 
     Mirrors bhadial_factor_score_at / bhadial_conditions_score_at semantics
-    (including the Funding EMA(5) smoothing) but uses bisect lookups and
-    memoized month-end module scores so a 5Y weekly replay stays fast."""
+    (including Funding's five-daily-availability-observation EMA) but uses
+    bisect lookups and memoized module scores so a 5Y weekly replay stays fast.
+    """
 
     def __init__(self, series: dict[str, list[SeriesPoint]]):
         self.sorted_series: dict[str, SortedSeries] = {
@@ -31,7 +32,7 @@ class BhadialWeeklyReplay:
         }
         self._factor_cache: dict[tuple[str, date], tuple[float, bool]] = {}
         self._module_raw_cache: dict[tuple[str, date], tuple[float, int]] = {}
-        self._month_ends_cache: dict[str, list[date]] = {}
+        self._module_decision_dates_cache: dict[str, list[date]] = {}
 
     @staticmethod
     def publication_lag_days(spec: dict[str, Any]) -> int:
@@ -100,34 +101,38 @@ class BhadialWeeklyReplay:
         self._module_raw_cache[cache_key] = row
         return row
 
-    def module_month_ends(self, module: dict[str, Any]) -> list[date]:
+    def module_decision_dates(self, module: dict[str, Any]) -> list[date]:
+        """Return unique dates when an input becomes available to the scorer."""
         key = str(module["name"])
-        cached = self._month_ends_cache.get(key)
+        cached = self._module_decision_dates_cache.get(key)
         if cached is not None:
             return cached
-        month_ends: dict[tuple[int, int], date] = {}
+        decision_dates: set[date] = set()
         for spec in module["factors"]:
             sorted_points = self.sorted_series.get(str(spec["scoreKey"]))
             if sorted_points is None:
                 continue
+            lag = self.publication_lag_days(spec)
             for point_date in sorted_points.dates:
-                month_key = (point_date.year, point_date.month)
-                existing = month_ends.get(month_key)
-                if existing is None or point_date > existing:
-                    month_ends[month_key] = point_date
-        result = [month_ends[month_key] for month_key in sorted(month_ends)]
-        self._month_ends_cache[key] = result
+                decision_dates.add(point_date + timedelta(days=lag))
+        result = sorted(decision_dates)
+        self._module_decision_dates_cache[key] = result
         return result
 
     def module_ema_score_at(self, module: dict[str, Any], target: date, *, span: int = 5) -> float | None:
+        if span <= 0:
+            raise ValueError("span must be positive")
         start = window_start(target, years=5)
-        point_dates_by_month = {
-            (point_date.year, point_date.month): point_date
-            for point_date in self.module_month_ends(module)
+        point_dates = [
+            point_date
+            for point_date in self.module_decision_dates(module)
             if start <= point_date <= target
-        }
-        point_dates_by_month[(target.year, target.month)] = target
-        point_dates = [point_dates_by_month[key] for key in sorted(point_dates_by_month)]
+        ]
+        if point_dates and point_dates[-1] < target:
+            prior_score, prior_observed = self.module_raw_score_at(module, point_dates[-1])
+            target_score, target_observed = self.module_raw_score_at(module, target)
+            if prior_score != target_score or prior_observed != target_observed:
+                point_dates.append(target)
         alpha = 2 / (span + 1)
         ema: float | None = None
         for point_date in sorted(point_dates):
@@ -152,7 +157,7 @@ class BhadialWeeklyReplay:
             observed_total += observed
             if include_components:
                 for spec in module["factors"]:
-                    score, _ = self.factor_score_at(spec, target)
+                    score, score_eligible = self.factor_score_at(spec, target)
                     components.append(
                         {
                             "id": str(spec["id"]),
@@ -161,6 +166,10 @@ class BhadialWeeklyReplay:
                             "remoteName": str(spec["remoteName"]),
                             "name": str(spec["name"]),
                             "score": round(score, 1),
+                            "observed": score_eligible,
+                            "scoreEligible": score_eligible,
+                            "freshnessStatus": "fresh" if score_eligible else "unavailable",
+                            "scoringStatus": "scored" if score_eligible else "unavailable",
                             "value": "",
                             "source": str(spec["source"]),
                         }
@@ -189,6 +198,10 @@ def unavailable_signal_validation(reason: str) -> dict[str, Any]:
     return {
         "available": False,
         "reason": reason,
+        # Keep the intended SPY model version explicit even when no aggregate
+        # row can be estimated.  Consumers must still require the aggregate
+        # row's own version before promoting any action.
+        "spyEarlyWarningRulesVersion": SPY_WARNING_RULES_VERSION,
         "factors": [],
         "composites": [],
         "excludedModels": [dict(EQUITY_SHORT_TERM_VALIDATION_EXCLUSION)],
@@ -347,6 +360,7 @@ def build_signal_validation(
             "labelCn": "SPY预警(周度回放)",
             "points": spy_warning_points,
             "direction": "higher_risk",
+            "rulesVersion": SPY_WARNING_RULES_VERSION,
         },
     ]
     sleeve_labels = {str(spec["key"]): str(spec["label"]) for spec in SPY_WARNING_COMPONENT_SLEEVES}
@@ -375,6 +389,8 @@ def build_signal_validation(
             oos_start_date=common_oos_start,
         )
         if row is not None:
+            if isinstance(spec.get("rulesVersion"), str):
+                row["rulesVersion"] = str(spec["rulesVersion"])
             composite_rows.append(row)
 
     weights = effective_weights(BHADIAL_CONDITION_MODULES, BHADIAL_MODULE_WEIGHTS, clusters)
@@ -420,6 +436,7 @@ def build_signal_validation(
     return {
         "available": True,
         "asOf": week_targets[-1].isoformat(),
+        "spyEarlyWarningRulesVersion": SPY_WARNING_RULES_VERSION,
         "summary": summary,
         "method": (
             "Weekly point-in-time replay of all condition factors and composite overlays against forward "
@@ -468,6 +485,8 @@ def build_signal_validation(
 def signal_validation_summary(
     factor_rows: list[dict[str, Any]],
     composite_rows: list[dict[str, Any]],
+    *,
+    independent_holdout: bool = False,
 ) -> str:
     """One-line honest readout of the OOS-robustness landscape, read off the already-computed
     `robust`/`classification` fields (no new estimation). Discipline: only robust signals are
@@ -477,8 +496,14 @@ def signal_validation_summary(
     robust_other = [f for f in robust_factors if str(f.get("classification")) != "leading"]
     by_id = {str(c.get("id")): c for c in composite_rows if isinstance(c, dict)}
     agg = by_id.get("spyEarlyWarning")
-    if isinstance(agg, dict) and agg.get("actionableRobust") is True:
-        agg_text = "聚合预警通过CI、FDR与分折一致性门槛"
+    if (
+        isinstance(agg, dict)
+        and agg.get("actionableRobust") is True
+        and independent_holdout
+    ):
+        agg_text = "聚合预警通过CI、FDR、分折一致性与独立留出门槛"
+    elif isinstance(agg, dict) and agg.get("actionableRobust") is True:
+        agg_text = "聚合预警通过统计门槛,但验证尾段非独立留出,仅作研究证据"
     elif isinstance(agg, dict) and agg.get("robust") is True:
         agg_text = "聚合预警CI为正,但未通过FDR/分折门槛"
     elif isinstance(agg, dict) and "robust" in agg:
@@ -487,7 +512,7 @@ def signal_validation_summary(
         agg_text = "聚合预警稳健性未知"
     return (
         f"{len(factor_rows)}因子周度回放: {len(robust_leading)}个通过CI、FDR与分折一致性的领先因子, "
-        f"{len(robust_other)}个稳健同步/滞后; {agg_text}。仅通过完整门槛的信号可作前瞻依据,余者仅诊断。"
+        f"{len(robust_other)}个稳健同步/滞后; {agg_text}。只有统计门槛与独立留出验证同时通过时才可发布动作层。"
     )
 
 
@@ -498,28 +523,218 @@ def annotate_spy_warning_robustness(
     """Stamp the SPY early-warning dict with its OOS-robustness verdict + the names of its
     robust *leading* sleeves, read off the signalValidation composites. Honest labeling: the
     aggregate is not OOS-robust, but its funding/rates sleeves are robustly leading. In-place."""
-    if not isinstance(spy_early_warning, dict) or not isinstance(signal_validation, dict):
+    if not isinstance(spy_early_warning, dict):
         return
+    # ``None`` is missing evidence, not a reason to leave the raw allocation
+    # untouched.  Treat it like an empty validation payload and fail closed.
+    signal_validation = signal_validation if isinstance(signal_validation, dict) else {}
     by_id = {str(c.get("id")): c for c in (signal_validation.get("composites") or []) if isinstance(c, dict)}
     agg = by_id.get("spyEarlyWarning")
+    independent_holdout = signal_validation.get("independentHoldout") is True
+
+    def version_text(value: Any) -> str | None:
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    surface_rules_version = version_text(spy_early_warning.get("rulesVersion"))
+    validation_rules_version = version_text(signal_validation.get("spyEarlyWarningRulesVersion"))
+    aggregate_rules_version = version_text(agg.get("rulesVersion")) if isinstance(agg, dict) else None
+    rules_version_complete = all(
+        version is not None
+        for version in (
+            surface_rules_version,
+            validation_rules_version,
+            aggregate_rules_version,
+        )
+    )
+    rules_version_matched = bool(
+        rules_version_complete
+        and surface_rules_version == validation_rules_version == aggregate_rules_version
+        and surface_rules_version == SPY_WARNING_RULES_VERSION
+    )
+    rules_version_audit = {
+        "expectedRulesVersion": SPY_WARNING_RULES_VERSION,
+        "surfaceRulesVersion": surface_rules_version,
+        "validationRulesVersion": validation_rules_version,
+        "aggregateRulesVersion": aggregate_rules_version,
+        "complete": rules_version_complete,
+        "matched": rules_version_matched,
+    }
+    if not rules_version_complete:
+        version_failure_reason = (
+            "SPY规则版本审计不完整,当前规则或验证证据缺少版本标识,"
+            "旧证据不得晋升动作层。"
+        )
+    elif not rules_version_matched:
+        version_failure_reason = (
+            f"SPY规则版本不匹配(expected={SPY_WARNING_RULES_VERSION}, "
+            f"surface={surface_rules_version}, "
+            f"validation={validation_rules_version}, aggregate={aggregate_rules_version}),"
+            "旧验证不得晋升当前规则动作层。"
+        )
+    else:
+        version_failure_reason = ""
+
+    research_only_summary = (
+        "SPY预警当前仅作研究背景; 统计、独立留出与规则版本门槛尚未全部通过,"
+        "不依据该信号调整权益仓位。"
+    )
+
+    def fail_closed_summary() -> None:
+        """Preserve the raw model narrative but remove binding action language."""
+        current_summary = spy_early_warning.get("summary")
+        prior_context = spy_early_warning.get("contextSummary")
+        if (
+            not (isinstance(prior_context, str) and prior_context.strip())
+            and isinstance(current_summary, str)
+            and current_summary.strip()
+            and current_summary != research_only_summary
+        ):
+            spy_early_warning["contextSummary"] = current_summary
+        spy_early_warning["summary"] = research_only_summary
+
+    def publish_production_summary() -> None:
+        """Restore the preserved model narrative after every production gate passes."""
+        context_summary = spy_early_warning.get("contextSummary")
+        if isinstance(context_summary, str) and context_summary.strip():
+            spy_early_warning["summary"] = context_summary
+
+    def fail_closed_allocation(hedge_action: str) -> None:
+        """Move a raw band to context without erasing it on repeated binds."""
+        allocation = spy_early_warning.get("allocation")
+        if not isinstance(allocation, dict):
+            return
+        prior_context = spy_early_warning.get("contextAllocation")
+        if allocation.get("exposureBandPct") is not None:
+            context_allocation = dict(allocation)
+            spy_early_warning["contextAllocation"] = context_allocation
+        elif isinstance(prior_context, dict):
+            context_allocation = dict(prior_context)
+        else:
+            context_allocation = dict(allocation)
+            spy_early_warning["contextAllocation"] = context_allocation
+        spy_early_warning["allocation"] = {
+            "horizon": str(context_allocation.get("horizon") or "1-3M"),
+            "horizonCn": str(context_allocation.get("horizonCn") or "1-3个月"),
+            "regime": str(context_allocation.get("regime") or spy_early_warning.get("regime") or "Research"),
+            "regimeCn": str(context_allocation.get("regimeCn") or spy_early_warning.get("regimeCn") or "研究观察"),
+            "stance": "研究观察",
+            "equityExposure": "不依据该信号调整权益仓位",
+            "exposureBandPct": None,
+            "hedgeAction": hedge_action,
+            "tone": "neutral",
+            "actionable": False,
+        }
+
+    def publish_production_allocation() -> None:
+        """Restore the preserved research band if a later bind becomes valid."""
+        allocation = spy_early_warning.get("allocation")
+        if not isinstance(allocation, dict):
+            return
+        context_allocation = spy_early_warning.get("contextAllocation")
+        if (
+            allocation.get("exposureBandPct") is None
+            and isinstance(context_allocation, dict)
+            and context_allocation.get("exposureBandPct") is not None
+        ):
+            allocation = dict(context_allocation)
+            spy_early_warning["allocation"] = allocation
+        allocation["actionable"] = True
+
     if isinstance(agg, dict) and "robust" in agg:
+        statistical_gate_passed = agg.get("actionableRobust") is True
+        production_gate_passed = (
+            statistical_gate_passed
+            and independent_holdout
+            and rules_version_matched
+        )
         spy_early_warning["aggregateCiRobust"] = bool(agg.get("robust"))
-        spy_early_warning["aggregateActionableRobust"] = bool(agg.get("actionableRobust"))
-        # Compatibility field now carries the complete gate, not CI-only significance.
-        spy_early_warning["aggregateRobust"] = bool(agg.get("actionableRobust"))
+        spy_early_warning["aggregateStatisticalGatePassed"] = statistical_gate_passed
+        spy_early_warning["aggregateActionableRobust"] = production_gate_passed
+        # Compatibility field carries the production gate, including holdout independence.
+        spy_early_warning["aggregateRobust"] = production_gate_passed
         spy_early_warning["aggregateOosCi3m"] = agg.get("oosCi3m")
-    spy_early_warning["robustSleeves"] = [
+        spy_early_warning["predictiveValidity"] = {
+            "status": "actionable" if production_gate_passed else "research-context",
+            "actionable": production_gate_passed,
+            "oosIc3m": agg.get("oosIc3m"),
+            "oosCi3m": agg.get("oosCi3m"),
+            "fdrSignificant3m": agg.get("fdrSignificant3m"),
+            "foldStable": bool(
+                isinstance(agg.get("foldStability3m"), dict)
+                and agg["foldStability3m"].get("stablePositive") is True
+            ),
+            "statisticalGatePassed": statistical_gate_passed,
+            "independentHoldout": independent_holdout,
+            "rulesVersionAudit": rules_version_audit,
+            "reason": (
+                version_failure_reason
+                if version_failure_reason
+                else "通过统计完整性、独立留出与规则版本一致性门槛,可发布动作层。"
+                if production_gate_passed
+                else "统计门槛已通过,但验证尾段并非独立留出,仅作研究背景。"
+                if statistical_gate_passed
+                else "聚合信号未通过CI、FDR与分折一致性的完整门槛,仅作研究背景。"
+            ),
+        }
+        if production_gate_passed:
+            publish_production_summary()
+        allocation = spy_early_warning.get("allocation")
+        if isinstance(allocation, dict):
+            if production_gate_passed:
+                publish_production_allocation()
+                spy_early_warning["actionable"] = True
+                spy_early_warning["scoreUse"] = "production_signal"
+            else:
+                fail_closed_allocation("等待聚合信号通过完整样本外门槛")
+        if not production_gate_passed:
+            fail_closed_summary()
+            spy_early_warning["actionable"] = False
+            spy_early_warning["scoreUse"] = "research_only"
+    else:
+        # Missing validation is not neutral evidence.  It is the least certain
+        # state and must fail closed instead of leaving the raw research band in
+        # the binding allocation field.
+        spy_early_warning["aggregateCiRobust"] = False
+        spy_early_warning["aggregateStatisticalGatePassed"] = False
+        spy_early_warning["aggregateActionableRobust"] = False
+        spy_early_warning["aggregateRobust"] = False
+        spy_early_warning["aggregateOosCi3m"] = None
+        spy_early_warning["predictiveValidity"] = {
+            "status": "research-context",
+            "actionable": False,
+            "oosIc3m": None,
+            "oosCi3m": None,
+            "fdrSignificant3m": False,
+            "foldStable": False,
+            "statisticalGatePassed": False,
+            "independentHoldout": independent_holdout,
+            "rulesVersionAudit": rules_version_audit,
+            "reason": (
+                "缺少SPY聚合样本外验证证据; "
+                f"{version_failure_reason or '规则版本无法与聚合证据绑定。'}"
+            ),
+        }
+        allocation = spy_early_warning.get("allocation")
+        if isinstance(allocation, dict):
+            fail_closed_allocation("等待聚合信号完成样本外验证")
+        fail_closed_summary()
+        spy_early_warning["actionable"] = False
+        spy_early_warning["scoreUse"] = "research_only"
+    statistical_sleeves = [
         cid.split(":", 1)[1]
         for cid, c in by_id.items()
         if cid.startswith("sleeve:") and c.get("actionableRobust") and (optional_float(c.get("oosIc3m")) or 0.0) > 0
     ]
+    versioned_holdout = independent_holdout and rules_version_matched
+    spy_early_warning["researchRobustSleeves"] = [] if versioned_holdout else statistical_sleeves
+    spy_early_warning["robustSleeves"] = statistical_sleeves if versioned_holdout else []
     spy_early_warning["exploratorySleeves"] = [
         cid.split(":", 1)[1]
         for cid, c in by_id.items()
         if (
             cid.startswith("sleeve:")
             and c.get("robust")
-            and not c.get("actionableRobust")
+            and (not c.get("actionableRobust") or not versioned_holdout)
             and (optional_float(c.get("oosIc3m")) or 0.0) > 0
         )
     ]
@@ -554,8 +769,13 @@ def build_bhadial_predictive_lens(
         "applied": oos_start is not None,
         "horizonDays": purge_horizon_days,
         "oosStartDate": oos_start.isoformat() if oos_start is not None else None,
-        "rule": "calibration signal date + 91 calendar days must be strictly before the OOS start date",
+        "rule": (
+            "actual first price endpoint on/after calibration signal date + 91 calendar days "
+            "must be strictly before the OOS start date"
+        ),
         "purgedObservationCount": 0,
+        "latestEligibleSignalDate": None,
+        "latestEligibleLabelEndDate": None,
     }
     selected: list[dict[str, Any]] = []
     for factor_id in sorted(factor_series):
@@ -563,12 +783,34 @@ def build_bhadial_predictive_lens(
         if len(points) < MIN_SIGNAL_VALIDATION_POINTS:
             continue
         pre_oos = [point for point in points if oos_start is None or point.date < oos_start]
-        calibration = [
-            point
-            for point in pre_oos
-            if oos_start is None or point.date + timedelta(days=purge_horizon_days) < oos_start
-        ]
+        calibration: list[SeriesPoint] = []
+        calibration_end_dates: dict[date, date] = {}
+        for point in pre_oos:
+            endpoint_index = prices_sorted.index_at_or_after(
+                point.date + timedelta(days=purge_horizon_days)
+            )
+            endpoint_date = (
+                prices_sorted.dates[endpoint_index]
+                if endpoint_index is not None
+                else None
+            )
+            if (
+                oos_start is None
+                or (endpoint_date is not None and endpoint_date < oos_start)
+            ):
+                calibration.append(point)
+                if endpoint_date is not None:
+                    calibration_end_dates[point.date] = endpoint_date
         purge_payload["purgedObservationCount"] += len(pre_oos) - len(calibration)
+        if calibration:
+            latest_signal_date = calibration[-1].date
+            latest_label_end = calibration_end_dates.get(latest_signal_date)
+            current_latest = purge_payload.get("latestEligibleSignalDate")
+            if current_latest is None or latest_signal_date.isoformat() > str(current_latest):
+                purge_payload["latestEligibleSignalDate"] = latest_signal_date.isoformat()
+                purge_payload["latestEligibleLabelEndDate"] = (
+                    latest_label_end.isoformat() if latest_label_end is not None else None
+                )
         signal_values: list[float | None] = [point.value for point in calibration]
         ic_1m = spearman_ic(signal_values, [prices_sorted.forward_return_pct(point.date, days=30) for point in calibration])
         ic_3m = spearman_ic(signal_values, [prices_sorted.forward_return_pct(point.date, days=91) for point in calibration])

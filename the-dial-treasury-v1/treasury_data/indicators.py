@@ -301,6 +301,10 @@ def compute_indicators(
             "curve_curvature_abs": curve_curvature_abs_points,
             "real_rate_level": real_rate_level_points,
             "real_curve": real_curve_points,
+            # The score uses distance from the 2.3% anchor, while the panel
+            # displays the raw breakeven.  Keep both histories so the display
+            # can use the exact same point-in-time observation as the score.
+            "breakeven_10y": fred["T10YIE"].points if fred.get("T10YIE") else [],
             "breakeven_target_distance": breakeven_target_distance_points,
             "vix": fred["VIXCLS"].points if fred.get("VIXCLS") else [],
             "vix_term_structure": vix_term_structure_points,

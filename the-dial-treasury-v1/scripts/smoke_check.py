@@ -22,7 +22,7 @@ REQUIRED_EQUITY_PANEL_COMPONENT_KEYS = tuple(EQUITY_RISK_COMPONENT_WEIGHTS.keys(
 REQUIRED_EQUITY_COMPONENT_KEYS = tuple(
     key
     for key in EQUITY_RISK_COMPONENT_WEIGHTS
-    if key not in {"optionOI", "macroOverlay"}
+    if key not in {"optionOI", "macroOverlay", "eventRisk"}
 )
 EQUITY_COMPONENT_DIAGNOSTIC_DECISIONS = {"core", "support", "context", "trim"}
 
@@ -277,6 +277,19 @@ def signal_validation_research_issues(payload: Any) -> list[str]:
 
 def validate_health_payload(payload: dict[str, Any]) -> list[str]:
     issues: list[str] = []
+    contract = payload.get("dashboardContract")
+    if not isinstance(contract, dict):
+        issues.append("missing dashboardContract health payload")
+    else:
+        if not isinstance(contract.get("valid"), bool):
+            issues.append("dashboardContract missing valid")
+        if contract.get("scope") not in {"full", "decision-only"}:
+            issues.append("dashboardContract invalid scope")
+        contract_issues = contract.get("issues")
+        if not isinstance(contract_issues, list):
+            issues.append("dashboardContract issues must be a list")
+        elif contract_issues and payload.get("status") != "degraded":
+            issues.append("dashboardContract failures must degrade health status")
     freshness = payload.get("equityRiskFreshness")
     if not isinstance(freshness, dict):
         issues.append("missing equityRiskFreshness health payload")
@@ -494,6 +507,54 @@ def has_equity_short_term_risk_contract(payload: Any) -> bool:
     allocation = payload.get("allocation")
     if not isinstance(allocation, dict):
         return False
+    score_scale = payload.get("scoreScale")
+    production_validation = payload.get("productionValidation")
+    if not isinstance(score_scale, dict) or not isinstance(production_validation, dict):
+        return False
+    required_action_bools = (
+        score_scale.get("coreComplete"),
+        score_scale.get("thresholdComparable"),
+        payload.get("actionable"),
+        allocation.get("actionable"),
+        production_validation.get("available"),
+        production_validation.get("scoreContractAllowsAction"),
+        production_validation.get("thresholdValidated"),
+        production_validation.get("currentTriggered"),
+        production_validation.get("actionable"),
+    )
+    if not all(isinstance(value, bool) for value in required_action_bools):
+        return False
+    actionable = payload.get("actionable") is True
+    if allocation.get("actionable") is not actionable:
+        return False
+    if production_validation.get("actionable") is not actionable:
+        return False
+    exposure_band = allocation.get("exposureBandPct")
+    if actionable:
+        if not all(
+            value is True
+            for value in (
+                score_scale.get("coreComplete"),
+                score_scale.get("thresholdComparable"),
+                production_validation.get("available"),
+                production_validation.get("scoreContractAllowsAction"),
+                production_validation.get("thresholdValidated"),
+                production_validation.get("currentTriggered"),
+            )
+        ):
+            return False
+        if (
+            not isinstance(exposure_band, list)
+            or len(exposure_band) != 2
+            or any(
+                not isinstance(value, (int, float)) or isinstance(value, bool)
+                for value in exposure_band
+            )
+            or not 0 <= float(exposure_band[0]) <= float(exposure_band[1]) <= 100
+        ):
+            return False
+    elif exposure_band is not None:
+        return False
     for key in ("stance", "equityExposure", "hedgeAction"):
         if not isinstance(allocation.get(key), str) or not allocation.get(key):
             return False
@@ -513,7 +574,7 @@ def has_equity_short_term_risk_contract(payload: Any) -> bool:
         for key in ("key", "label", "detail"):
             if not isinstance(component.get(key), str) or not component.get(key):
                 return False
-        if component.get("scoreUse") not in {"scored", "auditOnly", "missing"}:
+        if component.get("scoreUse") not in {"scored", "context", "auditOnly", "missing"}:
             return False
         if component.get("sourceQuality") not in {"high", "medium", "low"}:
             return False
@@ -530,7 +591,7 @@ def has_equity_short_term_risk_contract(payload: Any) -> bool:
         for key in ("component", "label", "source", "sourceQuality", "scoreUse", "timestampPolicy", "reason"):
             if not isinstance(evidence.get(key), str) or not evidence.get(key):
                 return False
-        if evidence.get("scoreUse") not in {"scored", "auditOnly", "missing"}:
+        if evidence.get("scoreUse") not in {"scored", "context", "auditOnly", "missing"}:
             return False
         if not isinstance(evidence.get("historicalReplay"), bool):
             return False
@@ -589,7 +650,7 @@ def has_equity_short_term_risk_contract(payload: Any) -> bool:
         return False
     if not isinstance(forward_catalyst.get("eventCount"), int):
         return False
-    if forward_catalyst.get("scoreUse") not in {"scored", "auditOnly", "missing"}:
+    if forward_catalyst.get("scoreUse") not in {"scored", "context", "auditOnly", "missing"}:
         return False
     if not isinstance(payload.get("drivers"), list):
         return False
@@ -745,6 +806,31 @@ def has_equity_volatility_estimator_audit_contract(payload: Any, *, score: float
         return False
     if payload.get("recommendedAction") not in {"retainProduction", "keepShadowTesting"}:
         return False
+    evidence_scope = payload.get("evidenceScope")
+    if not isinstance(evidence_scope, dict):
+        return False
+    if evidence_scope.get("fullSampleEligibleForPromotion") is not False:
+        return False
+    if "independent alert episodes" not in str(evidence_scope.get("promotionMetric") or ""):
+        return False
+    comparison = payload.get("comparisonContract")
+    if not isinstance(comparison, dict) or comparison.get("available") is not True:
+        return False
+    if comparison.get("fullSampleExcluded") is not True:
+        return False
+    if comparison.get("promotionMetric") != "independentAlertClusterPrecision":
+        return False
+    for key in ("comparable", "samePurgedHoldout"):
+        if not isinstance(comparison.get(key), bool):
+            return False
+    for key in ("checkedFields", "missingFields", "mismatchedFields"):
+        if not isinstance(comparison.get(key), list):
+            return False
+    shadow_eligible = payload.get("shadowPromotionEligible")
+    if not isinstance(shadow_eligible, bool):
+        return False
+    if shadow_eligible is not (payload.get("verdict") == "candidatePromising"):
+        return False
     current = payload.get("current")
     if not isinstance(current, dict):
         return False
@@ -765,10 +851,39 @@ def has_equity_volatility_estimator_audit_contract(payload: Any, *, score: float
             return False
         if metrics.get("threshold") != 75 or not isinstance(metrics.get("sampleSize"), int):
             return False
+        if metrics.get("fullSampleRole") != "descriptive_only":
+            return False
+        if metrics.get("fullSampleEligibleForPromotion") is not False:
+            return False
+        if metrics.get("oosPrecisionMetric") not in {
+            "independentAlertClusterPrecision",
+            "unavailable",
+        }:
+            return False
+        if not isinstance(metrics.get("oosIndependentEpisodeMetricsAvailable"), bool):
+            return False
+        if not isinstance(metrics.get("oosAlertEpisodes"), int):
+            return False
+        if not isinstance(metrics.get("oosFalsePositives"), int):
+            return False
+    if payload.get("verdict") == "candidatePromising":
+        candidate = backtest["candidate"]
+        if (
+            comparison.get("comparable") is not True
+            or candidate.get("oosValidated") is not True
+            or candidate.get("oosAlertEpisodes", 0) < 5
+        ):
+            return False
     for key in ("riskScoreDelta", "volComponentScoreDelta"):
         if current.get(key) is not None and not isinstance(current.get(key), (int, float)):
             return False
-    for key in ("fullPrecisionDelta", "oosPrecisionDelta", "oosLiftDelta", "oosFalsePositiveDelta"):
+    for key in (
+        "fullPrecisionDelta",
+        "oosPrecisionDelta",
+        "oosLiftDelta",
+        "oosFalsePositiveDelta",
+        "oosIndependentEpisodeDelta",
+    ):
         if backtest.get(key) is not None and not isinstance(backtest.get(key), (int, float)):
             return False
     return True

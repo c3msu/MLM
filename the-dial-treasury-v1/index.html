@@ -41,7 +41,7 @@
     <div class="header-meta"><span data-i18n="header.snapshot">数据快照</span> · <strong data-field="asOf"></strong> <span data-i18n="header.close">收盘</span><br><span data-i18n="header.frequency">日频研究节奏</span></div>
     <div class="header-actions">
       <button id="languageToggle" class="icon-btn lang-btn" type="button" data-i18n-title="button.language" data-i18n-aria-label="button.language" title="English" aria-label="切换为英文">EN</button>
-      <button id="resetState" class="icon-btn" type="button" data-i18n-title="button.reset" data-i18n-aria-label="button.reset" title="恢复默认计分" aria-label="恢复默认计分">↺</button>
+      <button id="resetState" class="icon-btn" type="button" data-i18n-title="button.reset" data-i18n-aria-label="button.reset" title="重置情景计分" aria-label="重置情景计分">↺</button>
       <button id="exportState" class="icon-btn" type="button" data-i18n-title="button.export" data-i18n-aria-label="button.export" title="导出当前页面HTML" aria-label="导出当前页面HTML">⇩</button>
     </div>
   </header>
@@ -49,10 +49,9 @@
   <main>
     <section id="summary" class="hero section-band">
       <div class="hero-copy">
-        <p class="market-badge"><span></span> <span data-i18n="hero.badge">当前市场状态 · 通胀冲击 / 政策路径逆转</span></p>
+        <p class="market-badge"><span></span> <span data-i18n="hero.badge">市场监控快照 · 数据驱动 / 证据分层</span></p>
         <h1 class="market-title" data-i18n-html="hero.titleHtml">
-          美债正从 2025 年的降息周期切换为 <strong>通胀冲击下的政策对峙</strong>: 能源冲击、CPI/PPI 超预期与长端供给压力共同推高收益率,
-          市场重新评估年内 <strong>加息风险</strong>,曲线呈 <strong>熊市变陡</strong>。
+          基于最新公开数据监控美债的政策、通胀、曲线与流动性变化。<strong>实时结论</strong>来自后端审计；可编辑计分卡仅用于<strong>情景模拟</strong>。
         </h1>
         <div class="data-status-row">
           <p id="dataStatus" class="data-status">数据加载中...</p>
@@ -230,18 +229,18 @@
       <div class="section-heading">
         <p class="eyebrow" data-i18n="section.scorecard.eyebrow">03 因子计分卡</p>
         <h2 data-i18n-html="section.scorecard.titleHtml">因子计分卡 <span>FACTOR SCORECARD</span></h2>
-        <p data-i18n="section.scorecard.desc">每个因子打 -2 到 +2 分,正分代表利多久期,负分代表利空久期。点击信号格可手动调整评分,权重也可编辑。</p>
+        <p data-i18n="section.scorecard.desc">情景计分采用 -2 到 +2 分。手工调整只重算本地情景，不会覆盖摘要中的实时审计结论。</p>
       </div>
       <article class="panel driver-panel scorecard-driver-panel">
         <div class="panel-title">
           <div>
-            <h3>关键驱动与模块贡献</h3>
+            <h3>情景驱动与模块贡献</h3>
             <p class="scorecard-current-read" aria-live="polite">
-              <span><b data-i18n="stance.duration">久期立场</b><strong id="scorecardDuration">--</strong><small id="scorecardDurationValue">综合分 --</small></span>
-              <span><b data-i18n="stance.curve">曲线立场</b><strong id="scorecardCurve">--</strong><small id="scorecardCurveValue">曲线分 --</small></span>
+              <span><b data-i18n="stance.scenarioDuration">情景久期</b><strong id="scorecardDuration">--</strong><small id="scorecardDurationValue">情景综合分 --</small></span>
+              <span><b data-i18n="stance.scenarioCurve">情景曲线</b><strong id="scorecardCurve">--</strong><small id="scorecardCurveValue">情景曲线分 --</small></span>
             </p>
           </div>
-          <span class="panel-kicker">Top 6 · 加权贡献</span>
+          <span class="panel-kicker">Scenario · Top 6 加权贡献</span>
         </div>
         <div class="scorecard-driver-layout">
           <div id="factorDrivers" class="driver-list" role="list" aria-label="按加权贡献排序的关键驱动"></div>
@@ -249,14 +248,14 @@
         </div>
       </article>
       <details class="diagnostic-details scorecard-research-details">
-        <summary>因子研究与编辑<span class="diagnostic-hint">六组因子 / 权重 / 历史百分位 / 数据覆盖</span></summary>
+        <summary>因子研究与情景编辑<span class="diagnostic-hint">六组因子 / 情景权重 / 历史百分位 / 数据覆盖</span></summary>
         <div class="diagnostic-body scorecard-research-body">
           <div class="score-edit-guide" aria-label="因子评分含义">
-            <strong>编辑标尺</strong>
+            <strong>情景编辑标尺</strong>
             <div class="score-scale" aria-hidden="true">
               <span data-i18n="score.strongBear">强烈看空</span><span data-i18n="score.bear">看空</span><span data-i18n="score.neutral">中性</span><span data-i18n="score.bull">看多</span><span data-i18n="score.strongBull">强烈看多</span>
             </div>
-            <small>-2 / -1 / 0 / +1 / +2 · 当前选择会在对应按钮上标记</small>
+            <small>-2 / -1 / 0 / +1 / +2 · 仅影响本地情景，不修改实时审计结论</small>
           </div>
           <div id="scorecardSourceLegend" class="score-source-legend"></div>
           <div id="scorecardGroups" class="scorecard-groups"></div>
@@ -384,13 +383,13 @@
       <div class="section-heading">
         <p class="eyebrow" data-i18n="section.policy.eyebrow">04 货币政策路径</p>
         <h2 data-i18n-html="section.policy.titleHtml">货币政策 <span>MONETARY POLICY</span></h2>
-        <p data-i18n="section.policy.desc">政策利率、市场隐含路径与流动性管道。核心叙事是市场定价从降息转向加息风险。</p>
+        <p data-i18n="section.policy.desc">政策利率、可验证的路径证据与流动性管道。会议级概率不可验证时，仅展示定性情景及其数据边界。</p>
       </div>
       <div id="policyDecisionCards" class="decision-snapshot-cards"></div>
       <p id="policyDecisionRead" class="decision-snapshot-read">--</p>
       <div class="decision-detail-list">
         <details class="diagnostic-details decision-detail">
-          <summary>政策利率与隐含路径详情<span class="diagnostic-hint">利率锚 / 会议概率 / 路径重定价</span></summary>
+          <summary>政策利率与路径证据详情<span class="diagnostic-hint">利率锚 / 定性情景 / 数据边界</span></summary>
           <div class="diagnostic-body decision-detail-body">
             <div class="two-column">
               <article class="panel">
@@ -398,14 +397,14 @@
                   <h3 data-i18n="panel.policyRate">政策利率 · Policy Rate</h3>
                 </div>
                 <div id="policyCards" class="metric-grid compact"></div>
-                <p class="note">连续三次维持利率;投票分歧升温后,市场重新评估政策反应函数是否更鹰。</p>
+                <p class="note">当前区间、有效利率与市场利率代理分别展示，避免把不同证据层混为会议概率。</p>
               </article>
               <article class="panel">
                 <div class="panel-title">
-                  <h3 data-i18n="panel.impliedPath">市场隐含政策路径 · Implied Path</h3>
+                  <h3 id="fedPathTitle" data-i18n="panel.qualitativeScenario">定性政策情景 · Qualitative Scenario</h3>
                 </div>
                 <div id="fedPathChart" class="stacked-bars"></div>
-                <p class="note">近端会议仍定价按兵不动,远端加息尾部风险上升。</p>
+                <p id="fedPathNote" class="note">仅展示情景方向、驱动与下次会议；没有可验证的会议级合约时不渲染概率条。</p>
               </article>
             </div>
           </div>
@@ -737,11 +736,11 @@
       <div id="globalLpplRiskHistoryModalTooltip" class="percentile-tooltip global-lppl-history-tooltip modal-tooltip" hidden></div>
     </section>
   </div>
-  <script src="i18n.js?v=20260624-exec-v3"></script>
+  <script src="i18n.js?v=20260717-contract-v1"></script>
   <script src="render-equity.js?v=20260712-focus-v1"></script>
   <script src="render-markets.js?v=20260624-exec-v3"></script>
   <script src="render-liquidity.js?v=20260624-exec-v3"></script>
   <script src="render-history.js?v=20260624-exec-v3"></script>
-  <script src="app.js?v=20260713-ui-a11y-v2"></script>
+  <script src="app.js?v=20260717-contract-v1"></script>
 </body>
 </html>

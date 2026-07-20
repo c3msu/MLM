@@ -18,6 +18,8 @@ from .dashboard_core import bounded_score, optional_float, risk_linear
 GLOBAL_LPPL_MIN_OBSERVATIONS = 120
 GLOBAL_LPPL_DEFAULT_WINDOW = 252
 GLOBAL_LPPL_SIGNAL_WINDOWS = (120, 180, GLOBAL_LPPL_DEFAULT_WINDOW, 375, 500, 750)
+GLOBAL_LPPL_PRODUCTION_MODEL_SPEC_ID = "lppl-multiwindow-fullgrid-refine-v1"
+GLOBAL_LPPL_FAST_REPLAY_MODEL_SPEC_ID = "lppl-singlewindow-fastgrid-v1"
 
 
 def fit_global_lppl_signal(bars: list[MarketDailyBar], *, fast: bool = False) -> dict[str, Any]:
@@ -38,8 +40,103 @@ def fit_global_lppl_signal(bars: list[MarketDailyBar], *, fast: bool = False) ->
     if not fits:
         return {"available": False, "reason": "bounded LPPL fit did not converge"}
     selected = select_lppl_fit_candidate(fits)
-    selected["fitEnsemble"] = build_lppl_fit_ensemble(fits, total_fit_count=len(windows), attempted_windows=windows)
+    ensemble = build_lppl_fit_ensemble(fits, total_fit_count=len(windows), attempted_windows=windows)
+    selected["fitEnsemble"] = ensemble
+    selected["modelSpecId"] = (
+        GLOBAL_LPPL_FAST_REPLAY_MODEL_SPEC_ID
+        if fast
+        else GLOBAL_LPPL_PRODUCTION_MODEL_SPEC_ID
+    )
+    selected["validationComparableToProduction"] = not fast
+    selected["modelSelectionAudit"] = build_lppl_model_selection_audit(
+        selected,
+        fits,
+        ensemble,
+        attempted_windows=windows,
+        fast=fast,
+    )
+    selected["productionEligible"] = bool(
+        selected["modelSelectionAudit"].get("productionEligible")
+    )
     return selected
+
+
+def build_lppl_model_selection_audit(
+    selected: dict[str, Any],
+    fits: list[dict[str, Any]],
+    ensemble: dict[str, Any],
+    *,
+    attempted_windows: list[int],
+    fast: bool,
+) -> dict[str, Any]:
+    """Disclose and gate the repeated window search used by the live fit.
+
+    Window selection is based only on contemporaneous fit diagnostics, never on
+    forward drawdown labels, so it is not target leakage.  It is nevertheless a
+    repeated model search: a single attractive window is weak evidence.  The
+    action gate therefore requires at least two independently-sized windows to
+    pass the full LPPL residual diagnostics and to agree on ``tc`` within a
+    bounded 20-80% span.  Fast history replay is explicitly non-comparable to
+    the production search and can only be used as a descriptive audit.
+    """
+    available = [fit for fit in fits if fit.get("available")]
+    qualified = [fit for fit in available if fit.get("passesLpplDiagnostics") is True]
+    qualified_leads = sorted(
+        int(days)
+        for fit in qualified
+        for days in [optional_float(fit.get("daysToCritical"))]
+        if days is not None
+    )
+    qualified_tc_span = None
+    if len(qualified_leads) >= 2:
+        qualified_tc_span = int(
+            round(lppl_percentile(qualified_leads, 0.80) - lppl_percentile(qualified_leads, 0.20))
+        )
+    minimum_window_support = len(qualified) >= 2
+    tc_agreement_pass = qualified_tc_span is not None and qualified_tc_span <= 75
+    selected_diagnostics_pass = selected.get("passesLpplDiagnostics") is True
+    production_eligible = bool(
+        not fast
+        and selected_diagnostics_pass
+        and minimum_window_support
+        and tc_agreement_pass
+    )
+    return {
+        "available": True,
+        "modelSpecId": (
+            GLOBAL_LPPL_FAST_REPLAY_MODEL_SPEC_ID
+            if fast
+            else GLOBAL_LPPL_PRODUCTION_MODEL_SPEC_ID
+        ),
+        "searchMode": "single_window_fast_replay" if fast else "multi_window_full_grid_with_local_tc_refine",
+        "attemptedWindowCount": len(attempted_windows),
+        "convergedWindowCount": len(available),
+        "diagnosticPassWindowCount": len(qualified),
+        "diagnosticPassWindowRatioPct": round(100 * len(qualified) / max(1, len(attempted_windows)), 1),
+        "qualifiedTcLeadDaysQ20": (
+            int(round(lppl_percentile(qualified_leads, 0.20))) if qualified_leads else None
+        ),
+        "qualifiedTcLeadDaysQ80": (
+            int(round(lppl_percentile(qualified_leads, 0.80))) if qualified_leads else None
+        ),
+        "qualifiedTcWindowDays": qualified_tc_span,
+        "minimumWindowSupportPass": minimum_window_support,
+        "tcAgreementPass": tc_agreement_pass,
+        "selectedDiagnosticsPass": selected_diagnostics_pass,
+        "outcomeLabelsUsedForSelection": False,
+        "thresholdLabelsUsedForSelection": False,
+        "multipleWindowSearchDisclosed": len(attempted_windows) > 1,
+        "validationComparableToProduction": not fast,
+        "productionEligible": production_eligible,
+        "reason": (
+            "production fit passed residual diagnostics with at least two agreeing windows"
+            if production_eligible
+            else "fast replay uses a different search specification and is descriptive only"
+            if fast
+            else "production fit lacks two diagnostic-passing windows with stable tc agreement"
+        ),
+        "ensembleWindowAgreement": ensemble.get("windowAgreement"),
+    }
 
 
 def select_lppl_fit_candidate(fits: list[dict[str, Any]]) -> dict[str, Any]:

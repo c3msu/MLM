@@ -6,6 +6,15 @@ import json
 from datetime import date
 from typing import Any
 
+from .dashboard_contract import (
+    dashboard_contract_issues,
+    dashboard_decision_contract_issues,
+)
+from .scoring_regional import (
+    regional_allocation_qualifies_as_actionable,
+    regional_factor_alert_qualifies_as_actionable,
+)
+
 
 API_ROUTES = {
     "/api/dashboard": None,
@@ -59,13 +68,24 @@ def build_health_payload(dashboard: dict[str, Any]) -> dict[str, Any]:
             counts[status] = counts.get(status, 0) + 1
             if status == "error":
                 errors.append(item)
+    full_contract_available = isinstance(dashboard.get("schemaVersion"), str)
+    contract_issues = (
+        dashboard_contract_issues(dashboard)
+        if full_contract_available
+        else dashboard_decision_contract_issues(dashboard)
+    )
     return {
-        "status": "degraded" if errors else "ok",
+        "status": "degraded" if errors or contract_issues else "ok",
         "schemaVersion": dashboard.get("schemaVersion"),
         "asOf": dashboard.get("asOf"),
         "generatedAt": dashboard.get("generatedAt"),
         "sourceCounts": counts,
         "errors": errors,
+        "dashboardContract": {
+            "valid": not contract_issues,
+            "scope": "full" if full_contract_available else "decision-only",
+            "issues": contract_issues,
+        },
         "regionalAlerts": regional_alerts_health(dashboard.get("regionalMonitor")),
     }
 
@@ -76,14 +96,21 @@ def regional_alerts_health(regional_monitor: Any) -> dict[str, Any]:
         return {"available": False, "breached": [], "reduceRegions": [], "favorRegions": []}
     regions = regional_monitor.get("regions", []) if isinstance(regional_monitor.get("regions"), list) else []
     breached: list[dict[str, Any]] = []
+    actionable_regions: dict[str, dict[str, Any]] = {}
     for region in regions:
         if not isinstance(region, dict):
             continue
+        key = str(region.get("key") or "")
+        if regional_allocation_qualifies_as_actionable(region):
+            actionable_regions[key] = region
         alert = region.get("factorAlert") if isinstance(region.get("factorAlert"), dict) else {}
-        if alert.get("available") and alert.get("state") == "breached":
+        if (
+            key in actionable_regions
+            and regional_factor_alert_qualifies_as_actionable(region)
+        ):
             breached.append(
                 {
-                    "key": str(region.get("key")),
+                    "key": key,
                     "nameCn": str(region.get("nameCn") or region.get("name") or region.get("key")),
                     "factorLabelCn": str(alert.get("factorLabelCn") or ""),
                     "current": alert.get("current"),
@@ -91,14 +118,50 @@ def regional_alerts_health(regional_monitor: Any) -> dict[str, Any]:
                 }
             )
     rotation = regional_monitor.get("rotation", {}) if isinstance(regional_monitor.get("rotation"), dict) else {}
+    reduce_regions = [
+        key
+        for key, region in actionable_regions.items()
+        if (region.get("allocation") or {}).get("stance") == "underweight"
+    ]
+    favor_regions = [
+        key
+        for key, region in actionable_regions.items()
+        if (region.get("allocation") or {}).get("stance") == "overweight"
+    ]
+    raw_declared_reduce = rotation.get("reduceRegions")
+    raw_declared_favor = rotation.get("favorRegions")
+    declared_reduce = [str(key) for key in raw_declared_reduce] if isinstance(raw_declared_reduce, list) else []
+    declared_favor = [str(key) for key in raw_declared_favor] if isinstance(raw_declared_favor, list) else []
+    legacy_actions_present = bool(declared_reduce or declared_favor)
+    declared_actions_match = bool(
+        set(declared_reduce) == set(reduce_regions)
+        and set(declared_favor) == set(favor_regions)
+    )
+    summary = str(rotation.get("summary") or "")
+    if legacy_actions_present and not declared_actions_match:
+        if reduce_regions or favor_regions:
+            name_by_key = {
+                key: str(region.get("nameCn") or region.get("name") or key)
+                for key, region in actionable_regions.items()
+            }
+            parts: list[str] = []
+            if favor_regions:
+                parts.append("增持" + "、".join(name_by_key[key] for key in favor_regions))
+            if reduce_regions:
+                parts.append("减持" + "、".join(name_by_key[key] for key in reduce_regions))
+            summary = "区域生产动作: " + "; ".join(parts) + "。仅包含完整当前触发审计。"
+        else:
+            summary = "区域研究读数存在,但缺少完整生产动作审计; 不发布轮动或突破指令。"
     return {
         "available": True,
+        "actionable": bool(reduce_regions or favor_regions or breached),
+        "scoreUse": "production_signal" if (reduce_regions or favor_regions or breached) else "research_only",
         "asOf": regional_monitor.get("asOf"),
         "breachCount": len(breached),
         "breached": breached,
-        "reduceRegions": rotation.get("reduceRegions", []),
-        "favorRegions": rotation.get("favorRegions", []),
-        "summary": rotation.get("summary", ""),
+        "reduceRegions": reduce_regions,
+        "favorRegions": favor_regions,
+        "summary": summary,
     }
 
 

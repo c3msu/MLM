@@ -6,6 +6,7 @@ from statistics import median
 from treasury_data.indicators import compute_indicators, target_range_from_effective_rate, yoy, yoy_or_none
 from treasury_data.scoring_bhadial import (
     BHADIAL_CONDITION_MODULES,
+    bhadial_conditions_snapshot,
     bhadial_conditions_score_at,
     bhadial_factor_score_at,
     bhadial_module_ema_metrics_at,
@@ -15,6 +16,7 @@ from treasury_data.scoring_bhadial import (
 from treasury_data.series_math import (
     build_net_liquidity_points,
     change_points,
+    compute_tenor_realized_volatility,
     historical_percentile_at,
     historical_percentile_at_ordered,
     historical_percentile_with_sample_count_at_ordered,
@@ -171,6 +173,7 @@ class TimeAlignmentTests(unittest.TestCase):
             "WALCL": TimeSeries("WALCL", [SeriesPoint(record.date, 10_000.0)]),
             "WTREGEN": TimeSeries("WTREGEN", [SeriesPoint(record.date, 2_000.0)]),
             "RRPONTSYD": TimeSeries("RRPONTSYD", [SeriesPoint(record.date, 5.0)]),
+            "T10YIE": TimeSeries("T10YIE", [SeriesPoint(record.date, 2.35)]),
         }
 
         indicators = compute_indicators(
@@ -183,6 +186,10 @@ class TimeAlignmentTests(unittest.TestCase):
 
         self.assertEqual(indicators["rrp_trillions"], 0.005)
         self.assertEqual(indicators["net_liquidity_trillions"], 0.003)
+        self.assertEqual(
+            indicators["percentile_series"]["breakeven_10y"],
+            [SeriesPoint(record.date, 2.35)],
+        )
         self.assertAlmostEqual(indicators["curve_curvature_abs_bp"], 10.0)
 
     def test_linear_asof_join_rewinds_safely_for_regressing_primary_dates(self) -> None:
@@ -494,6 +501,44 @@ class BhadialPreparationTests(unittest.TestCase):
         self.assertEqual(after_release["observationDate"], "2026-01-04")
         self.assertEqual(after_release["score"], 0.0)
 
+    def test_snapshot_display_values_match_the_lagged_score_observation(self) -> None:
+        indicators = {
+            "percentile_series": {
+                "net_liquidity": [
+                    SeriesPoint(date(2026, 1, 1), 1_000_000.0),
+                    SeriesPoint(date(2026, 1, 3), 2_000_000.0),
+                    SeriesPoint(date(2026, 1, 4), 9_000_000.0),
+                ],
+                "breakeven_target_distance": [
+                    SeriesPoint(date(2026, 1, 3), 0.1),
+                    SeriesPoint(date(2026, 1, 4), 0.2),
+                    SeriesPoint(date(2026, 1, 5), 7.6),
+                ],
+                "breakeven_10y": [
+                    SeriesPoint(date(2026, 1, 3), 2.2),
+                    SeriesPoint(date(2026, 1, 4), 2.5),
+                    SeriesPoint(date(2026, 1, 5), 9.9),
+                ],
+            },
+            # Deliberately conflicting latest values: the snapshot must not
+            # pair them with scores computed from the lagged observations.
+            "net_liquidity_trillions": 9.0,
+            "breakeven_10y": 9.9,
+        }
+
+        snapshot = bhadial_conditions_snapshot(indicators, as_of=date(2026, 1, 5))
+        components = {component["id"]: component for component in snapshot["components"]}
+
+        liquidity = components["fed_net_liquidity"]
+        self.assertEqual(liquidity["observationDate"], "2026-01-03")
+        self.assertEqual(liquidity["displayObservationDate"], "2026-01-03")
+        self.assertEqual(liquidity["value"], "$2.00T")
+
+        breakeven = components["t10yie"]
+        self.assertEqual(breakeven["observationDate"], "2026-01-04")
+        self.assertEqual(breakeven["displayObservationDate"], "2026-01-04")
+        self.assertEqual(breakeven["value"], "2.50%")
+
     def test_shock_only_factor_can_penalize_but_never_reward_above_neutral(self) -> None:
         quiet_points = [
             SeriesPoint(date(2026, 1, 1), 10.0),
@@ -555,7 +600,7 @@ class BhadialPreparationTests(unittest.TestCase):
         self.assertEqual(row["reliabilityScore"], 87.5)
         self.assertEqual(row["scoredFactorCount"], 1)
 
-    def test_conditions_score_keeps_legacy_key_and_labels_funding_ema_months(self) -> None:
+    def test_conditions_score_keeps_legacy_key_and_labels_funding_daily_ema(self) -> None:
         liquidity = [
             SeriesPoint(date(2025, 10, 1) + timedelta(days=index * 7), float(index))
             for index in range(12)
@@ -579,9 +624,12 @@ class BhadialPreparationTests(unittest.TestCase):
             50.0 + 50.0 * row["effectiveWeightCoverage"],
         )
         funding = next(module for module in row["modules"] if module["name"] == "Funding")
-        self.assertEqual(funding["emaSpanMonths"], 5)
-        self.assertEqual(funding["ema5MonthScore"], funding["ema5Score"])
-        self.assertIn("EMA(5 months)", funding["method"])
+        self.assertIsNone(funding["emaSpanMonths"])
+        self.assertIsNone(funding["ema5MonthScore"])
+        self.assertEqual(funding["emaSpanObservations"], 5)
+        self.assertEqual(funding["emaSpanUnit"], "daily_availability_observations")
+        self.assertEqual(funding["ema5ObservationScore"], funding["ema5Score"])
+        self.assertIn("EMA(5 daily availability observations)", funding["method"])
 
     def test_all_active_factor_specs_declare_freshness_contract(self) -> None:
         factors = [factor for module in BHADIAL_CONDITION_MODULES for factor in module["factors"]]
@@ -714,6 +762,41 @@ class RollingVolatilityTests(unittest.TestCase):
         self.assertEqual(realized_volatility_points(short, window=63), [])
         self.assertEqual(len(realized_volatility_points(complete, window=63)), 1)
 
+    def test_curve_volatility_resets_after_long_source_gap(self) -> None:
+        records = [
+            YieldCurveRecord(date(2026, 1, 1), {"10Y": 4.00}),
+            YieldCurveRecord(date(2026, 1, 2), {"10Y": 4.10}),
+            YieldCurveRecord(date(2026, 1, 3), {"10Y": 4.00}),
+            YieldCurveRecord(date(2026, 1, 20), {"10Y": 5.00}),
+            YieldCurveRecord(date(2026, 1, 21), {"10Y": 5.10}),
+            YieldCurveRecord(date(2026, 1, 22), {"10Y": 5.00}),
+        ]
+
+        points = curve_realized_volatility_points(records, "10Y", window=2)
+
+        self.assertEqual([point.date for point in points], [date(2026, 1, 3), date(2026, 1, 22)])
+        expected = math.sqrt(200.0) * math.sqrt(252)
+        self.assertAlmostEqual(points[-1].value, expected)
+        self.assertAlmostEqual(compute_tenor_realized_volatility(records, "10Y", window=2), expected)
+
+    def test_price_volatility_resets_after_long_source_gap(self) -> None:
+        series = TimeSeries(
+            "TEST",
+            [
+                SeriesPoint(date(2026, 1, 1), 100.0),
+                SeriesPoint(date(2026, 1, 2), 101.0),
+                SeriesPoint(date(2026, 1, 3), 100.0),
+                SeriesPoint(date(2026, 1, 20), 150.0),
+                SeriesPoint(date(2026, 1, 21), 151.5),
+                SeriesPoint(date(2026, 1, 22), 150.0),
+            ],
+        )
+
+        points = realized_volatility_points(series, window=2)
+
+        self.assertEqual([point.date for point in points], [date(2026, 1, 3), date(2026, 1, 22)])
+        self.assertLess(points[-1].value, 30.0)
+
     def test_funding_fragmentation_matches_naive_rolling_median_and_mad(self) -> None:
         start = date(2025, 1, 1)
 
@@ -749,13 +832,15 @@ class RollingVolatilityTests(unittest.TestCase):
         for index, values in enumerate(legs):
             z_scores: list[float] = []
             for leg_index, value in enumerate(values):
-                sample = [row[leg_index] for row in legs[max(0, index - 29) : index + 1]]
+                # The current observation is the value being normalized, not
+                # part of its own robust reference distribution.
+                sample = [row[leg_index] for row in legs[max(0, index - 30) : index]]
                 if len(sample) < 3:
                     z_scores.append(0.0)
                     continue
                 center = median(sample)
                 mad = median(abs(item - center) for item in sample)
-                z_scores.append(0.0 if mad == 0 else (value - center) / (mad * 1.4826))
+                z_scores.append((value - center) / max(mad * 1.4826, 1.0))
             mean_z = sum(z_scores) / len(z_scores)
             dispersion = math.sqrt(sum((value - mean_z) ** 2 for value in z_scores) / len(z_scores))
             ema = dispersion if ema is None else alpha * dispersion + (1 - alpha) * ema
@@ -764,6 +849,32 @@ class RollingVolatilityTests(unittest.TestCase):
         self.assertEqual(len(actual), len(expected))
         for point, expected_value in zip(actual, expected):
             self.assertAlmostEqual(point.value, expected_value, places=12)
+
+    def test_funding_fragmentation_resets_rolling_state_after_long_gap(self) -> None:
+        dates = [date(2026, 1, day) for day in (1, 2, 3, 4, 20)]
+        sofr = TimeSeries("SOFR", [SeriesPoint(point_date, 5.0) for point_date in dates])
+
+        def leg(name: str, offsets_bp: list[float]) -> TimeSeries:
+            return TimeSeries(
+                name,
+                [
+                    SeriesPoint(point_date, 5.0 - offset / 100)
+                    for point_date, offset in zip(dates, offsets_bp)
+                ],
+            )
+
+        points = funding_fragmentation_points(
+            sofr,
+            leg("OBFR", [0, 1, 2, 3, 0]),
+            leg("IORB", [0, 0, 0, 0, 0]),
+            leg("RRP", [0, -1, -2, -3, 0]),
+            z_window=252,
+            smooth_window=3,
+            max_alignment_gap_days=7,
+        )
+
+        self.assertGreater(points[-2].value, 0.0)
+        self.assertEqual(points[-1], SeriesPoint(date(2026, 1, 20), 0.0))
 
     def test_curve_volatility_uses_the_same_fixed_window_contract(self) -> None:
         start = date(2025, 1, 1)

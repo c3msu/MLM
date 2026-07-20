@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from bisect import bisect_right
+from calendar import monthrange
 import csv
 import html
 import json
@@ -14,7 +15,7 @@ import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from functools import lru_cache
 from io import BytesIO, StringIO
@@ -61,6 +62,24 @@ NASDAQ_HISTORICAL_URL = (
 CBOE_DELAYED_OPTIONS_URL = "https://cdn.cboe.com/api/global/delayed_quotes/options/{symbol}.json"
 FED_FUNDS_FUTURES_SYMBOL = "zq.f"
 GOLD_SPOT_SYMBOL = "xauusd"
+
+# FRED observation dates for low-frequency releases are reference-period keys,
+# not publication dates.  Live/history fetches must reject a row whose economic
+# period has not ended yet; otherwise an accidental current-month/current-quarter
+# record can enter scoring as if it were complete data.
+FRED_MONTHLY_PERIOD_SERIES_IDS = {
+    "CPIAUCSL",
+    "PCEPI",
+    "PCEPILFE",
+    "PCETRIM12M159SFRBDAL",
+    "PPIACO",
+    "UNRATE",
+    "PAYEMS",
+    "IRLTLT01JPM156N",
+    "IRLTLT01DEM156N",
+    "IRLTLT01GBM156N",
+}
+FRED_QUARTERLY_PERIOD_SERIES_IDS = {"GDPC1"}
 
 TENORS = ["1M", "3M", "6M", "1Y", "2Y", "3Y", "5Y", "7Y", "10Y", "20Y", "30Y"]
 TREASURY_XML_FIELDS = {
@@ -440,7 +459,35 @@ def fetch_text_with_headers(url: str, headers: dict[str, str], timeout: int = 30
     raise last_error or RuntimeError(f"Failed to fetch {url}")
 
 
-def parse_fred_csv(content: str, series_id: str) -> TimeSeries:
+def fred_reference_period_end(series_id: str, observed_at: date) -> date:
+    normalized = series_id.upper()
+    if normalized in FRED_MONTHLY_PERIOD_SERIES_IDS and observed_at.day == 1:
+        return observed_at.replace(day=monthrange(observed_at.year, observed_at.month)[1])
+    if normalized in FRED_QUARTERLY_PERIOD_SERIES_IDS and observed_at.day == 1:
+        end_month = observed_at.month + 2
+        end_year = observed_at.year + (end_month - 1) // 12
+        end_month = (end_month - 1) % 12 + 1
+        return date(end_year, end_month, monthrange(end_year, end_month)[1])
+    return observed_at
+
+
+def fred_observation_available_by_period_end(series_id: str, observed_at: date, as_of: date) -> bool:
+    """Fail closed on a reference period that is still in progress.
+
+    This is not a release-calendar model.  It is the minimum safe bound: an
+    observation cannot be known before its own reference period ends.  Scoring
+    applies any additional publication lag separately.
+    """
+    return observed_at <= as_of and fred_reference_period_end(series_id, observed_at) <= as_of
+
+
+def parse_fred_csv(
+    content: str,
+    series_id: str,
+    *,
+    as_of: date | None = None,
+    complete_periods_only: bool = False,
+) -> TimeSeries:
     reader = csv.DictReader(StringIO(content))
     if not reader.fieldnames or "observation_date" not in reader.fieldnames:
         raise ValueError(f"FRED response for {series_id} did not contain observation_date")
@@ -455,9 +502,18 @@ def parse_fred_csv(content: str, series_id: str) -> TimeSeries:
         if value is None:
             continue
         try:
-            points.append(SeriesPoint(datetime.strptime(raw_date, "%Y-%m-%d").date(), value))
+            observed_at = datetime.strptime(raw_date, "%Y-%m-%d").date()
         except ValueError:
             continue
+        if as_of is not None and observed_at > as_of:
+            continue
+        if (
+            complete_periods_only
+            and as_of is not None
+            and not fred_observation_available_by_period_end(series_id, observed_at, as_of)
+        ):
+            continue
+        points.append(SeriesPoint(observed_at, value))
     if not points:
         raise ValueError(f"FRED response for {series_id} did not contain numeric observations")
     points.sort(key=lambda item: item.date)
@@ -465,7 +521,13 @@ def parse_fred_csv(content: str, series_id: str) -> TimeSeries:
 
 
 def fetch_fred_series(series_id: str, timeout: int = 30) -> TimeSeries:
-    return parse_fred_csv(fetch_text(FRED_CSV_URL.format(series_id=series_id), timeout=timeout), series_id)
+    target = date.today()
+    return parse_fred_csv(
+        fetch_text(FRED_CSV_URL.format(series_id=series_id), timeout=timeout),
+        series_id,
+        as_of=target,
+        complete_periods_only=True,
+    )
 
 
 def parse_stooq_quote_csv(content: str, symbol: str) -> MarketQuote:
@@ -491,10 +553,19 @@ def parse_stooq_quote_csv(content: str, symbol: str) -> MarketQuote:
 
 def fetch_stooq_quote(symbol: str, timeout: int = 15) -> MarketQuote:
     url = STOOQ_QUOTE_URL.format(symbol=symbol)
-    return parse_stooq_quote_csv(fetch_text_curl_first(url, timeout=timeout), symbol.upper())
+    quote = parse_stooq_quote_csv(fetch_text_curl_first(url, timeout=timeout), symbol.upper())
+    if quote.date > date.today():
+        raise ValueError(f"Stooq response for {symbol} contained a future quote date")
+    return quote
 
 
-def parse_stooq_daily_csv(content: str, symbol: str, *, source_url: str = "Stooq daily") -> list[MarketDailyBar]:
+def parse_stooq_daily_csv(
+    content: str,
+    symbol: str,
+    *,
+    source_url: str = "Stooq daily",
+    not_after: date | None = None,
+) -> list[MarketDailyBar]:
     reader = csv.DictReader(StringIO(content))
     required = {"Date", "Open", "High", "Low", "Close"}
     if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
@@ -507,6 +578,8 @@ def parse_stooq_daily_csv(content: str, symbol: str, *, source_url: str = "Stooq
         try:
             bar_date = datetime.strptime(raw_date, "%Y-%m-%d").date()
         except ValueError:
+            continue
+        if not_after is not None and bar_date > not_after:
             continue
         open_price = parse_market_number(row.get("Open"))
         high_price = parse_market_number(row.get("High"))
@@ -546,7 +619,12 @@ def fetch_stooq_daily_bars(
         end=end.strftime("%Y%m%d"),
     )
     content = fetch_text_curl_first(source_url, timeout=timeout, retries=1)
-    return parse_stooq_daily_csv(content, symbol.upper(), source_url=source_url)
+    return parse_stooq_daily_csv(
+        content,
+        symbol.upper(),
+        source_url=source_url,
+        not_after=completed_daily_bar_through(end),
+    )
 
 
 def fetch_fed_funds_futures_quote(timeout: int = 15) -> MarketQuote:
@@ -600,7 +678,25 @@ def canonical_market_bars(bars: Iterable[MarketDailyBar]) -> list[MarketDailyBar
     return [by_date[bar_date] for bar_date in sorted(by_date)]
 
 
-def parse_nasdaq_historical_json(content: str, symbol: str, *, source_url: str = "Nasdaq historical") -> list[MarketDailyBar]:
+def completed_daily_bar_through(requested_end: date, *, today: date | None = None) -> date:
+    """Return the conservative last complete daily-bar date.
+
+    Public daily endpoints can expose today's still-forming OHLC row.  Without
+    an exchange-specific close timestamp that row is not safe for validation or
+    end-of-day scoring.  Historical requests remain inclusive; current/future
+    requests stop at the prior calendar day (weekends naturally retain Friday).
+    """
+    wall_date = today or date.today()
+    return requested_end if requested_end < wall_date else wall_date - timedelta(days=1)
+
+
+def parse_nasdaq_historical_json(
+    content: str,
+    symbol: str,
+    *,
+    source_url: str = "Nasdaq historical",
+    not_after: date | None = None,
+) -> list[MarketDailyBar]:
     payload = json.loads(content)
     # Null-safe traversal: Nasdaq returns {"data": null} (not an absent key) when it
     # transiently rate-limits or errors a symbol mid-batch. dict.get(k, {}) only uses the
@@ -619,6 +715,8 @@ def parse_nasdaq_historical_json(content: str, symbol: str, *, source_url: str =
         try:
             bar_date = datetime.strptime(raw_date, "%m/%d/%Y").date()
         except ValueError:
+            continue
+        if not_after is not None and bar_date > not_after:
             continue
         open_price = parse_market_number(row.get("open"))
         high_price = parse_market_number(row.get("high"))
@@ -670,7 +768,12 @@ def fetch_nasdaq_daily_bars(
         timeout=timeout,
         retries=1,
     )
-    return parse_nasdaq_historical_json(content, symbol.upper(), source_url=source_url)
+    return parse_nasdaq_historical_json(
+        content,
+        symbol.upper(),
+        source_url=source_url,
+        not_after=completed_daily_bar_through(end),
+    )
 
 
 def parse_cboe_timestamp(value: Any) -> datetime | None:
@@ -699,6 +802,7 @@ def parse_cboe_option_open_interest_json(
     symbol: str,
     *,
     source_url: str = "Cboe delayed options",
+    as_of: date | None = None,
 ) -> OptionOpenInterestSnapshot:
     payload = json.loads(content)
     if not isinstance(payload, dict):
@@ -723,11 +827,15 @@ def parse_cboe_option_open_interest_json(
     if put_oi + call_oi <= 0:
         raise ValueError(f"Cboe response for {symbol} did not contain usable option open interest")
     timestamp = parse_cboe_timestamp(payload.get("timestamp"))
+    if timestamp is None:
+        raise ValueError(f"Cboe response for {symbol} did not contain a valid source timestamp")
+    target = as_of or date.today()
+    if timestamp.date() > target:
+        raise ValueError(f"Cboe response for {symbol} contained a future source timestamp")
     current_price = parse_market_number(data.get("current_price"))
-    as_of = timestamp.date() if timestamp else date.today()
     return OptionOpenInterestSnapshot(
         symbol=symbol.upper(),
-        as_of=as_of,
+        as_of=timestamp.date(),
         timestamp=timestamp,
         put_open_interest=put_oi,
         call_open_interest=call_oi,
@@ -743,10 +851,21 @@ def parse_cboe_option_open_interest_json(
 def fetch_cboe_option_open_interest(symbol: str = "SPY", timeout: int = 20) -> OptionOpenInterestSnapshot:
     source_url = CBOE_DELAYED_OPTIONS_URL.format(symbol=symbol.upper())
     content = fetch_text_curl_first(source_url, timeout=timeout, retries=1)
-    return parse_cboe_option_open_interest_json(content, symbol.upper(), source_url=source_url)
+    return parse_cboe_option_open_interest_json(
+        content,
+        symbol.upper(),
+        source_url=source_url,
+        as_of=date.today(),
+    )
 
 
-def parse_fred_bulk_zip(content: bytes, series_ids: Iterable[str]) -> dict[str, TimeSeries]:
+def parse_fred_bulk_zip(
+    content: bytes,
+    series_ids: Iterable[str],
+    *,
+    as_of: date | None = None,
+    complete_periods_only: bool = False,
+) -> dict[str, TimeSeries]:
     series_list = list(series_ids)
     points: dict[str, list[SeriesPoint]] = {series_id: [] for series_id in series_list}
     for text in fred_csv_texts(content):
@@ -761,6 +880,14 @@ def parse_fred_bulk_zip(content: bytes, series_ids: Iterable[str]) -> dict[str, 
             if row_date is None:
                 continue
             for series_id in wanted:
+                if as_of is not None and row_date > as_of:
+                    continue
+                if (
+                    complete_periods_only
+                    and as_of is not None
+                    and not fred_observation_available_by_period_end(series_id, row_date, as_of)
+                ):
+                    continue
                 value = parse_optional_float(row.get(series_id))
                 if value is not None:
                     points[series_id].append(SeriesPoint(row_date, value))
@@ -790,8 +917,11 @@ def fetch_fred_series_bulk(
     timeout: int = 45,
     chunk_size: int = 12,
     chunk_retries: int = 1,
+    *,
+    as_of: date | None = None,
 ) -> dict[str, TimeSeries]:
     series_list = list(series_ids)
+    target = as_of or date.today()
     parsed: dict[str, TimeSeries] = {}
     for index in range(0, len(series_list), chunk_size):
         chunk = series_list[index : index + chunk_size]
@@ -799,7 +929,14 @@ def fetch_fred_series_bulk(
         for _attempt in range(max(1, chunk_retries + 1)):
             try:
                 content = fetch_bytes_curl_first(FRED_CSV_URL.format(series_id=",".join(chunk)), timeout=timeout)
-                parsed.update(parse_fred_bulk_zip(content, chunk))
+                parsed.update(
+                    parse_fred_bulk_zip(
+                        content,
+                        chunk,
+                        as_of=target,
+                        complete_periods_only=True,
+                    )
+                )
                 last_error = None
                 break
             except Exception as exc:  # noqa: BLE001
@@ -1623,7 +1760,8 @@ def fetch_treasury_yield_curves(today: date | None = None, months_back: int = 4,
     for key in month_keys(today, months_back):
         content = fetch_text(TREASURY_XML_URL.format(month_key=key), timeout=timeout)
         for record in parse_treasury_yield_xml(content):
-            by_date[record.date] = record
+            if record.date <= today:
+                by_date[record.date] = record
     records = [by_date[key] for key in sorted(by_date)]
     if not records:
         raise ValueError("Treasury yield curve XML did not contain a complete curve record")

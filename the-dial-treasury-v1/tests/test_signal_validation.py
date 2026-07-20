@@ -24,6 +24,12 @@ from treasury_data.signal_validation import (
     spearman_ic,
     weekly_dates,
 )
+from treasury_data.scoring_spy_warning import SPY_WARNING_RULES_VERSION
+from treasury_data.scoring_regional import (
+    build_region_allocation,
+    build_region_factor_alert,
+    build_regional_rotation,
+)
 from treasury_data.sources import SeriesPoint
 
 
@@ -36,6 +42,89 @@ def daily_points(values: list[float], *, start: date = date(2021, 1, 4)) -> list
         points.append(SeriesPoint(date=current, value=value))
         current += timedelta(days=1)
     return points
+
+
+def validated_regional_risk_region(
+    key: str,
+    name_cn: str,
+    *,
+    composite: bool = False,
+) -> dict:
+    factor = {
+        "id": "realizedVol",
+        "labelCn": "已实现波动",
+        "classification": "leading",
+        "oosIc3m": 0.4,
+        "wrongWay": False,
+        "lift": 1.4,
+        "robust": True,
+        "fdrSignificant3m": True,
+        "inferenceValid3m": True,
+        "foldStability3m": {"stablePositive": True},
+        "actionableRobust": True,
+        "observationCount": 180,
+        "oosSampleSize3m": 60,
+        "oosAlertCount": 8,
+        "alertThreshold": 20.0,
+    }
+    factor_validation = {
+        "available": True,
+        "independentHoldout": True,
+        "factors": [factor],
+    }
+    if composite:
+        factor_validation["composite"] = {
+            "available": True,
+            "beatsBestSingleFactor": True,
+            "direction": "higher_risk",
+            "classification": "leading",
+            "oosIc3m": 0.35,
+            "wrongWay": False,
+            "lift": 1.3,
+            "robust": True,
+            "fdrSignificant3m": True,
+            "inferenceValid3m": True,
+            "foldStability3m": {"stablePositive": True},
+            "actionableRobust": True,
+            "observationCount": 180,
+            "oosSampleSize3m": 60,
+            "oosAlertCount": 8,
+            "currentValue": 1.8,
+            "alertThreshold": 0.9,
+            "breachCountTotal": 25,
+            "breachHitRateTotal": 0.48,
+        }
+    region = {
+        "key": key,
+        "name": name_cn,
+        "nameCn": name_cn,
+        "indices": [
+            {
+                "symbol": "TEST",
+                "available": True,
+                "score": 45.0,
+                "status": "watch",
+                "priceFactors": {"available": True, "realizedVol": 25.0},
+                "factorValidation": factor_validation,
+            }
+        ],
+        "aggregate": {
+            "status": "risk",
+            "statusCn": "风险",
+            "availableCount": 1,
+            "indexCount": 1,
+            "actionableRiskCount": 0,
+            "priceFactors": {
+                "available": True,
+                "marketState": "stressed",
+                "marketStateCn": "承压",
+                "relativeStrength3m": 0.0,
+            },
+        },
+    }
+    region["factorAlert"] = build_region_factor_alert(region)
+    region["allocation"] = build_region_allocation(region)
+    return region
 
 
 class SpearmanIcTests(unittest.TestCase):
@@ -70,9 +159,9 @@ class SpearmanIcTests(unittest.TestCase):
     def test_correlation_p_value_and_fdr_are_exposed_as_diagnostics(self) -> None:
         self.assertLess(approximate_correlation_p_value(0.5, 60), 0.01)
         rows = [
-            {"pValue3m": 0.001, "robust": True, "foldStability3m": {"stablePositive": True}},
-            {"pValue3m": 0.03, "robust": True, "foldStability3m": {"stablePositive": True}},
-            {"pValue3m": 0.4, "robust": True, "foldStability3m": {"stablePositive": True}},
+            {"pValue3m": 0.001, "robust": True, "inferenceValid3m": True, "foldStability3m": {"stablePositive": True}},
+            {"pValue3m": 0.03, "robust": True, "inferenceValid3m": True, "foldStability3m": {"stablePositive": True}},
+            {"pValue3m": 0.4, "robust": True, "inferenceValid3m": True, "foldStability3m": {"stablePositive": True}},
         ]
 
         apply_benjamini_hochberg(rows, alpha=0.10)
@@ -85,8 +174,8 @@ class SpearmanIcTests(unittest.TestCase):
 
     def test_fdr_keeps_missing_p_values_in_the_preregistered_family(self) -> None:
         rows = [
-            {"pValue3m": 0.04, "robust": True, "foldStability3m": {"stablePositive": True}},
-            {"pValue3m": None, "robust": True, "foldStability3m": {"stablePositive": True}},
+            {"pValue3m": 0.04, "robust": True, "inferenceValid3m": True, "foldStability3m": {"stablePositive": True}},
+            {"pValue3m": None, "robust": True, "inferenceValid3m": True, "foldStability3m": {"stablePositive": True}},
         ]
 
         apply_benjamini_hochberg(rows, alpha=0.10)
@@ -100,7 +189,7 @@ class SpearmanIcTests(unittest.TestCase):
 
     def test_fdr_reserves_unreported_preregistered_hypotheses(self) -> None:
         rows = [
-            {"pValue3m": 0.04, "robust": True, "foldStability3m": {"stablePositive": True}},
+            {"pValue3m": 0.04, "robust": True, "inferenceValid3m": True, "foldStability3m": {"stablePositive": True}},
         ]
 
         apply_benjamini_hochberg(rows, alpha=0.10, family_size=4)
@@ -315,7 +404,10 @@ class EvaluateSignalTests(unittest.TestCase):
             horizons=(7,),
             direction="higher_risk",
             drawdown_threshold_pct=-2.0,
-            drawdown_horizon_days=7,
+            # The first alert is five business sessions before the crash.
+            # Fourteen calendar days keeps the episode's first-alert outcome
+            # inside the declared horizon without crediting later alerts.
+            drawdown_horizon_days=14,
             bootstrap_horizon_days=7,
         )
         self.assertTrue(result["available"])
@@ -591,6 +683,10 @@ class BuildSignalValidationTests(unittest.TestCase):
         self.assertEqual(payload["oosSplitPct"], 65)
         self.assertEqual(payload["validationStatus"], "research-validation")
         self.assertIs(payload["independentHoldout"], False)
+        self.assertEqual(
+            payload["spyEarlyWarningRulesVersion"],
+            SPY_WARNING_RULES_VERSION,
+        )
         self.assertEqual(payload["multipleTesting"]["method"], "Benjamini-Hochberg")
         self.assertEqual(
             {row["name"] for row in payload["multipleTesting"]["families"]},
@@ -620,6 +716,8 @@ class BuildSignalValidationTests(unittest.TestCase):
         self.assertIn("bhadialComposite", composite_ids)
         self.assertIn("bhadialChange13w", composite_ids)
         self.assertIn("spyEarlyWarning", composite_ids)
+        spy_row = next(row for row in payload["composites"] if row["id"] == "spyEarlyWarning")
+        self.assertEqual(spy_row["rulesVersion"], SPY_WARNING_RULES_VERSION)
         self.assertTrue(any(row["id"].startswith("sleeve:") for row in payload["composites"]))
         self.assertNotIn("equityShortTermRisk", composite_ids)
         excluded = {row["id"]: row for row in payload["excludedModels"]}
@@ -635,6 +733,7 @@ class BuildSignalValidationTests(unittest.TestCase):
         payload = build_signal_validation({"percentile_series": {"sp500": []}})
         self.assertFalse(payload["available"])
         self.assertIn("factors", payload)
+        self.assertEqual(payload["spyEarlyWarningRulesVersion"], SPY_WARNING_RULES_VERSION)
 
     def test_duplicated_factor_series_share_cluster(self) -> None:
         indicators = self.build_indicators()
@@ -807,6 +906,7 @@ class SpyWarningRuleAuditTests(unittest.TestCase):
 
 class PortfolioOverviewTests(unittest.TestCase):
     def build_inputs(self, *, sew_score: float, est_score: float, lppl_status: str = "quiet") -> dict:
+        est_triggered = est_score >= 75
         sew_alloc = {
             "horizon": "1-3M",
             "horizonCn": "1-3个月",
@@ -815,6 +915,7 @@ class PortfolioOverviewTests(unittest.TestCase):
             "stance": "降权/对冲",
             "hedgeAction": "回撤保护优先",
             "exposureBandPct": [50, 75] if sew_score >= 60 else [75, 100],
+            "actionable": True,
         }
         est_alloc = {
             "horizon": "1-10d",
@@ -823,7 +924,8 @@ class PortfolioOverviewTests(unittest.TestCase):
             "regimeCn": "强告警" if est_score >= 75 else "正常",
             "stance": "短线降风险",
             "hedgeAction": "买入1-2周保护",
-            "exposureBandPct": [50, 80] if est_score >= 75 else [100, 100],
+            "exposureBandPct": [50, 80] if est_triggered else None,
+            "actionable": est_triggered,
         }
         lppl = {
             "indices": [
@@ -863,8 +965,48 @@ class PortfolioOverviewTests(unittest.TestCase):
             ],
         }
         return {
-            "spy_early_warning": {"available": True, "score": sew_score, "regime": sew_alloc["regime"], "regimeCn": sew_alloc["regimeCn"], "asOf": "2026-06-11", "allocation": sew_alloc},
-            "equity_short_term_risk": {"available": True, "score": est_score, "asOf": "2026-06-11", "allocation": est_alloc},
+            "spy_early_warning": {
+                "available": True, "score": sew_score, "regime": sew_alloc["regime"],
+                "regimeCn": sew_alloc["regimeCn"], "asOf": "2026-06-11",
+                "aggregateActionableRobust": True,
+                "predictiveValidity": {"status": "actionable", "actionable": True, "independentHoldout": True},
+                "allocation": sew_alloc,
+            },
+            "equity_short_term_risk": {
+                "available": True,
+                "score": est_score,
+                "asOf": "2026-06-11",
+                "actionable": est_triggered,
+                "scoreScale": {"coreComplete": True, "thresholdComparable": True},
+                "allocation": est_alloc,
+                "contextAllocation": None if est_triggered else {
+                    **est_alloc,
+                    "exposureBandPct": [100, 100],
+                    "actionable": True,
+                },
+                "productionValidation": {
+                    "available": True,
+                    "scoreContractAllowsAction": True,
+                    "thresholdValidated": True,
+                    "currentTriggered": est_triggered,
+                    "actionable": est_triggered,
+                },
+                "backtest": {
+                    "walkForward": {
+                        "available": True,
+                        "thresholdTests": [{
+                            "threshold": 75,
+                            "productionUse": True,
+                            "oosValidated": True,
+                            "sampleSize": 198,
+                            "alertDays": 10,
+                            "precision": 70.0,
+                            "baseRate": 50.0,
+                            "liftVsBaseRate": 1.4,
+                        }],
+                    },
+                },
+            },
             "global_lppl_risk": lppl,
             "macro_liquidity": {"score": 55.0, "regime": "Neutral"},
             "signal_validation": signal_validation,
@@ -900,7 +1042,7 @@ class PortfolioOverviewTests(unittest.TestCase):
         lppl_layer = next(layer for layer in overview["layers"] if layer["layer"] == "globalLppl")
         self.assertIsNone(lppl_layer["exposureBandPct"])
         self.assertEqual(lppl_layer["contextBand"], [60.0, 85.0])
-        self.assertTrue(any("globalLppl" in conflict["layers"] for conflict in overview["conflicts"]))
+        self.assertFalse(any("globalLppl" in conflict["layers"] for conflict in overview["conflicts"]))
         # LPPL has no complete actionable gate, so it remains context and cannot
         # override the validated SPY/equity bands.
         self.assertEqual(overview["contextBand"], [60.0, 85.0])
@@ -926,41 +1068,29 @@ class PortfolioOverviewTests(unittest.TestCase):
         self.assertIsNone(overview["suggestedEquityExposureBand"])
         self.assertEqual(overview["contextBand"], [50.0, 75.0])
 
-    def test_regional_tilt_surfaces_rotation_and_breaches(self) -> None:
+    def test_regional_tilt_surfaces_validated_rotation_and_breaches(self) -> None:
+        korea = validated_regional_risk_region("korea", "韩国")
         regional_monitor = {
             "available": True,
-            "rotation": {"available": True, "favorRegions": [], "reduceRegions": ["korea", "taiwan"]},
-            "regions": [
-                {"key": "korea", "nameCn": "韩国",
-                 "factorAlert": {"available": True, "state": "breached", "factorLabelCn": "已实现波动", "current": 43.0, "threshold": 12.0}},
-                {"key": "taiwan", "nameCn": "台湾",
-                 "factorAlert": {"available": True, "state": "approaching", "factorLabelCn": "已实现波动", "current": 11.0, "threshold": 12.0}},
-                {"key": "us", "nameCn": "美国", "factorAlert": {"available": False}},
-            ],
+            "rotation": build_regional_rotation([korea]),
+            "regions": [korea],
         }
         inputs = self.build_inputs(sew_score=45.0, est_score=30.0)
         overview = build_portfolio_overview(**inputs, regional_monitor=regional_monitor)
         tilt = overview["regionalTilt"]
         self.assertTrue(tilt["available"])
-        self.assertEqual(tilt["reduceRegions"], ["korea", "taiwan"])
-        # Only the BREACHED region is listed as an active breach (approaching is not).
+        self.assertEqual(tilt["reduceRegions"], ["korea"])
         self.assertEqual([b["key"] for b in tilt["breachedRegions"]], ["korea"])
-        self.assertIn("减持 韩国、台湾", tilt["summary"])
+        self.assertIn("减持 韩国", tilt["summary"])
         self.assertIn("突破验证阈值", tilt["summary"])
 
     def test_regional_tilt_highlights_composite_driven_breaches(self) -> None:
+        japan = validated_regional_risk_region("japan", "日本", composite=True)
+        korea = validated_regional_risk_region("korea", "韩国")
         regional_monitor = {
             "available": True,
-            "rotation": {"available": True, "favorRegions": [], "reduceRegions": ["japan", "korea"]},
-            "regions": [
-                {"key": "japan", "nameCn": "日本",
-                 "factorAlert": {"available": True, "state": "breached", "source": "composite",
-                                 "factorLabelCn": "证据加权综合信号", "current": 1.8, "threshold": 0.9,
-                                 "trackRecord": "历史共突破25次, 命中48%"}},
-                {"key": "korea", "nameCn": "韩国",
-                 "factorAlert": {"available": True, "state": "breached", "source": "factor",
-                                 "factorLabelCn": "已实现波动", "current": 43.0, "threshold": 12.0}},
-            ],
+            "rotation": build_regional_rotation([japan, korea]),
+            "regions": [japan, korea],
         }
         inputs = self.build_inputs(sew_score=45.0, est_score=30.0)
         overview = build_portfolio_overview(**inputs, regional_monitor=regional_monitor)
@@ -982,7 +1112,7 @@ class PortfolioOverviewTests(unittest.TestCase):
             "rotation": {"available": True, "favorRegions": [], "reduceRegions": []},
             "regions": [
                 {"key": "us", "nameCn": "美国",
-                 "internalRotation": {"available": True, "tilt": "broad", "tiltCn": "偏宽基(SPY)、减科技(QQQ)",
+                 "internalRotation": {"available": True, "actionable": True, "tilt": "broad", "tiltCn": "偏宽基(SPY)、减科技(QQQ)",
                                       "rationale": "美股内部: 科技风险更高 → 偏宽基"}},
             ],
         }

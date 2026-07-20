@@ -75,11 +75,14 @@ FRED_SERIES_META: dict[str, tuple[str, str, str, str]] = {
     "GVZCLS": ("GVZ黄金波动率", "index", "FRED GVZCLS", "volatility"),
 }
 
+LATEST_VINTAGE_SOURCE_SUFFIX = " [latest-vintage backfill; not point-in-time]"
+LATEST_VINTAGE_STATUS = "latest_available_revision_unknown"
+
 
 def fetch_public_history(today: date | None = None, years: int = 5) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     today = today or date.today()
     curve_records = fetch_treasury_yield_curves(today=today, months_back=years * 12 + 2)
-    fred = fetch_fred_series_bulk(FRED_SERIES)
+    fred = fetch_fred_series_bulk(FRED_SERIES, as_of=today)
     source_errors: list[dict[str, str]] = []
     missing_fred_series = sorted(set(FRED_SERIES_META) - set(fred))
     if missing_fred_series:
@@ -103,6 +106,17 @@ def fetch_public_history(today: date | None = None, years: int = 5) -> tuple[lis
         "auctionRecordCount": len(auctions),
         "sourceErrors": source_errors,
         "observationCount": len(observations),
+        "validationEligibleObservationCount": sum(
+            1 for row in observations if row.get("validationEligible") is True
+        ),
+        "latestVintageObservationCount": sum(
+            1 for row in observations if row.get("vintageStatus") == LATEST_VINTAGE_STATUS
+        ),
+        "revisionPolicy": (
+            "FRED bulk history is the latest available vintage, not an ALFRED point-in-time vintage; "
+            "FRED and FRED-derived rows are persisted for descriptive charts only and carry "
+            "validationEligible=false."
+        ),
         "startDate": window_start(today, years=years).isoformat(),
         "endDate": today.isoformat(),
     }
@@ -178,7 +192,11 @@ def fred_observations(fred: dict[str, TimeSeries], start: date, end: date) -> li
         if meta is None:
             continue
         name, unit, source, category = meta
-        rows.extend(point_rows(series.points, start, end, category, name, unit, source, series_id))
+        rows.extend(
+            latest_vintage_rows(
+                point_rows(series.points, start, end, category, name, unit, source, series_id)
+            )
+        )
     return rows
 
 
@@ -220,7 +238,30 @@ def derived_observations(fred: dict[str, TimeSeries], start: date, end: date) ->
     rows.extend(point_rows(vix_term, start, end, "risk", "VIX期限结构", "", "FRED VIXCLS / VXVCLS", "vix_term_structure"))
     rows.extend(point_rows(dxy_vol, start, end, "fx", "美元实现波动率", "%", "FRED DTWEXBGS 63D realized vol", "dxy_realized_vol"))
     rows.extend(point_rows(oil_vol_deviation, start, end, "volatility", "原油波动偏离", "", "FRED OVXCLS - rolling median", "oil_vol_deviation"))
-    return rows
+    return latest_vintage_rows(rows)
+
+
+def latest_vintage_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mark current-vintage FRED history as descriptive, never point-in-time.
+
+    FRED graph/bulk downloads expose the latest revised history.  Backdating
+    those values to their observation dates is appropriate for charts, but not
+    for historical validation that asks what was known then.  The structured
+    fields survive direct backfill consumers; the source suffix also survives
+    the legacy SQLite schema so downstream readers cannot mistake the rows for
+    vintage-safe evidence.
+    """
+    annotated: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        source = str(item.get("source") or "")
+        if LATEST_VINTAGE_SOURCE_SUFFIX not in source:
+            item["source"] = f"{source}{LATEST_VINTAGE_SOURCE_SUFFIX}".strip()
+        item["vintageStatus"] = LATEST_VINTAGE_STATUS
+        item["validationEligible"] = False
+        item["validationExclusionReason"] = "latest revised history has no point-in-time release vintage"
+        annotated.append(item)
+    return annotated
 
 
 def auction_observations(auctions: list[dict[str, object]], start: date, end: date) -> list[dict[str, Any]]:
@@ -279,6 +320,8 @@ def history_row(
         "value": value,
         "unit": unit,
         "source": source,
+        "vintageStatus": "final_or_revision_insensitive",
+        "validationEligible": True,
     }
 
 

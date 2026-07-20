@@ -96,6 +96,21 @@ class SmokeCheckTests(unittest.TestCase):
             "candidateEstimator": "standardRms",
             "productionUnchanged": True,
             "method": "same inputs, different aggregation",
+            "evidenceScope": {
+                "promotionMetric": "purged final-30% OOS independent alert episodes at pre-registered score>=75",
+                "fullSampleRole": "descriptive_only",
+                "fullSampleEligibleForPromotion": False,
+            },
+            "comparisonContract": {
+                "available": True,
+                "comparable": True,
+                "samePurgedHoldout": True,
+                "checkedFields": ["splitDate", "oosObservationFingerprint"],
+                "missingFields": [],
+                "mismatchedFields": [],
+                "promotionMetric": "independentAlertClusterPrecision",
+                "fullSampleExcluded": True,
+            },
             "current": {
                 "production": {"riskScore": 60.3, "volComponentScore": 55.0},
                 "candidate": {"riskScore": 61.2, "volComponentScore": 60.0},
@@ -103,16 +118,38 @@ class SmokeCheckTests(unittest.TestCase):
                 "volComponentScoreDelta": 5.0,
             },
             "backtest": {
-                "production": {"sampleSize": 737, "threshold": 75},
-                "candidate": {"sampleSize": 737, "threshold": 75},
+                "production": {
+                    "sampleSize": 737,
+                    "threshold": 75,
+                    "fullSampleRole": "descriptive_only",
+                    "fullSampleEligibleForPromotion": False,
+                    "oosPrecisionMetric": "independentAlertClusterPrecision",
+                    "oosIndependentEpisodeMetricsAvailable": True,
+                    "oosAlertEpisodes": 4,
+                    "oosFalsePositives": 2,
+                    "oosValidated": False,
+                },
+                "candidate": {
+                    "sampleSize": 737,
+                    "threshold": 75,
+                    "fullSampleRole": "descriptive_only",
+                    "fullSampleEligibleForPromotion": False,
+                    "oosPrecisionMetric": "independentAlertClusterPrecision",
+                    "oosIndependentEpisodeMetricsAvailable": True,
+                    "oosAlertEpisodes": 4,
+                    "oosFalsePositives": 2,
+                    "oosValidated": False,
+                },
                 "fullPrecisionDelta": 1.2,
                 "oosPrecisionDelta": None,
                 "oosLiftDelta": None,
                 "oosFalsePositiveDelta": 0,
+                "oosIndependentEpisodeDelta": 0,
             },
             "verdict": "insufficientEvidence",
             "verdictCn": "证据不足",
             "recommendedAction": "retainProduction",
+            "shadowPromotionEligible": False,
             "summary": "候选OOS告警不足,保留当前口径。",
         }
 
@@ -218,6 +255,19 @@ class SmokeCheckTests(unittest.TestCase):
                 "available": True,
                 "score": 82.4,
                 "baseScore": 79.1,
+                "actionable": False,
+                "scoreScale": {
+                    "id": "equity-risk-replay-comparable-v1",
+                    "coreComplete": True,
+                    "thresholdComparable": True,
+                },
+                "productionValidation": {
+                    "available": True,
+                    "scoreContractAllowsAction": True,
+                    "thresholdValidated": False,
+                    "currentTriggered": True,
+                    "actionable": False,
+                },
                 "regime": "Strong Alert",
                 "regimeCn": "强告警",
                 "asOf": "2026-06-04",
@@ -227,6 +277,8 @@ class SmokeCheckTests(unittest.TestCase):
                     "stance": "短线降风险",
                     "equityExposure": "高Beta/AI拥挤仓位降到低配",
                     "hedgeAction": "收盘前优先减仓或买入1-2周保护性对冲",
+                    "exposureBandPct": None,
+                    "actionable": False,
                 },
                 "components": [
                     {"key": "volTargetPressure", "label": "多尺度波动目标压力", "available": True, "score": 82.0, "detail": "vol pressure", "scoreUse": "scored", "sourceQuality": "high"},
@@ -235,8 +287,8 @@ class SmokeCheckTests(unittest.TestCase):
                     {"key": "sectorRotation", "label": "板块轮动断裂", "available": True, "score": 92.0, "detail": "SMH跑输SPY", "scoreUse": "scored", "sourceQuality": "high"},
                     {"key": "hotStockReversal", "label": "热点股集体回落", "available": True, "score": 90.0, "detail": "热点股回落", "scoreUse": "scored", "sourceQuality": "high"},
                     {"key": "turnover", "label": "成交承接", "available": True, "score": 78.0, "detail": "缩量冲高", "scoreUse": "scored", "sourceQuality": "high"},
-                    {"key": "macroOverlay", "label": "已有宏观因子叠加", "available": True, "score": 52.0, "detail": "macro overlay", "scoreUse": "scored", "sourceQuality": "medium"},
-                    {"key": "eventRisk", "label": "新闻/事件风险", "available": True, "score": 90.0, "detail": "BLS Employment Situation", "scoreUse": "scored", "sourceQuality": "medium"},
+                    {"key": "macroOverlay", "label": "已有宏观因子叠加", "available": True, "score": 52.0, "detail": "macro overlay", "scoreUse": "context", "sourceQuality": "medium"},
+                    {"key": "eventRisk", "label": "新闻/事件风险", "available": True, "score": 90.0, "detail": "BLS Employment Situation", "scoreUse": "context", "sourceQuality": "medium"},
                     {"key": "optionOI", "label": "期权OI趋势", "available": False, "score": None, "detail": "audit only", "scoreUse": "missing", "sourceQuality": "low"},
                 ],
                 "drivers": [{"key": "lateRotationBreak", "name": "高热板块当日跑输", "riskScore": 92.0}],
@@ -245,7 +297,7 @@ class SmokeCheckTests(unittest.TestCase):
                     {"component": "sectorRotation", "label": "板块轮动断裂", "weight": 0.24, "source": "Nasdaq daily OHLCV", "sourceQuality": "high", "historicalReplay": True, "scoreUse": "scored", "coverageStart": "2025-10-28", "coverageEnd": "2026-06-04", "observations": 880, "timestampPolicy": "same-day or earlier bars", "reason": "ETF bars can be replayed"},
                     {"component": "hotStockReversal", "label": "热点股集体回落", "weight": 0.20, "source": "Nasdaq daily OHLCV", "sourceQuality": "high", "historicalReplay": True, "scoreUse": "scored", "coverageStart": "2025-10-28", "coverageEnd": "2026-06-04", "observations": 1320, "timestampPolicy": "same-day or earlier bars", "reason": "stock bars can be replayed"},
                     {"component": "turnover", "label": "成交承接", "weight": 0.10, "source": "Nasdaq daily OHLCV", "sourceQuality": "high", "historicalReplay": True, "scoreUse": "scored", "coverageStart": "2025-10-28", "coverageEnd": "2026-06-04", "observations": 220, "timestampPolicy": "same-day or earlier bars", "reason": "SPY volume can be replayed"},
-                    {"component": "eventRisk", "label": "新闻/事件风险", "weight": 0.14, "source": "Official macro release calendar", "sourceQuality": "medium", "historicalReplay": False, "scoreUse": "scored", "coverageStart": "", "coverageEnd": "2026-06-04", "observations": 1, "timestampPolicy": "events known before signal", "reason": "forward calendar is decision relevant"},
+                    {"component": "eventRisk", "label": "新闻/事件风险", "weight": 0.14, "source": "Official macro release calendar", "sourceQuality": "medium", "historicalReplay": False, "scoreUse": "context", "coverageStart": "", "coverageEnd": "2026-06-04", "observations": 1, "timestampPolicy": "events known before signal", "reason": "forward calendar is context only"},
                 ],
                 "sourceQuality": {
                     "verdict": "高可信",
@@ -272,7 +324,13 @@ class SmokeCheckTests(unittest.TestCase):
                             "label": component,
                             "configuredWeight": 0.1,
                             "configuredWeightPct": 10.0,
-                            "scoreUse": "missing" if component == "optionOI" else "scored",
+                            "scoreUse": (
+                                "missing"
+                                if component == "optionOI"
+                                else "context"
+                                if component in {"macroOverlay", "eventRisk"}
+                                else "scored"
+                            ),
                             "sourceQuality": "low" if component == "optionOI" else "high",
                             "historicalReplay": component != "optionOI",
                             "diagnosticDecision": "trim" if component in {"sectorRotation", "eventRisk", "optionOI"} else "support",
@@ -296,7 +354,7 @@ class SmokeCheckTests(unittest.TestCase):
                     "nextEventDate": "2026-06-08",
                     "daysToNextEvent": 4,
                     "knownBeforeSignal": True,
-                    "scoreUse": "scored",
+                    "scoreUse": "context",
                     "summary": "未来5天有1个高重要性事件。",
                 },
                 "trend": {
@@ -868,6 +926,34 @@ class SmokeCheckTests(unittest.TestCase):
 
         self.assertEqual(validate_dashboard(dashboard), [])
 
+        equity_payload = dashboard["equityShortTermRisk"]
+        equity_allocation = equity_payload["allocation"]
+        equity_validation = equity_payload["productionValidation"]
+        equity_payload["actionable"] = True
+        equity_allocation["actionable"] = True
+        equity_allocation["exposureBandPct"] = [50, 80]
+        equity_validation["thresholdValidated"] = True
+        equity_validation["actionable"] = True
+        self.assertTrue(has_equity_short_term_risk_contract(equity_payload))
+        action_gates = (
+            (equity_payload["scoreScale"], "coreComplete"),
+            (equity_payload["scoreScale"], "thresholdComparable"),
+            (equity_validation, "available"),
+            (equity_validation, "scoreContractAllowsAction"),
+            (equity_validation, "thresholdValidated"),
+            (equity_validation, "currentTriggered"),
+        )
+        for container, key in action_gates:
+            with self.subTest(action_gate=key):
+                container[key] = False
+                self.assertFalse(has_equity_short_term_risk_contract(equity_payload))
+                container[key] = True
+        equity_payload["actionable"] = False
+        equity_allocation["actionable"] = False
+        equity_allocation["exposureBandPct"] = None
+        equity_validation["thresholdValidated"] = False
+        equity_validation["actionable"] = False
+
         equity_backtest = dashboard["equityShortTermRisk"]["backtest"]
         equity_backtest["highPrecisionThresholdTest"] = {
             "available": False,
@@ -949,6 +1035,7 @@ class SmokeCheckTests(unittest.TestCase):
     def test_validate_health_payload_requires_equity_freshness_timing_fields(self):
         health = {
             "status": "degraded",
+            "dashboardContract": {"valid": True, "scope": "full", "issues": []},
             "equityRiskFreshness": {
                 "expectedDate": "2026-06-08",
                 "sourceDate": "2026-06-05",
@@ -965,6 +1052,7 @@ class SmokeCheckTests(unittest.TestCase):
     def test_validate_health_payload_accepts_equity_freshness_timing_contract(self):
         health = {
             "status": "degraded",
+            "dashboardContract": {"valid": True, "scope": "full", "issues": []},
             "equityRiskFreshness": {
                 "expectedDate": "2026-06-08",
                 "sourceDate": "2026-06-05",

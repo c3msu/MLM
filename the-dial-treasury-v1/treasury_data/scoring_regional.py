@@ -77,7 +77,12 @@ def build_regional_monitor(global_lppl_risk: dict[str, Any] | None) -> dict[str,
                 region["internalRotation"] = build_us_internal_rotation(region)
         regions.append(region)
     available_regions = [region for region in regions if region["aggregate"]["availableCount"] > 0]
-    alerting = [region for region in available_regions if region["aggregate"]["status"] == "risk"]
+    raw_alerting = [region for region in available_regions if region["aggregate"]["status"] == "risk"]
+    alerting = [
+        region
+        for region in raw_alerting
+        if int(region["aggregate"].get("actionableRiskCount") or 0) > 0
+    ]
     diversification = build_regional_diversification(regions)
     return {
         "available": bool(available_regions),
@@ -89,7 +94,8 @@ def build_regional_monitor(global_lppl_risk: dict[str, Any] | None) -> dict[str,
         ),
         "regionOrder": [region["key"] for region in regions],
         "alertingRegions": [region["key"] for region in alerting],
-        "summary": regional_monitor_summary(available_regions, alerting),
+        "rawAlertingRegions": [region["key"] for region in raw_alerting],
+        "summary": regional_monitor_summary(available_regions, alerting, raw_alerting=raw_alerting),
         "rotation": build_regional_rotation(regions, diversification),
         "diversification": diversification,
         "regions": compact_regional_regions(regions),
@@ -145,6 +151,11 @@ REGIONAL_INDEX_SUMMARY_FIELDS = (
     "forwardSignal",
     "priceFactors",
     "validation",
+    "fitProductionEligible",
+    "productionEligible",
+    "actionable",
+    "actionabilityStatus",
+    "scoreUse",
     "factorValidation",
 )
 
@@ -184,6 +195,9 @@ def regional_monitor_aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         if str(row.get("status")) in {"risk", "watch"} and optional_float(row.get("daysToCritical")) is not None
     ]
     factor_rows = [row.get("priceFactors") for row in available if isinstance(row.get("priceFactors"), dict) and row["priceFactors"].get("available")]
+    production_eligible = [row for row in available if row.get("productionEligible") is True]
+    actionable = [row for row in available if regional_lppl_index_qualifies_as_actionable(row)]
+    actionable_risk = [row for row in actionable if str(row.get("status") or "") in {"risk", "watch"}]
     return {
         "status": worst_status,
         "statusCn": worst_cn,
@@ -191,6 +205,10 @@ def regional_monitor_aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "minDaysToCritical": min(flagged_days) if flagged_days else None,
         "availableCount": len(available),
         "indexCount": len(rows),
+        "productionEligibleCount": len(production_eligible),
+        "actionableCount": len(actionable),
+        "actionableRiskCount": len(actionable_risk),
+        "scoreUse": "production_signal" if actionable_risk else "raw_context",
         "priceFactors": regional_price_factor_rollup(factor_rows),
     }
 
@@ -313,20 +331,29 @@ def build_regional_diversification(regions: list[dict[str, Any]]) -> dict[str, A
     }
 
 
-def regional_monitor_summary(available_regions: list[dict[str, Any]], alerting: list[dict[str, Any]]) -> str:
+def regional_monitor_summary(
+    available_regions: list[dict[str, Any]],
+    alerting: list[dict[str, Any]],
+    *,
+    raw_alerting: list[dict[str, Any]] | None = None,
+) -> str:
     if not available_regions:
         return "暂无可用地区LPPL样本。"
     if alerting:
         names = "、".join(region["nameCn"] for region in alerting)
-        return f"{len(available_regions)}个地区在监控; {names}出现泡沫临界风险,其余地区相对平静。"
+        return f"{len(available_regions)}个地区在监控; {names}的LPPL通过生产门槛且当前触发,其余地区无生产级泡沫预警。"
+    raw_alerting = raw_alerting or []
+    if raw_alerting:
+        names = "、".join(region["nameCn"] for region in raw_alerting)
+        return f"{len(available_regions)}个地区在监控; {names}原始LPPL处于风险区,但未通过生产门槛,仅作研究背景。"
     return f"{len(available_regions)}个地区在监控,均未触发泡沫临界风险。"
 
 
 # Factor ids whose high readings mean MORE risk (used to gate evidence-backed caution).
 REGIONAL_RISK_FACTOR_IDS = {"lpplScore", "realizedVol"}
-REGIONAL_COMPOSITE_ALERT_MIN_OBSERVATIONS = 60
-REGIONAL_COMPOSITE_ALERT_MIN_OOS_OBSERVATIONS = 20
-REGIONAL_COMPOSITE_ALERT_MIN_OOS_ALERTS = 3
+REGIONAL_ACTIONABLE_MIN_OBSERVATIONS = 60
+REGIONAL_ACTIONABLE_MIN_OOS_OBSERVATIONS = 20
+REGIONAL_ACTIONABLE_MIN_OOS_ALERTS = 3
 
 
 def regional_representative_index(indices: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -344,61 +371,136 @@ def regional_representative_index(indices: list[dict[str, Any]]) -> dict[str, An
     )
 
 
+def regional_signal_qualifies_as_actionable(signal: dict[str, Any] | None) -> bool:
+    """Fail-closed actionable gate shared by regional factors and composites.
+
+    ``classification`` and lift describe usefulness, but are not sufficient evidence on
+    their own.  A regional signal must also be positively oriented out of sample, pass
+    the bootstrap/FDR/fold checks, and have enough raw observations and alert events.
+    """
+    if not isinstance(signal, dict) or signal.get("available") is False:
+        return False
+    fold_stability = signal.get("foldStability3m") if isinstance(signal.get("foldStability3m"), dict) else {}
+    oos_ic = optional_float(signal.get("oosIc3m"))
+    observation_count = optional_float(signal.get("observationCount")) or 0.0
+    oos_sample_size = optional_float(signal.get("oosSampleSize3m")) or 0.0
+    oos_alert_count = optional_float(signal.get("oosAlertCount")) or 0.0
+    return bool(
+        str(signal.get("classification") or "") == "leading"
+        and oos_ic is not None
+        and oos_ic > 0.0
+        and signal.get("wrongWay") is False
+        and (optional_float(signal.get("lift")) or 0.0) > 1.0
+        and signal.get("robust") is True
+        and signal.get("fdrSignificant3m") is True
+        and signal.get("inferenceValid3m") is True
+        and fold_stability.get("stablePositive") is True
+        and signal.get("actionableRobust") is True
+        and observation_count >= REGIONAL_ACTIONABLE_MIN_OBSERVATIONS
+        and oos_sample_size >= REGIONAL_ACTIONABLE_MIN_OOS_OBSERVATIONS
+        and oos_alert_count >= REGIONAL_ACTIONABLE_MIN_OOS_ALERTS
+    )
+
+
+def regional_lppl_index_qualifies_as_actionable(row: dict[str, Any] | None) -> bool:
+    """Require the complete current LPPL production audit, not a legacy true flag.
+
+    Regional payloads can be rebuilt from a last-known-good global LPPL block.  Older
+    blocks may contain ``actionable``/``productionEligible`` booleans without the
+    replay-comparability audit that now defines a production trigger.  Treat those
+    rows as research context so a cache fallback cannot restore a binding allocation.
+    """
+    if not isinstance(row, dict) or row.get("available") is not True:
+        return False
+    validation = row.get("validation") if isinstance(row.get("validation"), dict) else {}
+    score = optional_float(row.get("score"))
+    threshold = optional_float(validation.get("productionThreshold"))
+    model_audit = validation.get("replayModelAudit") if isinstance(validation.get("replayModelAudit"), dict) else {}
+    production_model_id = str(model_audit.get("productionModelSpecId") or "")
+    live_model_id = str(model_audit.get("liveModelSpecId") or "")
+    observed_model_ids = model_audit.get("observedModelSpecIds")
+    observation_count = int(optional_float(model_audit.get("observationCount")) or 0)
+    comparable_count = int(optional_float(model_audit.get("comparableObservationCount")) or 0)
+    complete_model_audit = bool(
+        model_audit.get("required") is True
+        and model_audit.get("enforcementPass") is True
+        and model_audit.get("status") == "comparable"
+        and model_audit.get("comparable") is True
+        and model_audit.get("replayComparable") is True
+        and model_audit.get("liveComparable") is True
+        and model_audit.get("liveModelMetadataAvailable") is True
+        and model_audit.get("liveValidationComparable") is True
+        and production_model_id
+        and live_model_id == production_model_id
+        and observed_model_ids == [production_model_id]
+        and observation_count > 0
+        and comparable_count == observation_count
+        and int(optional_float(model_audit.get("unknownModelSpecCount")) or 0) == 0
+        and int(optional_float(model_audit.get("mismatchedModelSpecCount")) or 0) == 0
+    )
+    return bool(
+        row.get("fitProductionEligible") is True
+        and row.get("productionEligible") is True
+        and row.get("actionable") is True
+        and row.get("scoreUse") == "production_signal"
+        and row.get("actionabilityStatus") == "current_threshold_triggered"
+        and validation.get("productionEvidenceAvailable") is True
+        and validation.get("productionActionable") is True
+        and complete_model_audit
+        and score is not None
+        and threshold is not None
+        and score >= threshold
+    )
+
+
+def regional_lppl_region_has_current_trigger(region: dict[str, Any]) -> bool:
+    aggregate = region.get("aggregate") if isinstance(region.get("aggregate"), dict) else {}
+    if int(aggregate.get("actionableRiskCount") or 0) <= 0:
+        return False
+    indices = region.get("indices") if isinstance(region.get("indices"), list) else []
+    return any(
+        regional_lppl_index_qualifies_as_actionable(row)
+        and str(row.get("status") or "") in {"risk", "watch"}
+        for row in indices
+        if isinstance(row, dict)
+    )
+
+
 def region_validated_leading_factors(factor_validation: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Factors that PASSED this region's own walk-forward OOS test as leading with lift>1 —
-    i.e. proven early-warning power for that region's equity. Used to gate conviction."""
-    if not isinstance(factor_validation, dict) or not factor_validation.get("available"):
+    """Factors that pass the region's complete actionable walk-forward gate."""
+    if (
+        not isinstance(factor_validation, dict)
+        or not factor_validation.get("available")
+        or factor_validation.get("independentHoldout") is not True
+    ):
         return []
     leading: list[dict[str, Any]] = []
     for factor in factor_validation.get("factors", []):
-        if not isinstance(factor, dict):
+        if not regional_signal_qualifies_as_actionable(factor):
             continue
         lift = optional_float(factor.get("lift"))
-        if str(factor.get("classification")) == "leading" and lift is not None and lift > 1.0:
-            leading.append(
-                {
-                    "id": str(factor.get("id") or ""),
-                    "labelCn": str(factor.get("labelCn") or factor.get("label") or ""),
-                    "lift": round(lift, 2),
-                    "oosIc3m": optional_float(factor.get("oosIc3m")),
-                    "leadTimeDays": optional_float(factor.get("leadTimeDays")),
-                }
-            )
+        leading.append(
+            {
+                "id": str(factor.get("id") or ""),
+                "labelCn": str(factor.get("labelCn") or factor.get("label") or ""),
+                "lift": round(lift, 2) if lift is not None else None,
+                "oosIc3m": optional_float(factor.get("oosIc3m")),
+                "leadTimeDays": optional_float(factor.get("leadTimeDays")),
+            }
+        )
     return sorted(leading, key=lambda item: item["lift"] or 0.0, reverse=True)
 
 
-def composite_qualifies_as_alert(composite: dict[str, Any]) -> bool:
-    if not isinstance(composite, dict) or not composite.get("available"):
-        return False
-    if composite.get("currentValue") is None or composite.get("alertThreshold") is None:
-        return False
-    fold_stability = composite.get("foldStability3m") if isinstance(composite.get("foldStability3m"), dict) else {}
-    oos_ic = optional_float(composite.get("oosIc3m"))
-    observation_count = optional_float(composite.get("observationCount")) or 0.0
-    oos_sample_size = optional_float(composite.get("oosSampleSize3m")) or 0.0
-    oos_alert_count = optional_float(composite.get("oosAlertCount")) or 0.0
-    direction = str(composite.get("direction") or "")
-
-    # ``beatsBestSingleFactor`` is a relative comparison, not a validation
-    # verdict.  A composite can beat a weak single factor while still being
-    # wrong-way, unstable, multiplicity-insignificant, or supported by only a
-    # handful of observations.  Keep the live alert fail-closed on every part
-    # of the complete actionable gate.
+def composite_qualifies_as_alert(composite: dict[str, Any], *, independent_holdout: bool) -> bool:
     return bool(
-        composite.get("beatsBestSingleFactor") is True
-        and str(composite.get("classification") or "") == "leading"
-        and direction == "higher_risk"
-        and oos_ic is not None
-        and oos_ic > 0.0
-        and composite.get("wrongWay") is False
-        and (optional_float(composite.get("lift")) or 0.0) > 1.0
-        and composite.get("robust") is True
-        and composite.get("fdrSignificant3m") is True
-        and fold_stability.get("stablePositive") is True
-        and composite.get("actionableRobust") is True
-        and observation_count >= REGIONAL_COMPOSITE_ALERT_MIN_OBSERVATIONS
-        and oos_sample_size >= REGIONAL_COMPOSITE_ALERT_MIN_OOS_OBSERVATIONS
-        and oos_alert_count >= REGIONAL_COMPOSITE_ALERT_MIN_OOS_ALERTS
+        independent_holdout
+        and
+        regional_signal_qualifies_as_actionable(composite)
+        and composite.get("available") is True
+        and composite.get("beatsBestSingleFactor") is True
+        and str(composite.get("direction") or "") == "higher_risk"
+        and composite.get("currentValue") is not None
+        and composite.get("alertThreshold") is not None
     )
 
 
@@ -413,7 +515,8 @@ def build_region_factor_alert(region: dict[str, Any]) -> dict[str, Any]:
     factor_validation = representative.get("factorValidation") if isinstance(representative.get("factorValidation"), dict) else {}
     composite = factor_validation.get("composite") if isinstance(factor_validation.get("composite"), dict) else {}
 
-    if composite_qualifies_as_alert(composite):
+    independent_holdout = factor_validation.get("independentHoldout") is True
+    if composite_qualifies_as_alert(composite, independent_holdout=independent_holdout):
         source, label, factor_id = "composite", "证据加权综合信号", "regionComposite"
         current = optional_float(composite.get("currentValue"))
         threshold = optional_float(composite.get("alertThreshold"))
@@ -464,8 +567,11 @@ def build_region_factor_alert(region: dict[str, Any]) -> dict[str, Any]:
     if breach_count_total is not None and hit_rate_total is not None:
         track_record = f"历史共突破{int(breach_count_total)}次, 命中{hit_rate_total * 100:.0f}%"
     state_word = "突破" if state == "breached" else "逼近" if state == "approaching" else "低于"
+    current_triggered = state == "breached"
     return {
         "available": True,
+        "actionable": current_triggered,
+        "scoreUse": "production_signal" if current_triggered else "research_only",
         "source": source,
         "factorId": factor_id,
         "factorLabelCn": label,
@@ -488,6 +594,46 @@ def build_region_factor_alert(region: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def regional_factor_alert_qualifies_as_actionable(region: dict[str, Any]) -> bool:
+    """Verify that a serialized regional breach still has its full evidence chain."""
+    alert = region.get("factorAlert") if isinstance(region.get("factorAlert"), dict) else {}
+    if not (
+        alert.get("available") is True
+        and alert.get("state") == "breached"
+        and alert.get("actionable") is True
+        and alert.get("scoreUse") == "production_signal"
+    ):
+        return False
+    representative = regional_representative_index(
+        region.get("indices", []) if isinstance(region.get("indices"), list) else []
+    )
+    if representative is None:
+        return False
+    factor_validation = (
+        representative.get("factorValidation")
+        if isinstance(representative.get("factorValidation"), dict)
+        else {}
+    )
+    if factor_validation.get("independentHoldout") is not True:
+        return False
+    source = str(alert.get("source") or "")
+    factor_id = str(alert.get("factorId") or "")
+    if source == "composite":
+        composite = factor_validation.get("composite")
+        return bool(
+            isinstance(composite, dict)
+            and composite_qualifies_as_alert(composite, independent_holdout=True)
+            and factor_id == "regionComposite"
+        )
+    if source != "factor":
+        return False
+    return factor_id in {
+        str(factor.get("id") or "")
+        for factor in region_validated_leading_factors(factor_validation)
+        if factor.get("id") in REGIONAL_RISK_FACTOR_IDS
+    }
+
+
 def region_current_factor_reading(factor_id: str, representative: dict[str, Any]) -> float | None:
     """Current reading of a validated factor on its representative index, in the SAME units
     the validation series used (realizedVol as annualized %, lpplScore 0-100)."""
@@ -506,17 +652,38 @@ def build_region_allocation(region: dict[str, Any]) -> dict[str, Any]:
     market_state = str(price_factors.get("marketState") or "neutral")
     relative_strength = optional_float(price_factors.get("relativeStrength3m"))
     representative = regional_representative_index(region.get("indices", []) if isinstance(region.get("indices"), list) else [])
-    validated = region_validated_leading_factors(representative.get("factorValidation") if representative else None)
+    factor_validation = (
+        representative.get("factorValidation")
+        if representative and isinstance(representative.get("factorValidation"), dict)
+        else {}
+    )
+    validated = region_validated_leading_factors(factor_validation)
+    composite = factor_validation.get("composite") if isinstance(factor_validation.get("composite"), dict) else {}
+    validated_composite = bool(
+        factor_validation.get("independentHoldout") is True
+        and
+        regional_signal_qualifies_as_actionable(composite)
+        and composite.get("available") is True
+        and composite.get("beatsBestSingleFactor") is True
+        and str(composite.get("direction") or "") == "higher_risk"
+    )
 
     days_to_critical = optional_float(aggregate.get("minDaysToCritical"))
+    lppl_actionable = regional_lppl_region_has_current_trigger(region)
     caution = 0.0
     drivers: list[str] = []
     if bubble_status == "risk":
-        caution += 40.0
-        drivers.append("泡沫临界风险")
+        if lppl_actionable:
+            caution += 40.0
+            drivers.append("生产级泡沫临界风险")
+        else:
+            drivers.append("泡沫临界风险(研究观察)")
     elif bubble_status == "watch":
-        caution += 18.0
-        drivers.append("泡沫观察区")
+        if lppl_actionable:
+            caution += 18.0
+            drivers.append("生产级泡沫观察区")
+        else:
+            drivers.append("泡沫观察区(研究观察)")
     if market_state == "stressed":
         caution += 30.0
         drivers.append("市场承压(跌破趋势+深回撤)")
@@ -534,18 +701,31 @@ def build_region_allocation(region: dict[str, Any]) -> dict[str, Any]:
             caution -= 8.0
             drivers.append(f"跑赢美国 +{relative_strength:.0f}%")
     # Evidence-backed conviction: a validated leading risk factor while bubble is flagged.
-    if validated and bubble_status in {"risk", "watch"} and any(f["id"] in REGIONAL_RISK_FACTOR_IDS for f in validated):
+    has_validated_risk_signal = lppl_actionable or validated_composite or any(f["id"] in REGIONAL_RISK_FACTOR_IDS for f in validated)
+    if has_validated_risk_signal and bubble_status in {"risk", "watch"}:
         caution += 12.0
-        drivers.append("已验证领先因子佐证")
+        drivers.append("已验证领先信号佐证")
     # Live trigger: the validated leading risk factor has BREACHED its calibrated threshold.
     factor_alert = region.get("factorAlert") if isinstance(region.get("factorAlert"), dict) else {}
-    if factor_alert.get("available") and factor_alert.get("state") == "breached":
+    alert_source = str(factor_alert.get("source") or "")
+    alert_factor_id = str(factor_alert.get("factorId") or "")
+    alert_evidence_eligible = (
+        (alert_source == "composite" and validated_composite)
+        or (alert_source == "factor" and any(f["id"] == alert_factor_id for f in validated))
+    )
+    factor_alert_triggered = bool(
+        alert_evidence_eligible
+        and regional_factor_alert_qualifies_as_actionable(region)
+    )
+    if factor_alert_triggered:
         caution += 15.0
         drivers.append(f"{factor_alert.get('factorLabelCn') or '领先因子'}突破验证阈值")
     # Imminent LPPL critical window adds urgency.
-    if days_to_critical is not None and days_to_critical <= 30:
+    if lppl_actionable and days_to_critical is not None and days_to_critical <= 30:
         caution += 10.0
         drivers.append(f"临界窗口仅{days_to_critical:.0f}天")
+    elif days_to_critical is not None and days_to_critical <= 30:
+        drivers.append(f"临界窗口仅{days_to_critical:.0f}天(研究观察)")
     caution = max(0.0, min(100.0, caution))
 
     # Overweight requires a genuinely constructive trend AND low caution — not merely the
@@ -557,19 +737,46 @@ def build_region_allocation(region: dict[str, Any]) -> dict[str, Any]:
     else:
         stance, stance_cn, band = "neutral", "中性", [80, 100]
 
-    # Conviction is high only when the region has a factor with PROVEN OOS lead power.
-    confidence = "high" if validated else ("medium" if drivers else "low")
+    # Model validation establishes that a signal may be useful; it is not a live
+    # instruction.  A numeric regional band binds only after a complete current
+    # LPPL production trigger or a validated factor/composite breach.  Raw trend,
+    # relative strength, untriggered validated models and research-only LPPL stay
+    # in context so they cannot silently become allocation instructions.
+    allocation_actionable = bool(lppl_actionable or factor_alert_triggered)
+    binding_band = band if allocation_actionable else None
+    context_band = None if allocation_actionable else band
+    confidence = "high" if allocation_actionable else ("medium" if drivers else "low")
     confidence_cn = {"high": "高", "medium": "中", "low": "低"}[confidence]
     return {
         "stance": stance,
         "stanceCn": stance_cn,
         "cautionScore": round(caution, 1),
-        "exposureBandPct": band,
+        "exposureBandPct": binding_band,
+        "contextBand": context_band,
+        "actionable": allocation_actionable,
+        "scoreUse": "production_signal" if allocation_actionable else "research_only",
+        "actionabilityStatus": (
+            "current_lppl_or_validated_factor_trigger"
+            if allocation_actionable
+            else "research_context_no_binding_allocation"
+        ),
         "confidence": confidence,
         "confidenceCn": confidence_cn,
         "drivers": drivers,
         "validatedLeadingFactors": validated,
-        "rationale": build_region_alloc_rationale(region, stance_cn, bubble_status, aggregate, price_factors, validated),
+        "validatedComposite": validated_composite,
+        "validatedFactorTriggered": factor_alert_triggered,
+        "productionLpplTriggered": lppl_actionable,
+        "rationale": build_region_alloc_rationale(
+            region,
+            stance_cn,
+            bubble_status,
+            aggregate,
+            price_factors,
+            validated,
+            validated_composite,
+            allocation_actionable,
+        ),
     }
 
 
@@ -580,6 +787,8 @@ def build_region_alloc_rationale(
     aggregate: dict[str, Any],
     price_factors: dict[str, Any],
     validated: list[dict[str, Any]],
+    validated_composite: bool = False,
+    allocation_actionable: bool = False,
 ) -> str:
     name = str(region.get("nameCn") or region.get("name") or "")
     bubble_cn = str(aggregate.get("statusCn") or "--")
@@ -588,14 +797,23 @@ def build_region_alloc_rationale(
     relative_strength = optional_float(price_factors.get("relativeStrength3m"))
     if relative_strength is not None:
         parts.append(f"相对美国{relative_strength:+.0f}%")
-    if validated:
+    lppl_actionable = regional_lppl_region_has_current_trigger(region)
+    if lppl_actionable:
+        parts.append("LPPL模型、预测验证与当前阈值均通过,可作生产级风控信号")
+    if validated_composite:
+        parts.append("证据加权综合信号通过完整 OOS 门槛,信号可信")
+    elif validated:
         top = validated[0]
         lead = top.get("leadTimeDays")
         lead_text = f"、提前{lead:.0f}天" if lead is not None else ""
         parts.append(f"{top['labelCn']}为本地区已验证领先因子(OOS lift {top['lift']}{lead_text}),信号可信")
     else:
         parts.append("尚无 OOS 验证领先因子,信号置信偏低")
-    return "; ".join(parts) + f" → {stance_cn}。"
+    if regional_factor_alert_qualifies_as_actionable(region):
+        parts.append("当前已突破经验证的实时阈值")
+    if allocation_actionable:
+        return "; ".join(parts) + f" → {stance_cn}。"
+    return "; ".join(parts) + f" → {stance_cn}仅作研究背景,不发布数值仓位。"
 
 
 REGIONAL_CORRELATION_CLUSTER_THRESHOLD = 0.7
@@ -679,24 +897,46 @@ def build_us_internal_rotation(us_region: dict[str, Any]) -> dict[str, Any]:
     compare(broad_stats["lpplScore"], tech_stats["lpplScore"], "LPPL评分")
     compare(broad_stats["realizedVol"], tech_stats["realizedVol"], "已实现波动")
 
+    riskier_row: dict[str, Any] | None = None
     if tech_points > broad_points:
-        tilt, tilt_cn = "broad", "偏宽基(SPY)、减科技(QQQ)"
+        context_tilt, context_tilt_cn = "broad", "偏宽基(SPY)、减科技(QQQ)"
         riskier = "科技(QQQ)"
+        riskier_row = tech
     elif broad_points > tech_points:
-        tilt, tilt_cn = "tech", "偏科技(QQQ)、减宽基(SPY)"
+        context_tilt, context_tilt_cn = "tech", "偏科技(QQQ)、减宽基(SPY)"
         riskier = "宽基(SPY)"
+        riskier_row = broad
     else:
-        tilt, tilt_cn = "balanced", "宽基/科技均衡"
+        context_tilt, context_tilt_cn = "balanced", "宽基/科技均衡"
         riskier = ""
-    rationale = (
-        f"美股内部: {riskier}风险读数更高 → {tilt_cn}" + (f"; 依据: {'、'.join(drivers)}" if drivers else "")
+    actionable = bool(
+        riskier_row is not None
+        and regional_lppl_index_qualifies_as_actionable(riskier_row)
+    )
+    tilt, tilt_cn = (
+        (context_tilt, context_tilt_cn)
+        if actionable
+        else ("balanced", "无生产级内部倾斜")
+    )
+    context_rationale = (
+        f"美股内部: {riskier}风险读数更高 → {context_tilt_cn}"
+        + (f"; 依据: {'、'.join(drivers)}" if drivers else "")
         if riskier
-        else f"美股内部: 宽基与科技风险读数相当 → {tilt_cn}"
+        else f"美股内部: 宽基与科技风险读数相当 → {context_tilt_cn}"
+    )
+    rationale = (
+        context_rationale
+        if actionable
+        else context_rationale + "; 相关读数未触发生产级LPPL,仅作研究背景。"
     )
     return {
         "available": True,
         "tilt": tilt,
         "tiltCn": tilt_cn,
+        "contextTilt": context_tilt,
+        "contextTiltCn": context_tilt_cn,
+        "actionable": actionable,
+        "scoreUse": "production_signal" if actionable else "research_only",
         "broadPoints": broad_points,
         "techPoints": tech_points,
         "broad": broad_stats,
@@ -716,16 +956,64 @@ def merged_cluster_band(bands: list[Any]) -> list[float] | None:
     return [min(band[0] for band in valid), min(band[1] for band in valid)]
 
 
+def regional_allocation_qualifies_as_actionable(region: dict[str, Any]) -> bool:
+    """Recheck serialized allocation evidence before cross-region propagation."""
+    allocation = region.get("allocation") if isinstance(region.get("allocation"), dict) else {}
+    band = allocation.get("exposureBandPct")
+    band_valid = bool(
+        isinstance(band, list)
+        and len(band) == 2
+        and all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in band)
+        and 0 <= float(band[0]) <= float(band[1]) <= 150
+    )
+    lppl_triggered = bool(
+        allocation.get("productionLpplTriggered") is True
+        and regional_lppl_region_has_current_trigger(region)
+    )
+    factor_triggered = bool(
+        allocation.get("validatedFactorTriggered") is True
+        and regional_factor_alert_qualifies_as_actionable(region)
+    )
+    return bool(
+        allocation.get("actionable") is True
+        and allocation.get("scoreUse") == "production_signal"
+        and allocation.get("actionabilityStatus") == "current_lppl_or_validated_factor_trigger"
+        and band_valid
+        and (lppl_triggered or factor_triggered)
+    )
+
+
 def build_regional_rotation(regions: list[dict[str, Any]], diversification: dict[str, Any] | None = None) -> dict[str, Any]:
     scored = [
         region for region in regions
         if isinstance(region.get("allocation"), dict) and region["aggregate"].get("availableCount", 0) > 0
     ]
     if not scored:
-        return {"available": False, "favorRegions": [], "reduceRegions": [], "reduceClusters": [], "summary": "暂无地区配置建议。"}
+        return {
+            "available": False,
+            "favorRegions": [],
+            "reduceRegions": [],
+            "contextFavorRegions": [],
+            "contextReduceRegions": [],
+            "reduceClusters": [],
+            "summary": "暂无地区配置建议。",
+        }
     name_by_key = {region["key"]: region["nameCn"] for region in scored}
-    favor = [region["key"] for region in scored if region["allocation"]["stance"] == "overweight"]
-    reduce_regions = [region["key"] for region in scored if region["allocation"]["stance"] == "underweight"]
+    actionable_scored = [region for region in scored if regional_allocation_qualifies_as_actionable(region)]
+    favor = [region["key"] for region in actionable_scored if region["allocation"]["stance"] == "overweight"]
+    reduce_regions = [region["key"] for region in actionable_scored if region["allocation"]["stance"] == "underweight"]
+    context_favor = [
+        region["key"]
+        for region in scored
+        if not regional_allocation_qualifies_as_actionable(region)
+        and region["allocation"]["stance"] == "overweight"
+    ]
+    context_reduce = [
+        region["key"]
+        for region in scored
+        if not regional_allocation_qualifies_as_actionable(region)
+        and region["allocation"]["stance"] == "underweight"
+    ]
     ranked = sorted(scored, key=lambda region: region["allocation"]["cautionScore"])
 
     # Merge risk budget: co-moving reduce-regions count as one exposure, not independent cuts.
@@ -759,7 +1047,14 @@ def build_regional_rotation(regions: list[dict[str, Any]], diversification: dict
     elif favor_names:
         summary = f"地区轮动: 可增持{favor_names}; 其余维持中性。"
     else:
-        summary = "地区轮动: 各地区均维持中性,无显著倾斜。"
+        summary = "地区轮动: 当前无通过生产门槛的地区倾斜。"
+    context_parts: list[str] = []
+    if context_favor:
+        context_parts.append("研究层偏多" + "、".join(name_by_key.get(key, key) for key in context_favor))
+    if context_reduce:
+        context_parts.append("研究层偏空" + "、".join(name_by_key.get(key, key) for key in context_reduce))
+    if context_parts:
+        summary += " " + "; ".join(context_parts) + ",不计入生产配置。"
     if redundant and len(reduce_regions) > independent_cuts:
         merged_notes = []
         for cluster in reduce_clusters:
@@ -774,8 +1069,12 @@ def build_regional_rotation(regions: list[dict[str, Any]], diversification: dict
         )
     return {
         "available": True,
+        "actionable": bool(favor or reduce_regions),
+        "scoreUse": "production_signal" if (favor or reduce_regions) else "research_only",
         "favorRegions": favor,
         "reduceRegions": reduce_regions,
+        "contextFavorRegions": context_favor,
+        "contextReduceRegions": context_reduce,
         "reduceClusters": reduce_clusters,
         "independentReduceCount": independent_cuts,
         "ranking": [region["key"] for region in ranked],

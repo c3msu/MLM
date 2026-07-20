@@ -421,8 +421,13 @@ def build_groups(
     onrrp_buffer_risk_score = -2 if ind["onrrp_buffer_risk"] >= 0.75 else -1 if ind["onrrp_buffer_risk"] >= 0.35 else 0
     sofr_obfr_pct = percentiles.get("collateral_repo_friction")
     sofr_obfr_score = high_pressure_score(sofr_obfr_pct)
-    sofr_iorb_pct = percentiles.get("corridor_sofr_iorb")
-    sofr_iorb_score = high_pressure_score(sofr_iorb_pct)
+    sofr_iorb_deviation_pct = percentiles.get("corridor_sofr_iorb_deviation")
+    # The active Bhadial-compatible factor is regime-normalized: the raw
+    # SOFR-IORB level remains useful context, but its vote must use deviation
+    # from the rolling median. Otherwise a harmless policy-regime level shift
+    # can say "stress" here while the composite scores the same factor as
+    # supportive.
+    sofr_iorb_score = high_pressure_score(sofr_iorb_deviation_pct)
     sofr_rrp_pct = percentiles.get("corridor_sofr_rrp")
     sofr_rrp_score = high_pressure_score(sofr_rrp_pct)
     effr_iorb_pct = percentiles.get("effr_iorb_spread")
@@ -447,8 +452,11 @@ def build_groups(
     dxy_vol_score = high_pressure_score(dxy_vol_pct)
     oil_vol_dev_pct = percentiles.get("oil_vol_deviation")
     oil_vol_dev_score = high_pressure_score(oil_vol_dev_pct)
-    natgas_pct = percentiles.get("natgas")
-    natgas_score = high_pressure_score(natgas_pct)
+    natgas_shock_pct = percentiles.get("natgas_shock")
+    # External shock-only factors penalize positive surprises; a structurally
+    # high raw price is not itself a new shock. Keep the raw level in the tag,
+    # but use the same positive-deviation history as the composite.
+    natgas_score = high_pressure_score(natgas_shock_pct)
     hy_credit_preference_pct = percentiles.get("hy_credit_preference")
     hy_credit_preference_score = low_preference_score(hy_credit_preference_pct)
     ig_credit_preference_pct = percentiles.get("ig_credit_preference")
@@ -606,12 +614,18 @@ def build_groups(
                 bhadial_factor(
                     module="Funding",
                     name="SOFR-IORB走廊摩擦",
-                    tag=f"{ind['sofr_iorb_spread_bp']:+.0f}bp · {percentile_label(sofr_iorb_pct)}",
+                    tag=(
+                        f"{ind['sofr_iorb_spread_bp']:+.0f}bp · "
+                        f"偏离{percentile_label(sofr_iorb_deviation_pct)}"
+                    ),
                     value="接近上沿" if sofr_iorb_score < 0 else "正常",
                     score=sofr_iorb_score,
                     source_mode="derived-public",
-                    note="Bhadial Funding的Corridor Friction 1: SOFR-IORB,衡量市场担保融资利率相对准备金利率上沿的位置。",
-                    evidence_available=sofr_iorb_pct is not None,
+                    note=(
+                        "Bhadial Funding的Corridor Friction 1: 展示SOFR-IORB原始利差,"
+                        "按其相对约1年滚动中位数的偏离百分位投票,避免政策利率制度变化制造假极值。"
+                    ),
+                    evidence_available=sofr_iorb_deviation_pct is not None,
                 ),
                 bhadial_factor(
                     module="Funding",
@@ -1033,12 +1047,15 @@ def build_groups(
                 bhadial_factor(
                     module="External",
                     name="天然气",
-                    tag=f"${ind['natgas']:.2f} · {percentile_label(natgas_pct)}",
+                    tag=f"${ind['natgas']:.2f} · 冲击{percentile_label(natgas_shock_pct)}",
                     value="能源压力" if natgas_score < 0 else "正常",
                     score=natgas_score,
-                    source_mode="real-public",
-                    note="Bhadial External的Natural Gas: FRED Henry Hub现货价格,用于补充能源冲击而非只看原油。",
-                    evidence_available=natgas_pct is not None,
+                    source_mode="derived-public",
+                    note=(
+                        "Bhadial External的Natural Gas shock-only口径: 展示FRED Henry Hub现货价格,"
+                        "仅按其高于约1年滚动中位数的正偏离百分位计压,价格回落不自动贡献支持。"
+                    ),
+                    evidence_available=natgas_shock_pct is not None,
                 ),
             ],
         },

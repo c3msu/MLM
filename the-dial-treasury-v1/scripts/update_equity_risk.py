@@ -34,7 +34,18 @@ from treasury_data.build_dashboard import (  # noqa: E402
     fetch_daily_bars_with_stooq_fallback,
 )
 from treasury_data.history_store import history_db_for_output, save_dashboard_history  # noqa: E402
-from treasury_data.dashboard_contract import require_dashboard_contract, stamp_dashboard_contract  # noqa: E402
+from treasury_data.dashboard_contract import (  # noqa: E402
+    CURRENT_EQUITY_RISK_NORMALIZED_WEIGHTS,
+    CURRENT_EQUITY_RISK_SCORE_SCALE_ID,
+    CURRENT_EQUITY_RISK_SCORED_COMPONENTS,
+    require_dashboard_contract,
+    stamp_dashboard_contract,
+)
+from treasury_data.equity_calendar import (  # noqa: E402
+    expected_equity_bar_date,
+    us_equity_sessions_between,
+)
+from treasury_data.scoring_equity import bind_equity_production_action  # noqa: E402
 from treasury_data.signal_validation import DEFAULT_FDR_ALPHA, apply_benjamini_hochberg  # noqa: E402
 from treasury_data.sources import CalendarEvent, MarketDailyBar, fetch_nasdaq_daily_bars, fetch_stooq_daily_bars  # noqa: E402
 from treasury_data.validation_build import EQUITY_SHORT_TERM_VALIDATION_EXCLUSION  # noqa: E402
@@ -43,6 +54,9 @@ DailyBarFetcher = Callable[..., list[MarketDailyBar]]
 MARKET_CACHE_VERSION = 1
 DEFAULT_MARKET_CACHE_OVERLAP_DAYS = 10
 MAX_EQUITY_SYMBOL_LAG_TRADING_DAYS = 2
+MAX_EQUITY_ABSOLUTE_LAG_TRADING_DAYS = 0
+CURRENT_EQUITY_SCORE_SCALE_ID = CURRENT_EQUITY_RISK_SCORE_SCALE_ID
+LEGACY_UNVERIFIED_EQUITY_SCORE_SCALE_ID = "legacy-unverified-equity-risk-scale"
 
 
 def read_dashboard_json(output: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
@@ -112,13 +126,19 @@ def assess_equity_refresh_alignment(
     source_status_rows: list[dict[str, Any]] | None = None,
     *,
     max_lag_trading_days: int = MAX_EQUITY_SYMBOL_LAG_TRADING_DAYS,
+    max_absolute_lag_trading_days: int = MAX_EQUITY_ABSOLUTE_LAG_TRADING_DAYS,
+    reference_time: datetime | None = None,
+    expected_market_date: date | None = None,
 ) -> dict[str, Any]:
     """Detect equity inputs that cannot safely participate in one score refresh.
 
-    Relative age is measured on SPY's observed trading calendar, so exchange
-    holidays do not create false lag. A stale-cache row blocks scoring even if
-    its cached date equals SPY: the inputs were not atomically observed.
+    Relative age is measured on SPY's observed trading calendar. Absolute age
+    is measured against the same expected U.S. session used by runtime health,
+    so a uniformly old cache cannot look aligned merely because every symbol
+    stopped on the same date. A stale-cache row blocks scoring even if its
+    cached date equals SPY: the inputs were not atomically observed.
     """
+    expected_date = expected_market_date or expected_equity_bar_date(reference_time)
     rows_by_name = {
         str(row.get("name") or ""): row
         for row in source_status_rows or []
@@ -135,6 +155,7 @@ def assess_equity_refresh_alignment(
     missing_symbols: list[str] = []
     stale_cache_symbols: list[str] = []
     lagged_symbols: list[str] = []
+    absolute_stale_symbols: list[str] = []
     symbol_ages: dict[str, dict[str, Any]] = {}
 
     for symbol in EQUITY_RISK_SYMBOLS:
@@ -155,16 +176,27 @@ def assess_equity_refresh_alignment(
             if spy_latest is not None and latest is not None
             else None
         )
+        absolute_lag_trading_days = (
+            us_equity_sessions_between(latest, expected_date)
+            if latest is not None
+            else None
+        )
         status = str((row or {}).get("status") or "").lower()
         cache_mode = str((row or {}).get("cacheMode") or "").lower()
         uses_stale_cache = status == "stale-cache" or cache_mode == "last-known-good"
         trails_spy = lag_trading_days is not None and lag_trading_days > max_lag_trading_days
+        trails_expected = (
+            absolute_lag_trading_days is not None
+            and absolute_lag_trading_days > max_absolute_lag_trading_days
+        )
         if uses_stale_cache:
             stale_cache_symbols.append(symbol)
         if trails_spy:
             lagged_symbols.append(symbol)
+        if trails_expected:
+            absolute_stale_symbols.append(symbol)
         is_missing = not bars
-        if not is_missing and not uses_stale_cache and not trails_spy:
+        if not is_missing and not uses_stale_cache and not trails_spy and not trails_expected:
             continue
         reasons: list[str] = []
         if is_missing:
@@ -173,23 +205,33 @@ def assess_equity_refresh_alignment(
             reasons.append("stale-cache")
         if trails_spy:
             reasons.append("lagged-vs-spy")
+        if trails_expected:
+            reasons.append("stale-vs-expected")
         symbol_ages[symbol] = {
             "latest": latest.isoformat() if latest is not None else None,
             "spyLatest": spy_latest.isoformat() if spy_latest is not None else None,
             "lagTradingDays": lag_trading_days,
+            "expectedDate": expected_date.isoformat(),
+            "absoluteLagTradingDays": absolute_lag_trading_days,
+            "absoluteStale": trails_expected,
             "staleCache": uses_stale_cache,
             "reasons": reasons,
         }
 
-    stale_symbols = sorted(set(stale_cache_symbols) | set(lagged_symbols))
+    stale_symbols = sorted(
+        set(stale_cache_symbols) | set(lagged_symbols) | set(absolute_stale_symbols)
+    )
     blocked_symbols = sorted(set(missing_symbols) | set(stale_symbols))
     return {
         "blocked": bool(blocked_symbols),
         "maxLagTradingDays": max_lag_trading_days,
+        "maxAbsoluteLagTradingDays": max_absolute_lag_trading_days,
+        "expectedDate": expected_date.isoformat(),
         "spyLatest": spy_latest.isoformat() if spy_latest is not None else None,
         "missingSymbols": sorted(missing_symbols),
         "staleCacheSymbols": sorted(stale_cache_symbols),
         "laggedSymbols": sorted(lagged_symbols),
+        "absoluteStaleSymbols": sorted(absolute_stale_symbols),
         "staleSymbols": stale_symbols,
         "blockedSymbols": blocked_symbols,
         "symbolAges": {symbol: symbol_ages[symbol] for symbol in blocked_symbols},
@@ -220,6 +262,9 @@ def annotate_equity_alignment_source_status(
             item["stale"] = True
             item["lagTradingDays"] = detail.get("lagTradingDays")
             item["spyLatest"] = detail.get("spyLatest")
+            item["expectedDate"] = detail.get("expectedDate")
+            item["absoluteLagTradingDays"] = detail.get("absoluteLagTradingDays")
+            item["absoluteStale"] = detail.get("absoluteStale") is True
             if "missing" in detail.get("reasons", []):
                 item["status"] = "missing"
             elif str(item.get("status") or "").lower() != "stale-cache":
@@ -227,7 +272,16 @@ def annotate_equity_alignment_source_status(
             reason_text = ", ".join(str(value) for value in detail.get("reasons", []))
             lag = detail.get("lagTradingDays")
             lag_text = f"relative SPY lag is {lag} trading days" if lag is not None else "relative SPY lag is unavailable"
-            alignment_note = f"Equity factor refresh blocked ({reason_text}); {lag_text}."
+            absolute_lag = detail.get("absoluteLagTradingDays")
+            expected_date = detail.get("expectedDate")
+            absolute_text = (
+                f"absolute lag is {absolute_lag} U.S. sessions versus expected {expected_date}"
+                if absolute_lag is not None
+                else f"absolute lag versus expected {expected_date} is unavailable"
+            )
+            alignment_note = (
+                f"Equity factor refresh blocked ({reason_text}); {lag_text}; {absolute_text}."
+            )
             prior_note = str(item.get("note") or "").strip()
             if alignment_note not in prior_note:
                 item["note"] = f"{prior_note}; {alignment_note}" if prior_note else alignment_note
@@ -249,6 +303,9 @@ def annotate_equity_alignment_source_status(
                 "stale": True,
                 "lagTradingDays": detail.get("lagTradingDays"),
                 "spyLatest": detail.get("spyLatest"),
+                "expectedDate": detail.get("expectedDate"),
+                "absoluteLagTradingDays": detail.get("absoluteLagTradingDays"),
+                "absoluteStale": detail.get("absoluteStale") is True,
                 "note": "Equity factor refresh blocked because this required input is not aligned with SPY.",
             }
         )
@@ -262,15 +319,221 @@ def record_equity_alignment_meta(refresh_meta: dict[str, Any], alignment: dict[s
         {
             "equityAlignmentBlocked": True,
             "maxEquitySymbolLagTradingDays": alignment.get("maxLagTradingDays"),
+            "maxEquityAbsoluteLagTradingDays": alignment.get("maxAbsoluteLagTradingDays"),
+            "expectedEquityDate": alignment.get("expectedDate"),
             "spyLatest": alignment.get("spyLatest"),
             "blockedEquitySymbols": alignment.get("blockedSymbols", []),
             "missingEquitySymbols": alignment.get("missingSymbols", []),
             "staleEquitySymbols": alignment.get("staleSymbols", []),
             "staleCacheEquitySymbols": alignment.get("staleCacheSymbols", []),
             "laggedEquitySymbols": alignment.get("laggedSymbols", []),
+            "absoluteStaleEquitySymbols": alignment.get("absoluteStaleSymbols", []),
+            "marketDataAbsoluteStale": bool(alignment.get("absoluteStaleSymbols")),
             "staleEquitySymbolAges": alignment.get("symbolAges", {}),
         }
     )
+
+
+def equity_decision_contract_complete(value: Any) -> bool:
+    """Return whether an equity root has an internally consistent action gate.
+
+    This checks declarations, not whether the signal is actionable.  A safely
+    non-actionable legacy block is complete when it explicitly says why it
+    cannot bind an allocation and exposes no numeric band.
+    """
+    if not isinstance(value, dict) or value.get("available") is not True:
+        return False
+    score_scale = value.get("scoreScale") if isinstance(value.get("scoreScale"), dict) else {}
+    allocation = value.get("allocation") if isinstance(value.get("allocation"), dict) else {}
+    validation = (
+        value.get("productionValidation")
+        if isinstance(value.get("productionValidation"), dict)
+        else {}
+    )
+    current_scale_claimed = score_scale.get("id") == CURRENT_EQUITY_SCORE_SCALE_ID
+    backtest = value.get("backtest") if isinstance(value.get("backtest"), dict) else {}
+    backtest_scale = backtest.get("scoreScale") if isinstance(backtest.get("scoreScale"), dict) else {}
+    if current_scale_claimed:
+        weight_audit_types = (
+            isinstance(score_scale.get("weightsMatchCanonical"), bool),
+            isinstance(score_scale.get("canonicalNormalizedWeights"), dict),
+            isinstance(score_scale.get("observedNormalizedWeights"), dict),
+            isinstance(score_scale.get("weightMismatches"), list),
+            isinstance(backtest_scale.get("weightsMatchCanonical"), bool),
+            isinstance(backtest_scale.get("canonicalNormalizedWeights"), dict),
+            isinstance(backtest_scale.get("observedNormalizedWeights"), dict),
+            isinstance(backtest_scale.get("weightMismatchedObservationCount"), int)
+            and not isinstance(backtest_scale.get("weightMismatchedObservationCount"), bool),
+            isinstance(validation.get("scoreScaleMatchesBacktest"), bool),
+            isinstance(validation.get("scoreWeightsMatchBacktest"), bool),
+        )
+        if not all(weight_audit_types):
+            return False
+    required_bools = (
+        score_scale.get("coreComplete"),
+        score_scale.get("thresholdComparable"),
+        value.get("actionable"),
+        allocation.get("actionable"),
+        validation.get("available"),
+        validation.get("scoreContractAllowsAction"),
+        validation.get("thresholdValidated"),
+        validation.get("currentTriggered"),
+        validation.get("actionable"),
+    )
+    if not all(isinstance(item, bool) for item in required_bools):
+        return False
+    actionable = value.get("actionable") is True
+    if allocation.get("actionable") is not actionable or validation.get("actionable") is not actionable:
+        return False
+    band = allocation.get("exposureBandPct")
+    if actionable:
+        action_gates = (
+            score_scale.get("coreComplete"),
+            score_scale.get("thresholdComparable"),
+            validation.get("available"),
+            validation.get("scoreContractAllowsAction"),
+            validation.get("thresholdValidated"),
+            validation.get("currentTriggered"),
+            validation.get("actionable"),
+            score_scale.get("weightsMatchCanonical") if current_scale_claimed else True,
+            backtest_scale.get("weightsMatchCanonical") if current_scale_claimed else True,
+            validation.get("scoreScaleMatchesBacktest") if current_scale_claimed else True,
+            validation.get("scoreWeightsMatchBacktest") if current_scale_claimed else True,
+        )
+        return (
+            all(item is True for item in action_gates)
+            and isinstance(band, list)
+            and len(band) == 2
+            and all(
+                isinstance(item, (int, float)) and not isinstance(item, bool)
+                for item in band
+            )
+            and 0 <= float(band[0]) <= float(band[1]) <= 100
+        )
+    return band is None
+
+
+def equity_decision_contract_current(value: Any) -> bool:
+    """Require the current replay-comparable scale before taking a cache hit."""
+    if not equity_decision_contract_complete(value):
+        return False
+    score_scale = value.get("scoreScale") if isinstance(value, dict) else None
+    validation = value.get("productionValidation") if isinstance(value, dict) else None
+    backtest = value.get("backtest") if isinstance(value, dict) and isinstance(value.get("backtest"), dict) else {}
+    backtest_scale = backtest.get("scoreScale") if isinstance(backtest.get("scoreScale"), dict) else None
+    canonical_weights = dict(CURRENT_EQUITY_RISK_NORMALIZED_WEIGHTS)
+    required_components = sorted(CURRENT_EQUITY_RISK_SCORED_COMPONENTS)
+    return bool(
+        isinstance(score_scale, dict)
+        and score_scale.get("id") == CURRENT_EQUITY_SCORE_SCALE_ID
+        and score_scale.get("weightsMatchCanonical") is True
+        and score_scale.get("requiredScoredComponents") == required_components
+        and score_scale.get("scoredComponents") == required_components
+        and score_scale.get("canonicalNormalizedWeights") == canonical_weights
+        and score_scale.get("observedNormalizedWeights") == canonical_weights
+        and score_scale.get("weightMismatches") == []
+        and isinstance(backtest_scale, dict)
+        and backtest_scale.get("id") == CURRENT_EQUITY_SCORE_SCALE_ID
+        and backtest_scale.get("requiredScoredComponents") == required_components
+        and backtest_scale.get("weightsMatchCanonical") is True
+        and backtest_scale.get("canonicalNormalizedWeights") == canonical_weights
+        and backtest_scale.get("observedNormalizedWeights") == canonical_weights
+        and backtest_scale.get("weightMismatchedObservationCount") == 0
+        and isinstance(validation, dict)
+        and validation.get("scoreScaleMatchesBacktest") is True
+        and validation.get("scoreWeightsMatchBacktest") is True
+        and validation.get("refreshEligible") is not False
+    )
+
+
+def normalize_equity_decision_contract(
+    value: Any,
+    *,
+    force_non_actionable: bool = False,
+    reason: str = "",
+) -> Any:
+    """Bind every incremental equity root to its dedicated production test.
+
+    Snapshots created before the replay-comparable score-scale contract cannot
+    be upgraded by inference.  They retain their score and descriptive regime,
+    but are explicitly marked unverified and their numeric allocation is moved
+    to ``contextAllocation`` before the standard binder runs.
+
+    ``productionValidation`` is the equity root's canonical predictive-validity
+    contract.  The generic ``predictiveValidity`` name is intentionally not
+    synthesized here; portfolio views derive that presentation alias from this
+    dedicated 15-session validation payload.
+    """
+    if not isinstance(value, dict) or value.get("available") is not True:
+        return value
+    allocation = value.get("allocation") if isinstance(value.get("allocation"), dict) else {}
+    has_decision_surface = bool(
+        allocation.get("exposureBandPct") is not None
+        or isinstance(value.get("scoreScale"), dict)
+        or isinstance(value.get("actionable"), bool)
+        or isinstance(value.get("productionValidation"), dict)
+    )
+    if not has_decision_surface:
+        # Some lightweight tests and historical diagnostic-only blocks carry a
+        # score but no allocation at all.  There is no unsafe action to migrate;
+        # leave the object byte-for-byte intact while the cache-hit eligibility
+        # gate still forces a real recomputation in production.
+        return value
+    prior_validation = (
+        value.get("productionValidation")
+        if isinstance(value.get("productionValidation"), dict)
+        else {}
+    )
+    prior_refresh_eligible = prior_validation.get("refreshEligible")
+    prior_refresh_reason = str(prior_validation.get("refreshGuardReason") or "")
+    score_scale = value.get("scoreScale") if isinstance(value.get("scoreScale"), dict) else None
+    has_explicit_scale = bool(
+        score_scale
+        and isinstance(score_scale.get("coreComplete"), bool)
+        and isinstance(score_scale.get("thresholdComparable"), bool)
+    )
+    if not has_explicit_scale:
+        if allocation and not isinstance(value.get("contextAllocation"), dict):
+            value["contextAllocation"] = copy.deepcopy(allocation)
+        value["actionable"] = False
+        value["scoreScale"] = {
+            "id": LEGACY_UNVERIFIED_EQUITY_SCORE_SCALE_ID,
+            "coreComplete": False,
+            "thresholdComparable": False,
+            "migrationRequired": True,
+            "reason": (
+                "Snapshot predates the replay-comparable score-scale audit; "
+                "a fresh factor recomputation is required before any action."
+            ),
+        }
+    if force_non_actionable:
+        allocation = value.get("allocation") if isinstance(value.get("allocation"), dict) else {}
+        if allocation.get("exposureBandPct") is not None:
+            value["contextAllocation"] = copy.deepcopy(allocation)
+        value["actionable"] = False
+    backtest = value.get("backtest") if isinstance(value.get("backtest"), dict) else {}
+    rebound = bind_equity_production_action(value, backtest)
+    validation = (
+        rebound.get("productionValidation")
+        if isinstance(rebound.get("productionValidation"), dict)
+        else {}
+    )
+    if force_non_actionable:
+        validation["refreshEligible"] = False
+        validation["refreshGuardReason"] = reason or (
+            "The equity root was borrowed from last-known-good data during a degraded refresh."
+        )
+    elif prior_refresh_eligible is False:
+        validation["refreshEligible"] = False
+        validation["refreshGuardReason"] = prior_refresh_reason or (
+            "The equity root remains context-only until a fresh factor recomputation succeeds."
+        )
+    else:
+        validation.setdefault("refreshEligible", True)
+    rebound["productionValidation"] = validation
+    value.clear()
+    value.update(rebound)
+    return value
 
 
 def build_updated_dashboard(
@@ -283,7 +546,11 @@ def build_updated_dashboard(
     updated = copy.deepcopy(dashboard)
     generated_at_value = generated_at or datetime.now(timezone.utc)
     effective_source_rows = source_status_rows if source_status_rows is not None else build_source_status_rows(market_bars)
-    equity_alignment = assess_equity_refresh_alignment(market_bars, effective_source_rows)
+    equity_alignment = assess_equity_refresh_alignment(
+        market_bars,
+        effective_source_rows,
+        reference_time=generated_at_value,
+    )
     previous_equity = dashboard.get("equityShortTermRisk")
     if equity_alignment["blocked"]:
         if dashboard_block_is_usable(previous_equity):
@@ -302,6 +569,14 @@ def build_updated_dashboard(
             spy_early_warning=dashboard.get("spyEarlyWarning") if isinstance(dashboard.get("spyEarlyWarning"), dict) else {},
             calendar_events=dashboard_events_to_calendar_events(dashboard),
         )
+    normalize_equity_decision_contract(
+        risk,
+        force_non_actionable=bool(equity_alignment["blocked"]),
+        reason=(
+            "Equity action disabled because required market inputs were not aligned; "
+            "the last-known-good score remains context only."
+        ),
+    )
     global_lppl_risk = build_global_lppl_risk_index(market_bars=market_bars)
     regional_monitor = build_regional_monitor(global_lppl_risk)
     signal_validation = refresh_equity_validation(
@@ -407,6 +682,7 @@ def global_lppl_dates_regressed(candidate: Any, previous: Any) -> bool:
 def rebuild_partial_refresh_dependents(updated: dict[str, Any]) -> None:
     """Rebuild every surface derived from the two partial-refresh roots."""
     risk = updated.get("equityShortTermRisk") if isinstance(updated.get("equityShortTermRisk"), dict) else {}
+    normalize_equity_decision_contract(risk)
     global_lppl_risk = updated.get("globalLpplRisk") if isinstance(updated.get("globalLpplRisk"), dict) else {}
     regional_monitor = build_regional_monitor(global_lppl_risk)
     signal_validation = refresh_equity_validation(updated.get("signalValidation"), risk)
@@ -474,6 +750,15 @@ def preserve_partial_refresh_last_known_good(
         updated["globalLpplRisk"] = copy.deepcopy(previous_global)
         borrowed.append("globalLpplRisk")
 
+    normalize_equity_decision_contract(
+        updated.get("equityShortTermRisk"),
+        force_non_actionable="equityShortTermRisk" in borrowed,
+        reason=(
+            "Equity action disabled because the partial refresh borrowed the "
+            "last-known-good equity root."
+        ),
+    )
+
     refresh_meta = updated.setdefault("meta", {}).setdefault("equityRefresh", {})
     if alignment.get("blocked"):
         refresh_meta["scoringSkipped"] = True
@@ -503,6 +788,11 @@ def build_failed_fetch_dashboard(
 ) -> dict[str, Any]:
     """Publish failure visibility while retaining the last healthy calculations."""
     updated = copy.deepcopy(dashboard)
+    normalize_equity_decision_contract(
+        updated.get("equityShortTermRisk"),
+        force_non_actionable=True,
+        reason="Equity action disabled because the lightweight market fetch failed.",
+    )
     generated_at_value = generated_at or datetime.now(timezone.utc)
     updated["generatedAt"] = generated_at_value.isoformat()
     updated["sourceStatus"] = annotate_source_status_freshness(
@@ -703,6 +993,26 @@ def dashboard_covers_market_bars(dashboard: dict[str, Any], market_bars: dict[st
     return True
 
 
+def equity_refresh_cache_hit_allowed(
+    dashboard: dict[str, Any],
+    market_bars: dict[str, list[MarketDailyBar]],
+    cached_bars: dict[str, list[MarketDailyBar]],
+    source_status_rows: list[dict[str, Any]] | None = None,
+    *,
+    reference_time: datetime | None = None,
+) -> bool:
+    """Skip scoring only when data alignment, coverage, and action schema are current."""
+    alignment = assess_equity_refresh_alignment(
+        market_bars,
+        source_status_rows,
+        reference_time=reference_time,
+    )
+    return not alignment["blocked"] and bool(cached_bars) and dashboard_covers_market_bars(
+        dashboard,
+        market_bars,
+    ) and equity_decision_contract_current(dashboard.get("equityShortTermRisk"))
+
+
 def build_cache_hit_dashboard(
     dashboard: dict[str, Any],
     market_bars: dict[str, list[MarketDailyBar]],
@@ -712,7 +1022,24 @@ def build_cache_hit_dashboard(
 ) -> dict[str, Any]:
     updated = copy.deepcopy(dashboard)
     generated_at_value = generated_at or datetime.now(timezone.utc)
-    equity_alignment = assess_equity_refresh_alignment(market_bars, source_rows)
+    equity_alignment = assess_equity_refresh_alignment(
+        market_bars,
+        source_rows,
+        reference_time=generated_at_value,
+    )
+    normalize_equity_decision_contract(
+        updated.get("equityShortTermRisk"),
+        force_non_actionable=bool(equity_alignment["blocked"]),
+        reason=(
+            "Equity action disabled because cached required inputs were stale, "
+            "missing, or misaligned."
+        ),
+    )
+    # Normalizing the root is not sufficient: a legacy snapshot may already
+    # have copied the old numeric band into portfolio/regional derivatives.
+    # Rebuild every dependent surface before publication so a cache hit cannot
+    # preserve an action that the canonical equity root has just invalidated.
+    rebuild_partial_refresh_dependents(updated)
     updated["generatedAt"] = generated_at_value.isoformat()
     updated["sourceStatus"] = annotate_source_status_freshness(
         merge_source_status(updated.get("sourceStatus", []), source_rows),
@@ -897,7 +1224,12 @@ def _run_equity_update_unlocked(
         require_dashboard_contract(failed_candidate)
         write_failed_dashboard_json(failed_candidate, output)
         return dashboard
-    scoring_skipped = bool(cached_bars) and dashboard_covers_market_bars(dashboard, market_bars)
+    scoring_skipped = equity_refresh_cache_hit_allowed(
+        dashboard,
+        market_bars,
+        cached_bars,
+        source_rows,
+    )
     if scoring_skipped:
         updated = build_cache_hit_dashboard(dashboard, market_bars, source_rows)
     else:

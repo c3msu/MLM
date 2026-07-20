@@ -1,9 +1,11 @@
-"""Bhadial Conditions Score domain extracted from build_dashboard.py.
+"""Bhadial Conditions Score compatibility domain extracted from build_dashboard.py.
 
-The 21-factor, 7-module nowcast keeps its fixed-weight compatibility score while
-also exposing point-in-time freshness, warm-up, observed-only, and coverage-
-shrunk reliability contracts. This pure scoring layer depends only on lower
-layers (series_math / dashboard_core / indicators / sources).
+The local 21-factor, fixed-weight 7-module nowcast is an auditable approximation,
+not a reproduction of MacroDial's current 30-factor, de-correlated headline.  It
+keeps the historical compatibility score while also exposing point-in-time
+freshness, warm-up, observed-only, and coverage-shrunk reliability contracts.
+This pure scoring layer depends only on lower layers (series_math /
+dashboard_core / indicators / sources).
 """
 from __future__ import annotations
 
@@ -18,6 +20,8 @@ from .indicators import BHADIAL_BREAKEVEN_TARGET
 
 
 BHADIAL_COMPATIBILITY_SOURCE = "bhadial-the-dial"
+BHADIAL_MIN_RELIABILITY_WEIGHT_COVERAGE = 0.25
+BHADIAL_MIN_RELIABILITY_SCORED_FACTORS = 5
 
 
 BHADIAL_MODULE_NAMES = ["Liquidity", "Funding", "Treasury", "Rates", "Credit", "Risk", "External"]
@@ -145,9 +149,9 @@ BHADIAL_CONDITION_MODULES: list[dict[str, Any]] = [
         # 与 onrrp_near_zero_risk(滞后, 且RRP已含于净流动性公式内); 权重并入 fed_net_liquidity(0.30→0.60)。
         # bank_reserves/onrrp 原始值仍在指标表展示, 仅不再计入综合分。
         "factors": [
-            {"id": "fed_net_liquidity", "cadence": "weekly", "maxAgeDays": 14, "minSampleCount": 12, "publicationLagDays": 2, "remoteName": "Fed Net Liquidity", "name": "净流动性", "weight": 0.60, "scoreKey": "net_liquidity", "direction": "higher_better", "method": "level_percentile", "valueKey": "net_liquidity_trillions", "format": "usd_t", "source": "FRED WALCL - WTREGEN - RRPONTSYD"},
-            {"id": "delta_net_liq_13w", "cadence": "weekly", "maxAgeDays": 14, "minSampleCount": 12, "publicationLagDays": 2, "remoteName": "Net Liquidity Momentum (13W)", "name": "13周净流动性动量", "weight": 0.25, "scoreKey": "net_liquidity_13w_momentum", "direction": "higher_better", "method": "level_percentile", "valueKey": "net_liquidity_13w_change_trillions", "format": "signed_usd_t", "source": "Net liquidity 13W change"},
-            {"id": "tga_dev_signed", "cadence": "weekly", "maxAgeDays": 14, "minSampleCount": 12, "publicationLagDays": 2, "remoteName": "TGA Deviation", "name": "TGA偏离度", "weight": 0.15, "scoreKey": "tga_deviation", "direction": "lower_better", "method": "level_percentile", "valueKey": "tga_deviation_trillions", "format": "signed_usd_t", "source": "FRED WTREGEN - 52W median"},
+            {"id": "fed_net_liquidity", "cadence": "weekly", "maxAgeDays": 14, "minSampleCount": 12, "publicationLagDays": 2, "remoteName": "Fed Net Liquidity", "name": "净流动性", "weight": 0.60, "scoreKey": "net_liquidity", "displayScale": 1e-6, "direction": "higher_better", "method": "level_percentile", "valueKey": "net_liquidity_trillions", "format": "usd_t", "source": "FRED WALCL - WTREGEN - RRPONTSYD"},
+            {"id": "delta_net_liq_13w", "cadence": "weekly", "maxAgeDays": 14, "minSampleCount": 12, "publicationLagDays": 2, "remoteName": "Net Liquidity Momentum (13W)", "name": "13周净流动性动量", "weight": 0.25, "scoreKey": "net_liquidity_13w_momentum", "displayScale": 1e-6, "direction": "higher_better", "method": "level_percentile", "valueKey": "net_liquidity_13w_change_trillions", "format": "signed_usd_t", "source": "Net liquidity 13W change"},
+            {"id": "tga_dev_signed", "cadence": "weekly", "maxAgeDays": 14, "minSampleCount": 12, "publicationLagDays": 2, "remoteName": "TGA Deviation", "name": "TGA偏离度", "weight": 0.15, "scoreKey": "tga_deviation", "displayScale": 1e-6, "direction": "lower_better", "method": "level_percentile", "valueKey": "tga_deviation_trillions", "format": "signed_usd_t", "source": "FRED WTREGEN - 52W median"},
         ],
     },
     {
@@ -181,7 +185,7 @@ BHADIAL_CONDITION_MODULES: list[dict[str, Any]] = [
         # real_rate_level 原始值仍在指标表展示, 仅不计入综合分。
         "factors": [
             {"id": "real_curve", "cadence": "business_daily", "maxAgeDays": 7, "minSampleCount": 20, "remoteName": "Real Curve (10Y-5Y)", "name": "真实曲线(10Y-5Y)", "weight": 0.65, "scoreKey": "real_curve", "direction": "higher_better", "method": "level_percentile", "valueKey": "real_curve_10y5y_bp", "format": "signed_bp", "source": "FRED DFII10 - DFII5"},
-            {"id": "t10yie", "cadence": "business_daily", "maxAgeDays": 7, "minSampleCount": 20, "remoteName": "10Y Breakeven", "name": "10年盈亏平衡通胀", "weight": 0.35, "scoreKey": "breakeven_target_distance", "direction": "lower_better", "method": "target_distance", "target": BHADIAL_BREAKEVEN_TARGET, "valueKey": "breakeven_10y", "format": "percent", "source": "FRED T10YIE vs 2.3% anchor"},
+            {"id": "t10yie", "cadence": "business_daily", "maxAgeDays": 7, "minSampleCount": 20, "remoteName": "10Y Breakeven", "name": "10年盈亏平衡通胀", "weight": 0.35, "scoreKey": "breakeven_target_distance", "displayKey": "breakeven_10y", "direction": "lower_better", "method": "target_distance", "target": BHADIAL_BREAKEVEN_TARGET, "valueKey": "breakeven_10y", "format": "percent", "source": "FRED T10YIE vs 2.3% anchor"},
         ],
     },
     {
@@ -191,7 +195,7 @@ BHADIAL_CONDITION_MODULES: list[dict[str, Any]] = [
         # HY(hy_credit)并并入IG权重(0.25→0.50); 另删 kre_spy(银行股相对强弱, lift=0/滞后, 读数25=噪声),
         # nfci 权重补足至0.50。kre_spy/ig 原始值仍在指标表展示, 仅不计入综合分。
         "factors": [
-            {"id": "nfci", "cadence": "weekly", "maxAgeDays": 14, "minSampleCount": 12, "publicationLagDays": 7, "remoteName": "NFCI", "name": "金融条件指数(NFCI)", "weight": 0.50, "scoreKey": "nfci", "direction": "lower_better", "method": "level_percentile", "valueKey": "nfci", "format": "signed_number", "source": "FRED NFCI"},
+            {"id": "nfci", "cadence": "weekly", "maxAgeDays": 14, "minSampleCount": 12, "publicationLagDays": 5, "remoteName": "NFCI", "name": "金融条件指数(NFCI)", "weight": 0.50, "scoreKey": "nfci", "direction": "lower_better", "method": "level_percentile", "valueKey": "nfci", "format": "signed_number", "source": "FRED NFCI"},
             {"id": "hy_credit", "cadence": "business_daily", "maxAgeDays": 7, "minSampleCount": 20, "remoteName": "HY Credit", "name": "HY信用偏好(HY/UST)", "weight": 0.50, "scoreKey": "hy_credit_preference", "direction": "higher_better", "method": "level_percentile", "valueKey": "hy_credit_preference", "format": "number", "source": "FRED HY total-return 63/126D relative return vs DGS10 duration proxy"},
         ],
     },
@@ -375,8 +379,19 @@ def bhadial_conditions_snapshot(
         for module in score_row.get("modules", [])
         for component in module.get("factors", [])
     }
+    module_factor_weight_totals = {
+        str(module["name"]): sum(float(spec["weight"]) for spec in module["factors"])
+        for module in BHADIAL_CONDITION_MODULES
+    }
+    module_weight_total = sum(
+        bhadial_module_weight(str(module["name"]))
+        for module in BHADIAL_CONDITION_MODULES
+    )
     for module in score_row.get("modules", []):
         module_weight = bhadial_module_weight(str(module["name"]))
+        normalized_module_weight = module_weight / max(module_weight_total, 1e-9)
+        raw_contribution = (float(module["rawScore"]) - 50.0) * normalized_module_weight
+        headline_contribution = (float(module["score"]) - 50.0) * normalized_module_weight
         modules.append(
             {
                 "name": module["name"],
@@ -389,8 +404,15 @@ def bhadial_conditions_snapshot(
                 "effectiveWeightCoveragePct": round(float(module["effectiveWeightCoverage"]) * 100),
                 "ema5Score": round(module["ema5Score"], 1) if module.get("ema5Score") is not None else None,
                 "ema5MonthScore": round(module["ema5MonthScore"], 1) if module.get("ema5MonthScore") is not None else None,
+                "ema5ObservationScore": round(module["ema5ObservationScore"], 1) if module.get("ema5ObservationScore") is not None else None,
                 "emaSpanMonths": module.get("emaSpanMonths"),
+                "emaSpanObservations": module.get("emaSpanObservations"),
+                "emaSpanUnit": module.get("emaSpanUnit"),
                 "weight": round(module_weight, 3),
+                "normalizedWeight": round(normalized_module_weight, 6),
+                "rawContribution": round(raw_contribution, 6),
+                "headlineContribution": round(headline_contribution, 6),
+                "smoothingContribution": round(headline_contribution - raw_contribution, 6),
                 "observedFactorCount": module["observedFactorCount"],
                 "scoredFactorCount": module["scoredFactorCount"],
                 "factorCount": module["factorCount"],
@@ -399,12 +421,24 @@ def bhadial_conditions_snapshot(
         )
     for module in BHADIAL_CONDITION_MODULES:
         module_weight = bhadial_module_weight(str(module["name"]))
+        normalized_module_weight = module_weight / max(module_weight_total, 1e-9)
+        module_factor_weight_total = module_factor_weight_totals[str(module["name"])]
         for spec in module["factors"]:
             raw = raw_components_by_id.get(str(spec["id"]), {})
-            score = float(raw.get("score", 50.0))
+            raw_score = float(raw.get("score", 50.0))
+            headline_score = float(raw.get("headlineScore", raw_score))
             observed = bool(raw.get("observed"))
             factor_weight = float(spec["weight"])
-            effective_weight = module_weight * factor_weight
+            normalized_factor_weight = factor_weight / max(module_factor_weight_total, 1e-9)
+            effective_weight = normalized_module_weight * normalized_factor_weight
+            raw_contribution = (raw_score - 50.0) * effective_weight
+            headline_contribution = (headline_score - 50.0) * effective_weight
+            display_point = bhadial_factor_display_point(series, spec, raw.get("observationDate"))
+            display_value = (
+                display_point.value * float(spec.get("displayScale", 1.0))
+                if display_point is not None
+                else None
+            )
             components.append(
                 {
                     "id": spec["id"],
@@ -412,12 +446,29 @@ def bhadial_conditions_snapshot(
                     "moduleCn": module["nameCn"],
                     "remoteName": spec["remoteName"],
                     "name": spec["name"],
-                    "score": round(score, 1),
+                    # ``score`` remains the current unsmoothed factor reading
+                    # for compatibility. ``headlineScore`` is the exact
+                    # factor-level attribution of any module smoother.
+                    "score": round(raw_score, 1),
+                    "rawScore": round(raw_score, 1),
+                    "headlineScore": round(headline_score, 6),
+                    "smoothedScore": (
+                        round(headline_score, 6)
+                        if module.get("smooth") == "ema5"
+                        else None
+                    ),
                     "observed": observed,
                     "scoreEligible": bool(raw.get("scoreEligible")),
                     "percentile": raw.get("percentile"),
                     "observationDate": raw.get("observationDate"),
+                    "displayObservationDate": display_point.date.isoformat() if display_point else None,
                     "ageDays": raw.get("ageDays"),
+                    "observationAgeDays": raw.get("observationAgeDays", raw.get("ageDays")),
+                    "availabilityDate": raw.get("availabilityDate"),
+                    "availableAgeDays": raw.get("availableAgeDays"),
+                    "availabilityCutoff": raw.get("availabilityCutoff"),
+                    "publicationLagDays": int(raw.get("publicationLagDays", bhadial_publication_lag_days(spec))),
+                    "publicationLagBasis": raw.get("publicationLagBasis", "calendar_days"),
                     "freshnessStatus": raw.get("freshnessStatus", "missing"),
                     "scoringStatus": raw.get("scoringStatus", "missing"),
                     "effectiveSampleCount": int(raw.get("effectiveSampleCount", 0)),
@@ -425,10 +476,23 @@ def bhadial_conditions_snapshot(
                     "cadence": raw.get("cadence", spec["cadence"]),
                     "maxAgeDays": int(raw.get("maxAgeDays", spec["maxAgeDays"])),
                     "weight": round(factor_weight, 2),
+                    "normalizedFactorWeight": round(normalized_factor_weight, 6),
                     "effectiveWeight": round(effective_weight, 4),
-                    "contribution": round((score - 50) * effective_weight, 2),
+                    # Keep the historical current-reading contribution while
+                    # exposing a separately named, exactly additive headline
+                    # contribution. Consumers that explain the composite must
+                    # use ``headlineContribution``.
+                    "contribution": round(raw_contribution, 2),
+                    "rawContribution": round(raw_contribution, 6),
+                    "headlineContribution": round(headline_contribution, 6),
+                    "smoothingContribution": round(headline_contribution - raw_contribution, 6),
+                    "headlineContributionBasis": (
+                        "factor-level EMA(5 daily availability observations)"
+                        if module.get("smooth") == "ema5"
+                        else "current factor score"
+                    ),
                     "value": (
-                        format_bhadial_factor_value(ind.get(str(spec["valueKey"])), str(spec["format"]))
+                        format_bhadial_factor_value(display_value, str(spec["format"]))
                         if observed
                         else "--"
                     ),
@@ -437,9 +501,9 @@ def bhadial_conditions_snapshot(
                         "missing"
                         if not observed
                         else "supportive"
-                        if score >= 55
+                        if raw_score >= 55
                         else "restrictive"
-                        if score <= 45
+                        if raw_score <= 45
                         else "neutral"
                     ),
                     "scoring": spec["method"],
@@ -449,6 +513,9 @@ def bhadial_conditions_snapshot(
     observed_factor_count = int(score_row.get("observedFactorCount", 0))
     scored_factor_count = int(score_row.get("scoredFactorCount", 0))
     factor_count = sum(len(module["factors"]) for module in BHADIAL_CONDITION_MODULES)
+    headline_contribution = float(score_row["score"]) - 50.0
+    module_contribution_total = sum(float(module["headlineContribution"]) for module in modules)
+    factor_contribution_total = sum(float(component["headlineContribution"]) for component in components)
     return {
         "score": round(float(score_row["score"]), 1),
         "legacyFixedScore": round(float(score_row["legacyFixedScore"]), 1),
@@ -460,9 +527,44 @@ def bhadial_conditions_snapshot(
         "factorCount": factor_count,
         "coveragePct": round(observed_factor_count / factor_count * 100) if factor_count else 0,
         "scoredCoveragePct": round(scored_factor_count / factor_count * 100) if factor_count else 0,
+        "contributionAudit": {
+            "headlineContribution": round(headline_contribution, 6),
+            "moduleContributionTotal": round(module_contribution_total, 6),
+            "factorContributionTotal": round(factor_contribution_total, 6),
+            "moduleResidual": round(headline_contribution - module_contribution_total, 6),
+            "factorResidual": round(headline_contribution - factor_contribution_total, 6),
+            "headlineField": "headlineContribution",
+            "rawField": "rawContribution",
+        },
         "components": components,
         "modules": modules,
     }
+
+
+def bhadial_factor_display_point(
+    series: dict[str, list[SeriesPoint]] | PreparedBhadialSeries,
+    spec: dict[str, Any],
+    observation_date: Any,
+) -> SeriesPoint | None:
+    """Return the display observation paired with the scored observation.
+
+    A score may use a transformed series (for example breakeven distance or a
+    positive commodity shock) while the dashboard displays the raw level.  The
+    display must nevertheless come from the same observation date; falling
+    back to ``ind[valueKey]`` would pair a lagged score with today's value.
+    """
+    if not isinstance(observation_date, str):
+        return None
+    try:
+        target = date.fromisoformat(observation_date)
+    except ValueError:
+        return None
+    prepared = prepare_bhadial_series(series)
+    display_key = str(spec.get("displayKey") or spec["scoreKey"])
+    point = point_at_or_before(prepared.get(display_key, []), target)
+    # A prior raw row is not the observation that generated the score.  Fail
+    # closed instead of displaying two different dates as one component.
+    return point if point is not None and point.date == target else None
 
 
 def latest_bhadial_score_date(
@@ -497,6 +599,9 @@ def neutral_bhadial_conditions_row(*, include_components: bool = False) -> dict[
             "effectiveWeightCoverage": 0.0,
             "ema5Score": None,
             "ema5MonthScore": None,
+            "ema5ObservationScore": None,
+            "emaSpanObservations": 5 if module.get("smooth") == "ema5" else None,
+            "emaSpanUnit": "daily_availability_observations" if module.get("smooth") == "ema5" else None,
             "observedFactorCount": 0,
             "scoredFactorCount": 0,
             "factorCount": len(module["factors"]),
@@ -513,6 +618,12 @@ def neutral_bhadial_conditions_row(*, include_components: bool = False) -> dict[
                     "scoreEligible": False,
                     "observationDate": None,
                     "ageDays": None,
+                    "observationAgeDays": None,
+                    "availabilityDate": None,
+                    "availableAgeDays": None,
+                    "availabilityCutoff": None,
+                    "publicationLagDays": bhadial_publication_lag_days(spec),
+                    "publicationLagBasis": "calendar_days",
                     "freshnessStatus": "missing",
                     "scoringStatus": "missing",
                     "effectiveSampleCount": 0,
@@ -539,6 +650,70 @@ def bhadial_module_weight(name: str) -> float:
     return BHADIAL_MODULE_WEIGHTS.get(name, 1 / max(1, len(BHADIAL_CONDITION_MODULES)))
 
 
+def bhadial_usable_reliability_score(panel: dict[str, Any] | None) -> float | None:
+    """Return a decision-safe reliability score, failing closed on low coverage.
+
+    A coverage-shrunk reliability score is numerically 50 when no factors are
+    eligible.  That number is an *unknown* placeholder, not observed neutral
+    conditions.  New payloads expose the coverage contract and must pass both
+    its weight and factor-count floors.  A narrow compatibility path remains
+    for older exports/tests that contain only a score and no contract metadata.
+    """
+    if not isinstance(panel, dict):
+        return None
+    reliability = panel.get("reliabilityScore")
+    compatibility = panel.get("score")
+    try:
+        reliability_score = float(reliability) if reliability is not None else None
+    except (TypeError, ValueError):
+        reliability_score = None
+    try:
+        compatibility_score = float(compatibility) if compatibility is not None else None
+    except (TypeError, ValueError):
+        compatibility_score = None
+    if reliability_score is not None and not math.isfinite(reliability_score):
+        reliability_score = None
+    if compatibility_score is not None and not math.isfinite(compatibility_score):
+        compatibility_score = None
+
+    has_coverage_contract = any(
+        key in panel
+        for key in (
+            "effectiveWeightCoveragePct",
+            "effectiveWeightCoverage",
+            "scoredFactorCount",
+            "scoreContract",
+        )
+    )
+    if not has_coverage_contract:
+        candidate = reliability_score if reliability_score is not None else compatibility_score
+        return candidate if candidate is not None and 0.0 <= candidate <= 100.0 else None
+
+    coverage = panel.get("effectiveWeightCoverage")
+    if coverage is None:
+        coverage_pct = panel.get("effectiveWeightCoveragePct")
+        try:
+            coverage = float(coverage_pct) / 100.0 if coverage_pct is not None else None
+        except (TypeError, ValueError):
+            coverage = None
+    try:
+        coverage_value = float(coverage) if coverage is not None else None
+        scored_factor_count = int(panel.get("scoredFactorCount"))
+    except (TypeError, ValueError):
+        return None
+    if (
+        reliability_score is None
+        or not 0.0 <= reliability_score <= 100.0
+        or coverage_value is None
+        or not math.isfinite(coverage_value)
+        or not 0.0 <= coverage_value <= 1.0
+        or coverage_value < BHADIAL_MIN_RELIABILITY_WEIGHT_COVERAGE
+        or scored_factor_count < BHADIAL_MIN_RELIABILITY_SCORED_FACTORS
+    ):
+        return None
+    return reliability_score
+
+
 def bhadial_conditions_score_at(
     series: dict[str, list[SeriesPoint]] | PreparedBhadialSeries,
     target: date | None,
@@ -563,14 +738,25 @@ def bhadial_conditions_score_at(
         module_observed_only_score = raw_module["observedOnlyScore"]
         module_reliability_score = raw_module["reliabilityScore"]
         ema5_score = None
-        ema5_month_score = None
+        ema5_observation_score = None
+        ema_factor_scores: dict[str, float] = {}
         method = "weighted factors"
         if module.get("smooth") == "ema5":
-            ema_metrics = bhadial_module_ema_metrics_at(prepared, module, target, span_months=5)
+            ema_metrics = bhadial_module_ema_metrics_at(
+                prepared,
+                module,
+                target,
+                span_observations=5,
+            )
             ema5_score = ema_metrics.get("legacyFixedScore")
-            ema5_month_score = ema5_score
-            if ema5_month_score is not None:
-                module_score = ema5_month_score
+            ema5_observation_score = ema5_score
+            ema_factor_scores = {
+                str(factor_id): float(score)
+                for factor_id, score in dict(ema_metrics.get("factorScores") or {}).items()
+                if score is not None
+            }
+            if ema5_observation_score is not None:
+                module_score = ema5_observation_score
                 smoothed_observed_only = ema_metrics.get("observedOnlyScore")
                 module_observed_only_score = (
                     float(smoothed_observed_only)
@@ -580,7 +766,7 @@ def bhadial_conditions_score_at(
                 module_reliability_score = 50.0 + (
                     module_observed_only_score - 50.0
                 ) * float(raw_module["effectiveWeightCoverage"])
-            method = "weighted factors + EMA(5 months)"
+            method = "weighted factors + EMA(5 daily availability observations)"
         observed_total += int(raw_module["observedFactorCount"])
         scored_total += int(raw_module["scoredFactorCount"])
         module_row = {
@@ -595,8 +781,14 @@ def bhadial_conditions_score_at(
             "rawReliabilityScore": raw_module["reliabilityScore"],
             "effectiveWeightCoverage": raw_module["effectiveWeightCoverage"],
             "ema5Score": ema5_score,
-            "ema5MonthScore": ema5_month_score,
-            "emaSpanMonths": 5 if module.get("smooth") == "ema5" else None,
+            # Retained as an explicit tombstone so older consumers do not
+            # silently reinterpret the corrected daily-observation score as a
+            # five-month smoother.
+            "ema5MonthScore": None,
+            "ema5ObservationScore": ema5_observation_score,
+            "emaSpanMonths": None,
+            "emaSpanObservations": 5 if module.get("smooth") == "ema5" else None,
+            "emaSpanUnit": "daily_availability_observations" if module.get("smooth") == "ema5" else None,
             "weight": bhadial_module_weight(str(module["name"])),
             "observedFactorCount": raw_module["observedFactorCount"],
             "scoredFactorCount": raw_module["scoredFactorCount"],
@@ -604,7 +796,16 @@ def bhadial_conditions_score_at(
             "method": method,
         }
         if include_components:
-            module_row["factors"] = raw_module["factors"]
+            module_row["factors"] = [
+                {
+                    **factor,
+                    "headlineScore": ema_factor_scores.get(
+                        str(factor["id"]),
+                        float(factor["score"]),
+                    ),
+                }
+                for factor in raw_module["factors"]
+            ]
         modules.append(module_row)
         module_weight = bhadial_module_weight(str(module["name"]))
         composite_total += module_score * module_weight
@@ -712,6 +913,9 @@ def bhadial_factor_score_at(
             "scoreEligible": False,
             "observationDate": None,
             "ageDays": None,
+            "observationAgeDays": None,
+            "availabilityDate": None,
+            "availableAgeDays": None,
             "freshnessStatus": "missing",
             "scoringStatus": "missing",
             "effectiveSampleCount": effective_sample_count,
@@ -719,9 +923,12 @@ def bhadial_factor_score_at(
             "cadence": cadence,
             "maxAgeDays": max_age_days,
             "publicationLagDays": publication_lag_days,
+            "publicationLagBasis": "calendar_days",
             "availabilityCutoff": availability_cutoff.isoformat(),
         }
     age_days = max(0, (target - current.date).days)
+    availability_date = current.date + timedelta(days=publication_lag_days)
+    available_age_days = max(0, (target - availability_date).days)
     freshness_status = "fresh" if age_days <= max_age_days else "stale"
     observed = freshness_status == "fresh"
     score_eligible = observed and effective_sample_count >= min_sample_count and raw_percentile is not None
@@ -733,6 +940,9 @@ def bhadial_factor_score_at(
             "scoreEligible": False,
             "observationDate": current.date.isoformat(),
             "ageDays": age_days,
+            "observationAgeDays": age_days,
+            "availabilityDate": availability_date.isoformat(),
+            "availableAgeDays": available_age_days,
             "freshnessStatus": freshness_status,
             "scoringStatus": "warming" if observed else "stale",
             "effectiveSampleCount": effective_sample_count,
@@ -740,6 +950,7 @@ def bhadial_factor_score_at(
             "cadence": cadence,
             "maxAgeDays": max_age_days,
             "publicationLagDays": publication_lag_days,
+            "publicationLagBasis": "calendar_days",
             "availabilityCutoff": availability_cutoff.isoformat(),
         }
     score = bhadial_score_from_observation(
@@ -755,6 +966,9 @@ def bhadial_factor_score_at(
         "scoreEligible": True,
         "observationDate": current.date.isoformat(),
         "ageDays": age_days,
+        "observationAgeDays": age_days,
+        "availabilityDate": availability_date.isoformat(),
+        "availableAgeDays": available_age_days,
         "freshnessStatus": freshness_status,
         "scoringStatus": "scored",
         "effectiveSampleCount": effective_sample_count,
@@ -762,6 +976,7 @@ def bhadial_factor_score_at(
         "cadence": cadence,
         "maxAgeDays": max_age_days,
         "publicationLagDays": publication_lag_days,
+        "publicationLagBasis": "calendar_days",
         "availabilityCutoff": availability_cutoff.isoformat(),
     }
 
@@ -797,12 +1012,12 @@ def bhadial_module_ema_score_at(
     *,
     span: int,
 ) -> float | None:
-    """Compatibility wrapper; ``span`` is measured in monthly observations."""
+    """Compatibility wrapper; ``span`` is measured in daily availability events."""
     return bhadial_module_ema_metrics_at(
         series,
         module,
         target,
-        span_months=span,
+        span_observations=span,
     ).get("legacyFixedScore")
 
 
@@ -811,32 +1026,72 @@ def bhadial_module_ema_metrics_at(
     module: dict[str, Any],
     target: date,
     *,
-    span_months: int,
-) -> dict[str, float | None]:
-    """Smooth module scores over month-end observations, never daily rows."""
+    span_observations: int | None = None,
+    span_months: int | None = None,
+) -> dict[str, Any]:
+    """Smooth module scores over daily input-availability events.
+
+    MacroDial documents Funding's EMA(5) as protection against noisy *daily*
+    spikes.  The former implementation sampled one score per month, turning a
+    short funding filter into a roughly five-month regime filter.  Decision
+    dates here are derived from each input's point-in-time availability date,
+    so publication lags are applied once and a quiet extra refresh cannot count
+    an unchanged observation twice.
+
+    ``span_months`` remains as a deprecated keyword alias for callers from the
+    old contract; its numeric value is interpreted as an observation span.
+    """
+    if span_observations is None:
+        span_observations = span_months
+    if span_observations is None or span_observations <= 0:
+        raise ValueError("span_observations must be positive")
     prepared = prepare_bhadial_series(series)
-    keys = [str(spec["scoreKey"]) for spec in module["factors"]]
     start = window_start(target, years=5)
-    month_end_by_period: dict[tuple[int, int], date] = {}
-    for key in keys:
-        for point in prepared.get(key, []):
-            if start <= point.date <= target:
-                period = (point.date.year, point.date.month)
-                month_end_by_period[period] = max(month_end_by_period.get(period, point.date), point.date)
-    # The decision-date score represents the current month. Replace that
-    # month's last raw observation instead of appending a second observation;
-    # otherwise an unchanged month is counted twice whenever ``target`` falls
-    # after the latest source date.
-    month_end_by_period[(target.year, target.month)] = target
-    month_ends = [month_end_by_period[period] for period in sorted(month_end_by_period)]
-    alpha = 2 / (span_months + 1)
-    ema_by_field: dict[str, float | None] = {
+    decision_dates: set[date] = set()
+    for spec in module["factors"]:
+        lag = bhadial_publication_lag_days(spec)
+        for point in prepared.get(str(spec["scoreKey"]), []):
+            availability_date = point.date + timedelta(days=lag)
+            if start <= availability_date <= target:
+                decision_dates.add(availability_date)
+
+    ordered_dates = sorted(decision_dates)
+    # A stale transition can change the score without a new source row. Add the
+    # explicit decision date only when its raw scoring state differs from the
+    # last availability event. This keeps freshness fail-closed without
+    # applying the same observation to the EMA on every quiet refresh.
+    if ordered_dates and ordered_dates[-1] < target:
+        prior_raw = bhadial_raw_module_score_at(prepared, module, ordered_dates[-1])
+        target_raw = bhadial_raw_module_score_at(prepared, module, target)
+        if prior_raw is not None and target_raw is not None:
+            state_fields = (
+                "rawScore",
+                "observedOnlyScore",
+                "reliabilityScore",
+                "effectiveWeightCoverage",
+                "observedFactorCount",
+                "scoredFactorCount",
+            )
+            if any(prior_raw[field] != target_raw[field] for field in state_fields):
+                ordered_dates.append(target)
+
+    alpha = 2 / (span_observations + 1)
+    ema_by_field: dict[str, Any] = {
         "legacyFixedScore": None,
         "observedOnlyScore": None,
         "reliabilityScore": None,
     }
-    for point_date in sorted(month_ends):
-        raw = bhadial_raw_module_score_at(prepared, module, point_date)
+    ema_factor_scores: dict[str, float | None] = {
+        str(spec["id"]): None
+        for spec in module["factors"]
+    }
+    for point_date in ordered_dates:
+        raw = bhadial_raw_module_score_at(
+            prepared,
+            module,
+            point_date,
+            include_components=True,
+        )
         if raw is None:
             continue
         for field, source_field in (
@@ -849,6 +1104,25 @@ def bhadial_module_ema_metrics_at(
             score = float(raw[source_field])
             prior = ema_by_field[field]
             ema_by_field[field] = score if prior is None else alpha * score + (1 - alpha) * prior
+        for factor in raw.get("factors", []):
+            factor_id = str(factor["id"])
+            score = float(factor["score"])
+            prior = ema_factor_scores[factor_id]
+            ema_factor_scores[factor_id] = score if prior is None else alpha * score + (1 - alpha) * prior
+    # EMA is linear: the weighted sum of factor-level EMAs must equal the EMA
+    # of the fixed-weight module score. Rebuild the module field from those
+    # attributions so factor, module, and composite explanations share one
+    # arithmetic contract instead of accumulating separate floating paths.
+    factor_weight_total = sum(float(spec["weight"]) for spec in module["factors"])
+    if factor_weight_total > 0 and all(
+        ema_factor_scores[str(spec["id"])] is not None
+        for spec in module["factors"]
+    ):
+        ema_by_field["legacyFixedScore"] = sum(
+            float(ema_factor_scores[str(spec["id"])]) * float(spec["weight"])
+            for spec in module["factors"]
+        ) / factor_weight_total
+    ema_by_field["factorScores"] = ema_factor_scores
     return ema_by_field
 
 

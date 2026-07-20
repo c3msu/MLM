@@ -39,13 +39,16 @@ const DEFAULT_DATA = {
       { name: "调查 SPF / Blue Chip", value: "2026 年末 ~3.75%", note: "覆盖机构经济学家,低频且滞后,可作为理性预期基准。" }
     ]
   },
-  fedPath: [
-    { m: "6/17", hike: 0, hold: 99, cut: 1 },
-    { m: "7/29", hike: 5, hold: 93, cut: 2 },
-    { m: "9/16", hike: 18, hold: 78, cut: 4 },
-    { m: "10/28", hike: 34, hold: 62, cut: 4 },
-    { m: "12/9", hike: 56, hold: 40, cut: 4 }
-  ],
+  fedPath: [],
+  fedPathAudit: {
+    actionable: false,
+    probabilitiesAvailable: false,
+    isProbability: false,
+    status: "unavailable",
+    reason: "The embedded fallback does not contain verifiable meeting-level probabilities.",
+    scenario: { available: false, direction: "unavailable", label: "scenario unavailable", drivers: [] },
+    futureMeetings: []
+  },
   macroLiquidity: {
     score: 42,
     regime: "偏紧",
@@ -500,10 +503,10 @@ const DEFAULT_DATA = {
     ["5/12", "BLS", "4月 CPI 同比 3.8%,核心 CPI 同比 2.8%"]
   ],
   ideas: [
-    { title: "战术减久期 / 维持低于基准久期", tag: "SHORT 久期", text: "CPI/PCE/核心PCE/Dallas Trimmed PCE 通胀跟踪仍偏热、政策路径向加息倾斜之前,组合久期保持低配。等待 PCE、核心PCE或Dallas Trimmed PCE动能转弱作为加回久期的触发条件。", source: "宏观基本面 · 货币政策", confidenceLevel: "medium", confidenceLabel: "中等可信", confidenceNote: "静态兜底数据未运行结论审计。" },
-    { title: "做陡 5s30s 曲线", tag: "CURVE 做陡", text: "前端被按兵不动的美联储锚定,长端受供给压力、期限溢价上行和海外需求走弱三重拖累。熊市变陡是当前结构最顺的曲线方向。", source: "供给与技术面 · 需求与持仓", confidenceLevel: "medium", confidenceLabel: "中等可信", confidenceNote: "静态兜底数据未运行结论审计。" },
-    { title: "前端持有 · 吃 carry", tag: "LONG 前端", text: "2Y 收益率被政策锚定、波动相对可控,持有票息回报为正且 roll-down 友好。相对长端,前端是风险调整后更优的久期敞口。", source: "货币政策 · 相对价值", confidenceLevel: "medium", confidenceLabel: "中等可信", confidenceNote: "静态兜底数据未运行结论审计。" },
-    { title: "战术做多盈亏平衡通胀", tag: "RV 通胀", text: "能源冲击向PCE、核心PCE和Dallas Trimmed PCE传导过程中,买入盈亏平衡可对冲通胀上行。属战术性头寸,需在PCE/核心PCE/Dallas Trimmed PCE或能源价格降温时了结。", source: "跨市场 · 宏观基本面", confidenceLevel: "medium", confidenceLabel: "中等可信", confidenceNote: "静态兜底数据未运行结论审计。" }
+    { title: "久期情景观察", tag: "DURATION 情景", text: "根据通胀动能、2Y再定价与数据可靠性动态评估久期。静态兜底不形成交易动作。", source: "宏观基本面 · 货币政策", confidenceLevel: "low", confidenceLabel: "低可信", confidenceNote: "静态兜底没有交易自身样本外验证。" },
+    { title: "5s30s 曲线形态观察", tag: "CURVE 情景", text: "根据前后端收益率变动、5s30s 斜率变化与供给证据动态判断做陡或做平。静态兜底不预设曲线方向。", source: "供给与技术面 · 需求与持仓", confidenceLevel: "low", confidenceLabel: "低可信", confidenceNote: "静态兜底没有交易自身样本外验证。" },
+    { title: "前端 carry 情景观察", tag: "FRONT-END 情景", text: "根据2Y相对政策利率、SOFR与EFFR评估前端carry；静态兜底不形成交易动作。", source: "货币政策 · 相对价值", confidenceLevel: "low", confidenceLabel: "低可信", confidenceNote: "静态兜底没有交易自身样本外验证。" },
+    { title: "盈亏平衡通胀情景观察", tag: "BREAKEVEN 情景", text: "根据10Y盈亏平衡、能源与官方通胀数据评估通胀补偿；静态兜底不形成交易动作。", source: "跨市场 · 宏观基本面", confidenceLevel: "low", confidenceLabel: "低可信", confidenceNote: "静态兜底没有交易自身样本外验证。" }
   ]
 };
 
@@ -564,20 +567,42 @@ function t(key, values) {
   return values ? I18N.format(currentLanguage, key, values) : I18N.translate(currentLanguage, key);
 }
 
+function stableFactorId(group, factor) {
+  const groupId = String(group?.id || "group").trim();
+  if (factor?.factorId) {
+    const explicitId = String(factor.factorId).normalize("NFKC").trim();
+    return explicitId.startsWith(`${groupId}:`) ? explicitId : `${groupId}:${explicitId}`;
+  }
+  const rawId = factor?.id || factor?.n || factor?.name || "factor";
+  return `${groupId}:${String(rawId).normalize("NFKC").trim().replace(/\s+/g, "_")}`;
+}
+
 function hydrateState(baseData = DEFAULT_DATA) {
   const data = structuredClone(baseData);
+  (data.groups || []).forEach((group) => {
+    (group.factors || []).forEach((factor) => {
+      factor.factorId = stableFactorId(group, factor);
+    });
+  });
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
-    if (saved.groups) {
+    const scenario = saved.scenario;
+    if (scenario && scenario.schemaVersion === 1) {
+      const groupWeightsById = scenario.groupWeightsById || {};
+      const factorScoresById = scenario.factorScoresById || {};
       data.groups.forEach((group) => {
-        const savedGroup = saved.groups.find((item) => item.id === group.id);
-        if (!savedGroup) return;
-        if (Number.isFinite(savedGroup.weight)) group.weight = savedGroup.weight;
-        group.factors.forEach((factor, index) => {
-          const score = savedGroup.scores?.[index];
+        const savedWeight = groupWeightsById[group.id];
+        if (Number.isFinite(savedWeight)) group.weight = savedWeight;
+        group.factors.forEach((factor) => {
+          const score = factorScoresById[factor.factorId];
           if (Number.isFinite(score)) factor.score = score;
         });
       });
+      data.frontendScenario = {
+        active: true,
+        schemaVersion: scenario.schemaVersion,
+        savedAt: scenario.savedAt || null
+      };
     }
     if (saved.ideas) {
       data.ideas.forEach((idea, index) => {
@@ -843,12 +868,21 @@ function startRuntimeAutoRefresh() {
 }
 
 function persistState() {
+  const factorScoresById = {};
+  const groupWeightsById = {};
+  state.groups.forEach((group) => {
+    groupWeightsById[group.id] = group.weight;
+    group.factors.forEach((factor) => {
+      factorScoresById[stableFactorId(group, factor)] = factor.score;
+    });
+  });
   const payload = {
-    groups: state.groups.map((group) => ({
-      id: group.id,
-      weight: group.weight,
-      scores: group.factors.map((factor) => factor.score)
-    })),
+    scenario: {
+      schemaVersion: 1,
+      savedAt: new Date().toISOString(),
+      groupWeightsById,
+      factorScoresById
+    },
     ideas: state.ideas.map((idea) => idea.text)
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -993,6 +1027,39 @@ function aggregates() {
   return {
     duration: details.duration.score,
     curve: details.curve.score
+  };
+}
+
+function liveConclusionAudit() {
+  const audit = state.conclusionAudit;
+  const durationScore = audit?.duration?.score;
+  const curveScore = audit?.curve?.score;
+  if (
+    !audit
+    || durationScore === null
+    || durationScore === ""
+    || curveScore === null
+    || curveScore === ""
+    || !Number.isFinite(Number(durationScore))
+    || !Number.isFinite(Number(curveScore))
+  ) {
+    return null;
+  }
+  return audit;
+}
+
+function liveConclusionPresentation(axis) {
+  const audit = liveConclusionAudit();
+  const score = Number(audit?.[axis]?.score);
+  if (!audit || !Number.isFinite(score)) {
+    return { score: null, label: t("status.unavailable"), code: "UNAVAILABLE" };
+  }
+  const [localizedLabel, code] = axis === "curve" ? curveLabel(score) : stanceLabel(score);
+  const backendLabel = String(audit[axis]?.label || "").trim();
+  return {
+    score,
+    label: currentLanguage === "en" || !backendLabel ? localizedLabel : backendLabel,
+    code
   };
 }
 
@@ -1245,9 +1312,11 @@ function renderHero() {
   }));
   const s2s10 = (C.today[8] - C.today[4]) * 100;
   const s5s30 = (C.today[10] - C.today[6]) * 100;
+  const s2s10Day = (C.d1[8] - C.d1[4]) * 100;
+  const s5s30Day = (C.d1[10] - C.d1[6]) * 100;
   tiles.push(
-    { label: t("curve.slope2s10s"), value: `${Math.round(s2s10)} bp`, change: t("curve.steepening"), cls: "flat" },
-    { label: t("curve.slope5s30s"), value: `${Math.round(s5s30)} bp`, change: t("curve.steepening"), cls: "flat" }
+    { label: t("curve.slope2s10s"), value: `${Math.round(s2s10)} bp`, change: slopeMoveLabel(s2s10Day), cls: s2s10Day > 0.5 ? "up" : s2s10Day < -0.5 ? "down" : "flat" },
+    { label: t("curve.slope5s30s"), value: `${Math.round(s5s30)} bp`, change: slopeMoveLabel(s5s30Day), cls: s5s30Day > 0.5 ? "up" : s5s30Day < -0.5 ? "down" : "flat" }
   );
   const summaryTiles = [tiles[0], tiles[2], tiles[4], tiles[5]];
   $("#heroTiles").innerHTML = summaryTiles.map((tile) => `
@@ -1258,14 +1327,19 @@ function renderHero() {
     </div>
   `).join("");
 
-  const score = aggregates();
-  const [durationText, durationCode] = stanceLabel(score.duration);
-  const [curveText, curveCode] = curveLabel(score.curve);
-  $("#durationStance").textContent = durationText;
-  $("#durationScore").textContent = `${t("score.composite")} ${score.duration.toFixed(2)} · ${durationCode}`;
+  const durationConclusion = liveConclusionPresentation("duration");
+  const curveConclusion = liveConclusionPresentation("curve");
+  $("#durationStance").textContent = durationConclusion.label;
+  $("#durationScore").textContent = Number.isFinite(durationConclusion.score)
+    ? `${t("score.liveComposite")} ${durationConclusion.score.toFixed(2)} · ${durationConclusion.code}`
+    : t("score.auditUnavailable");
+  const durationCode = durationConclusion.code;
   $("#durationStance").parentElement.dataset.code = durationCode;
-  $("#curveStance").textContent = curveText;
-  $("#curveScore").textContent = `${t("score.curve")} ${score.curve.toFixed(2)} · ${curveCode}`;
+  $("#curveStance").textContent = curveConclusion.label;
+  $("#curveScore").textContent = Number.isFinite(curveConclusion.score)
+    ? `${t("score.liveCurve")} ${curveConclusion.score.toFixed(2)} · ${curveConclusion.code}`
+    : t("score.auditUnavailable");
+  const curveCode = curveConclusion.code;
   $("#curveStance").parentElement.dataset.code = curveCode === "STEEPENER" ? "STEEP" : curveCode;
   const equityBandNode = $("#equityBandStance");
   if (equityBandNode) {
@@ -1282,27 +1356,35 @@ function renderHero() {
 function renderConclusionAudit() {
   const node = $("#conclusionAudit");
   if (!node) return;
-  const audit = aggregateDetails();
-  const topDrag = audit.drivers.find((item) => item.contribution < 0);
-  const topBuffer = audit.drivers.find((item) => item.contribution > 0);
+  const audit = liveConclusionAudit();
+  if (!audit) {
+    node.innerHTML = `<div class="empty-state compact">${escapeHtml(t("score.auditUnavailable"))}</div>`;
+    return;
+  }
+  const drivers = Array.isArray(audit.drivers) ? audit.drivers : [];
+  const confidence = audit.confidence || {};
+  const topDrag = drivers.find((item) => Number(item.contribution) < 0);
+  const topBuffer = drivers.find((item) => Number(item.contribution) > 0);
   const warningText = audit.sourceErrorCount > 0
     ? `${audit.sourceErrorCount} error`
     : audit.sourceWarningCount > 0
       ? `${audit.sourceWarningCount} warning`
       : "clean";
   const cards = [
-    ["结论可信度", audit.confidence.label, audit.confidence.level],
-    ["证据质量", `${Math.round(audit.confidence.evidenceQuality * 100)}%`, audit.confidence.evidenceQuality >= 0.82 ? "high" : "medium"],
-    ["权重集中", `${Math.round(audit.confidence.concentration * 100)}%`, audit.confidence.concentration > 0.45 ? "low" : "high"],
-    ["代理/模型占比", `${Math.round(audit.confidence.proxyContributionShare * 100)}%`, audit.confidence.proxyContributionShare >= 0.25 ? "medium" : "high"],
+    ["结论可信度", confidence.label || "--", confidence.level || "low"],
+    ["证据质量", `${Math.round(Number(confidence.evidenceQuality || 0) * 100)}%`, Number(confidence.evidenceQuality) >= 0.82 ? "high" : "medium"],
+    ["权重集中", `${Math.round(Number(confidence.concentration || 0) * 100)}%`, Number(confidence.concentration) > 0.45 ? "low" : "high"],
+    ["代理/模型占比", `${Math.round(Number(confidence.proxyContributionShare || 0) * 100)}%`, Number(confidence.proxyContributionShare) >= 0.25 ? "medium" : "high"],
     ["数据源状态", warningText, audit.sourceErrorCount > 0 ? "low" : audit.sourceWarningCount > 0 ? "medium" : "high"]
   ];
+  const durationConclusion = liveConclusionPresentation("duration");
+  const curveConclusion = liveConclusionPresentation("curve");
   node.innerHTML = `
     <details class="conclusion-audit-fold">
       <summary class="conclusion-audit-head">
         <span>结论审计 · Conclusion Audit</span>
-        <strong>${escapeHtml(audit.duration.label)} / ${escapeHtml(audit.curve.label)}</strong>
-        <span class="conclusion-audit-cred">可信度 ${escapeHtml(audit.confidence.label)} · 证据质量 ${Math.round(audit.confidence.evidenceQuality * 100)}%</span>
+        <strong>${escapeHtml(durationConclusion.label)} / ${escapeHtml(curveConclusion.label)}</strong>
+        <span class="conclusion-audit-cred">可信度 ${escapeHtml(confidence.label || "--")} · 证据质量 ${Math.round(Number(confidence.evidenceQuality || 0) * 100)}%</span>
       </summary>
       <div class="conclusion-audit-grid">
         ${cards.map(([label, value, tone]) => `
@@ -1313,9 +1395,9 @@ function renderConclusionAudit() {
         `).join("")}
       </div>
       <div class="conclusion-audit-read">
-        <span><b>主要拖累</b>${escapeHtml(topDrag ? `${topDrag.name} ${topDrag.contribution.toFixed(2)}` : "无")}</span>
-        <span><b>主要缓冲</b>${escapeHtml(topBuffer ? `${topBuffer.name} +${topBuffer.contribution.toFixed(2)}` : "无")}</span>
-        <span><b>权重建议</b>${escapeHtml(audit.weightRecommendation)}</span>
+        <span><b>主要拖累</b>${escapeHtml(topDrag ? `${topDrag.name} ${Number(topDrag.contribution).toFixed(2)}` : "无")}</span>
+        <span><b>主要缓冲</b>${escapeHtml(topBuffer ? `${topBuffer.name} +${Number(topBuffer.contribution).toFixed(2)}` : "无")}</span>
+        <span><b>权重建议</b>${escapeHtml(audit.weightRecommendation || "--")}</span>
       </div>
     </details>
   `;
@@ -1353,10 +1435,53 @@ function signedBp(value) {
 }
 
 function curveShiftLabel(frontMove, longMove, slopeMove) {
-  if (![frontMove, longMove, slopeMove].every(Number.isFinite)) return "变化待确认";
-  if (Math.abs(slopeMove) < 2) return "近乎平移";
-  const direction = (frontMove + longMove) >= 0 ? "熊市" : "牛市";
-  return `${direction}${slopeMove > 0 ? "变陡" : "变平"}`;
+  if (![frontMove, longMove, slopeMove].every(Number.isFinite)) return t("curve.changePending");
+  const averageMove = (frontMove + longMove) / 2;
+  if (Math.abs(slopeMove) < 0.5) {
+    if (averageMove > 1) return t("curve.bearParallel");
+    if (averageMove < -1) return t("curve.bullParallel");
+    return t("curve.mixedParallel");
+  }
+  if (slopeMove > 0) {
+    if (averageMove > 1) return t("curve.bearSteepener");
+    if (averageMove < -1) return t("curve.bullSteepener");
+    return t("curve.twistSteepener");
+  }
+  if (averageMove > 1) return t("curve.bearFlattener");
+  if (averageMove < -1) return t("curve.bullFlattener");
+  return t("curve.twistFlattener");
+}
+
+function slopeMoveLabel(slopeMove) {
+  if (!Number.isFinite(slopeMove)) return t("curve.changePending");
+  if (slopeMove > 0.5) return t("curve.steepened", { change: signedBp(slopeMove) });
+  if (slopeMove < -0.5) return t("curve.flattened", { change: signedBp(slopeMove) });
+  return t("curve.littleChanged", { change: signedBp(slopeMove) });
+}
+
+function curveLevelLabel(slope) {
+  if (!Number.isFinite(slope)) return t("curve.levelPending");
+  if (slope > 2) return t("curve.positiveSlope");
+  if (slope < -2) return t("curve.invertedSlope");
+  return t("curve.flatSlope");
+}
+
+function curveMetricRead(slope, frontMove, longMove) {
+  const slopeMove = Number.isFinite(frontMove) && Number.isFinite(longMove) ? longMove - frontMove : null;
+  return `${curveLevelLabel(slope)} · ${curveShiftLabel(frontMove, longMove, slopeMove)} · ${slopeMoveLabel(slopeMove)}`;
+}
+
+function bellyRelativeLabel(fly) {
+  if (!Number.isFinite(fly)) return t("curve.levelPending");
+  if (fly > 2) return t("curve.bellyCheap");
+  if (fly < -2) return t("curve.bellyRich");
+  return t("curve.bellyNeutral");
+}
+
+function dominantCurveMoveLabel(frontMove, longMove) {
+  if (![frontMove, longMove].every(Number.isFinite)) return t("curve.driverPending");
+  if (Math.abs(Math.abs(frontMove) - Math.abs(longMove)) < 2) return t("curve.parallelDriver");
+  return Math.abs(frontMove) > Math.abs(longMove) ? t("curve.frontDriver") : t("curve.longDriver");
 }
 
 function renderCurveDecisionSnapshot() {
@@ -1404,11 +1529,11 @@ function renderCurveDecisionSnapshot() {
     }
   ];
   $("#curveDecisionCards").innerHTML = cards.map(decisionSnapshotCard).join("");
-  const [curveStance] = curveLabel(aggregates().curve);
+  const curveConclusion = liveConclusionPresentation("curve");
   $("#curveDecisionRead").innerHTML = `
     <strong>关键变化</strong>
-    <span>2Y 一个月 ${signedBp(twoYearMonth)}、10Y ${signedBp(tenYearMonth)}，2s10s 同期 ${signedBp(slopeMonth)}；本轮由前端重新定价主导。</span>
-    <em>行动含义 · ${escapeHtml(curveStance)}</em>
+    <span>2Y 一个月 ${signedBp(twoYearMonth)}、10Y ${signedBp(tenYearMonth)}，2s10s 同期 ${signedBp(slopeMonth)}；${escapeHtml(dominantCurveMoveLabel(twoYearMonth, tenYearMonth))}。</span>
+    <em>实时审计结论 · ${escapeHtml(curveConclusion.label)}</em>
   `;
 }
 
@@ -1420,11 +1545,17 @@ function renderCurve() {
   const s5s30 = (C.today[10] - C.today[6]) * 100;
   const s3m10 = (C.today[8] - C.today[1]) * 100;
   const fly = (2 * C.today[6] - C.today[4] - C.today[8]) * 100;
+  const twoYearDay = C.d1[4] * 100;
+  const fiveYearDay = C.d1[6] * 100;
+  const tenYearDay = C.d1[8] * 100;
+  const thirtyYearDay = C.d1[10] * 100;
+  const threeMonthDay = C.d1[1] * 100;
+  const flyDay = 2 * fiveYearDay - twoYearDay - tenYearDay;
   const metrics = [
-    ["2s10s", `${Math.round(s2s10)} bp`, t("curve.positiveBearSteepener")],
-    ["5s30s", `${Math.round(s5s30)} bp`, t("curve.longEndSteepening")],
-    ["3m10y", `${Math.round(s3m10)} bp`, t("curve.positiveAgain")],
-    [t("curve.butterfly"), `${fmt(Math.round(fly))} bp`, t("curve.bellyCheap")]
+    ["2s10s", `${Math.round(s2s10)} bp`, curveMetricRead(s2s10, twoYearDay, tenYearDay)],
+    ["5s30s", `${Math.round(s5s30)} bp`, curveMetricRead(s5s30, fiveYearDay, thirtyYearDay)],
+    ["3m10y", `${Math.round(s3m10)} bp`, curveMetricRead(s3m10, threeMonthDay, tenYearDay)],
+    [t("curve.butterfly"), `${fmt(Math.round(fly))} bp`, `${bellyRelativeLabel(fly)} · ${t("curve.dayChange", { change: signedBp(flyDay) })}`]
   ];
   $("#curveMetrics").innerHTML = metrics.map(metricCard).join("");
   $("#curveTable").innerHTML = `
@@ -1588,21 +1719,21 @@ function renderScorecard() {
   const [durationText, durationCode] = stanceLabel(score.duration);
   const [curveText, curveCode] = curveLabel(score.curve);
   $("#scorecardDuration").textContent = durationText;
-  $("#scorecardDurationValue").textContent = `${t("score.composite")} ${score.duration.toFixed(2)} · ${durationCode}`;
+  $("#scorecardDurationValue").textContent = `${t("score.scenarioComposite")} ${score.duration.toFixed(2)} · ${durationCode}`;
   $("#scorecardCurve").textContent = curveText;
-  $("#scorecardCurveValue").textContent = `${t("score.curve")} ${score.curve.toFixed(2)} · ${curveCode}`;
+  $("#scorecardCurveValue").textContent = `${t("score.scenarioCurve")} ${score.curve.toFixed(2)} · ${curveCode}`;
 
   const groupsNode = $("#scorecardGroups");
   // Preserve which module groups are expanded across the re-renders that score/weight edits
   // and language toggles trigger (innerHTML is rebuilt each time).
   const openGroups = new Set(
-    Array.from(groupsNode.querySelectorAll("details.score-group[open]")).map((d) => d.dataset.groupIndex)
+    Array.from(groupsNode.querySelectorAll("details.score-group[open]")).map((d) => d.dataset.groupId)
   );
-  groupsNode.innerHTML = state.groups.map((group, groupIndex) => {
+  groupsNode.innerHTML = state.groups.map((group) => {
     const avg = group.factors.reduce((sum, factor) => sum + factor.score, 0) / group.factors.length;
-    const isOpen = openGroups.has(String(groupIndex));
+    const isOpen = openGroups.has(String(group.id));
     return `
-      <details class="score-group" data-group-index="${groupIndex}"${isOpen ? " open" : ""}>
+      <details class="score-group" data-group-id="${escapeHtml(group.id)}"${isOpen ? " open" : ""}>
         <summary class="score-group-header">
           <div class="score-group-title">
             <span class="score-group-caret" aria-hidden="true">▸</span>
@@ -1612,11 +1743,11 @@ function renderScorecard() {
             </div>
           </div>
           <label class="weight-field">${t("score.weight")}
-            <input type="number" min="0" max="100" value="${group.weight}" data-weight="${groupIndex}">
+            <input type="number" min="0" max="100" value="${group.weight}" data-weight-group="${escapeHtml(group.id)}">
           </label>
           <span class="group-average ${scoreClass(avg)}">${t("score.average")} ${avg.toFixed(2)}</span>
         </summary>
-        ${group.factors.map((factor, factorIndex) => `
+        ${group.factors.map((factor) => `
           <div class="factor-row">
             <div class="factor-name">
               <strong>${factor.n}</strong>
@@ -1624,7 +1755,7 @@ function renderScorecard() {
             </div>
             <div class="factor-value">
               <strong class="${scoreClass(factor.score)}">${factor.v}</strong>
-              <span>${t("score.current")} ${factor.score}</span>
+              <span>${t("score.scenarioCurrent")} ${factor.score}</span>
             </div>
             <div class="factor-note">${factor.note}${renderFactorSourceMode(factor)}</div>
             <div class="score-buttons" role="group" aria-label="${escapeHtml(t("score.controlGroup", { factor: factor.n }))}">
@@ -1634,7 +1765,7 @@ function renderScorecard() {
                 const scoreLabel = signedScoreLabel(scoreValue);
                 const accessibleLabel = t("score.setAria", { factor: factor.n, value: scoreLabel, meaning });
                 return `
-                  <button type="button" class="${selected ? "active" : ""}" data-score="${groupIndex}:${factorIndex}:${scoreValue}" aria-pressed="${selected ? "true" : "false"}" aria-label="${escapeHtml(accessibleLabel)}" title="${escapeHtml(accessibleLabel)}">${scoreLabel}</button>
+                  <button type="button" class="${selected ? "active" : ""}" data-factor-score data-group-id="${escapeHtml(group.id)}" data-factor-id="${escapeHtml(factor.factorId)}" data-score-value="${scoreValue}" aria-pressed="${selected ? "true" : "false"}" aria-label="${escapeHtml(accessibleLabel)}" title="${escapeHtml(accessibleLabel)}">${scoreLabel}</button>
                 `;
               }).join("")}
             </div>
@@ -2504,18 +2635,21 @@ function factorDrivers() {
 }
 
 function bindScorecardEvents() {
-  $$("[data-score]").forEach((button) => {
+  $$("[data-factor-score]").forEach((button) => {
     button.addEventListener("click", () => {
-      const [groupIndex, factorIndex, score] = button.dataset.score.split(":").map(Number);
-      state.groups[groupIndex].factors[factorIndex].score = score;
+      const group = state.groups.find((item) => String(item.id) === button.dataset.groupId);
+      const factor = group?.factors.find((item) => stableFactorId(group, item) === button.dataset.factorId);
+      if (!factor) return;
+      factor.score = Number(button.dataset.scoreValue);
       persistState();
       renderScorecard();
       showScoreUpdate();
     });
   });
-  $$("[data-weight]").forEach((input) => {
+  $$("[data-weight-group]").forEach((input) => {
     input.addEventListener("change", () => {
-      const group = state.groups[Number(input.dataset.weight)];
+      const group = state.groups.find((item) => String(item.id) === input.dataset.weightGroup);
+      if (!group) return;
       group.weight = Math.max(0, Math.min(100, Number(input.value) || 0));
       persistState();
       renderScorecard();
@@ -2529,20 +2663,71 @@ function bindScorecardEvents() {
   });
 }
 
+function hasActionableFedProbabilities() {
+  const audit = state.fedPathAudit || {};
+  return audit.actionable === true
+    && audit.probabilitiesAvailable === true
+    && audit.isProbability !== false
+    && Array.isArray(state.fedPath)
+    && state.fedPath.length > 0;
+}
+
+function fedScenarioPresentation() {
+  const audit = state.fedPathAudit || {};
+  const scenario = audit.scenario || {};
+  const direction = String(scenario.direction || "unavailable");
+  const labels = {
+    "restrictive-bias": t("policy.restrictiveScenario"),
+    "easing-bias": t("policy.easingScenario"),
+    neutral: t("policy.neutralScenario"),
+    unavailable: t("policy.unavailableScenario")
+  };
+  return {
+    available: scenario.available === true,
+    label: labels[direction] || String(scenario.label || t("policy.unavailableScenario")),
+    drivers: Array.isArray(scenario.drivers) ? scenario.drivers.filter(Boolean) : [],
+    nextMeeting: Array.isArray(audit.futureMeetings) ? audit.futureMeetings[0] || null : null
+  };
+}
+
+function fedMeetingLabel(meeting) {
+  if (!meeting) return t("policy.meetingPending");
+  const label = meeting.label || meeting.date || "--";
+  return `${label}${meeting.title ? ` · ${meeting.title}` : ""}`;
+}
+
 function renderPolicy() {
   renderPolicyDecisionSnapshot();
   $("#policyCards").innerHTML = state.policy.rates.map(metricCard).join("");
   $("#plumbingCards").innerHTML = state.policy.plumbing.map(metricCard).join("");
-  $("#fedPathChart").innerHTML = state.fedPath.map((row) => `
-    <div class="fed-row">
-      <div class="fed-date">${row.m}</div>
-      <div class="fed-stack" title="Hike ${row.hike}% · Hold ${row.hold}% · Cut ${row.cut}%">
-        <span class="hike" style="width:${row.hike}%">${row.hike ? `${row.hike}%` : ""}</span>
-        <span class="hold" style="width:${row.hold}%">${row.hold}%</span>
-        <span class="cut" style="width:${row.cut}%">${row.cut ? `${row.cut}%` : ""}</span>
+  const probabilitiesAvailable = hasActionableFedProbabilities();
+  const pathTitle = $("#fedPathTitle");
+  const pathNote = $("#fedPathNote");
+  if (probabilitiesAvailable) {
+    if (pathTitle) pathTitle.textContent = t("panel.impliedPath");
+    if (pathNote) pathNote.textContent = t("policy.probabilityNote");
+    $("#fedPathChart").innerHTML = state.fedPath.map((row) => `
+      <div class="fed-row">
+        <div class="fed-date">${escapeHtml(row.m)}</div>
+        <div class="fed-stack" title="Hike ${Number(row.hike)}% · Hold ${Number(row.hold)}% · Cut ${Number(row.cut)}%">
+          <span class="hike" style="width:${Number(row.hike)}%">${Number(row.hike) ? `${Number(row.hike)}%` : ""}</span>
+          <span class="hold" style="width:${Number(row.hold)}%">${Number(row.hold)}%</span>
+          <span class="cut" style="width:${Number(row.cut)}%">${Number(row.cut) ? `${Number(row.cut)}%` : ""}</span>
+        </div>
       </div>
+    `).join("");
+    return;
+  }
+  const scenario = fedScenarioPresentation();
+  if (pathTitle) pathTitle.textContent = t("panel.qualitativeScenario");
+  if (pathNote) pathNote.textContent = t("policy.qualitativeNote");
+  $("#fedPathChart").innerHTML = `
+    <div class="empty-state compact">
+      <strong>${escapeHtml(scenario.available ? scenario.label : t("policy.unavailableScenario"))}</strong>
+      <span>${escapeHtml(t("policy.scenarioDrivers"))}: ${escapeHtml(scenario.drivers.join(" · ") || t("policy.driversPending"))}</span>
+      <small>${escapeHtml(t("policy.nextMeeting"))}: ${escapeHtml(fedMeetingLabel(scenario.nextMeeting))}</small>
     </div>
-  `).join("");
+  `;
 }
 
 function policyMetric(rows, fragment) {
@@ -2556,25 +2741,37 @@ function renderPolicyDecisionSnapshot() {
   const netLiquidity = policyMetric(state.policy.plumbing, "净流动性");
   const tga = policyMetric(state.policy.plumbing, "财政部一般账户");
   const liquidityRead = policyMetric(state.policy.plumbing, "流动性结论");
-  const nearMeeting = state.fedPath?.[0] || {};
-  const farMeeting = state.fedPath?.[state.fedPath.length - 1] || {};
+  const probabilitiesAvailable = hasActionableFedProbabilities();
+  const nearMeeting = probabilitiesAvailable ? state.fedPath[0] : {};
+  const farMeeting = probabilitiesAvailable ? state.fedPath[state.fedPath.length - 1] : {};
+  const scenario = fedScenarioPresentation();
+  const pathCard = probabilitiesAvailable
+    ? {
+      eyebrow: `市场路径 · ${farMeeting.m || "远端"}`,
+      label: "远端政策尾部",
+      value: Number.isFinite(farMeeting.hike) ? `${farMeeting.hike}%` : "--",
+      status: Number(farMeeting.hike || 0) >= 40 ? "尾部转鹰" : "持有为主",
+      detail: `近端持有 ${Number.isFinite(nearMeeting.hold) ? `${nearMeeting.hold}%` : "--"} · 远端持有 ${Number.isFinite(farMeeting.hold) ? `${farMeeting.hold}%` : "--"}`,
+      tone: Number(farMeeting.hike || 0) >= 40 ? "restrictive" : "neutral"
+    }
+    : {
+      eyebrow: t("policy.qualitativeEyebrow"),
+      label: t("policy.scenarioDirection"),
+      value: scenario.available ? scenario.label : t("policy.unavailableScenario"),
+      status: t("policy.nonProbability"),
+      detail: `${t("policy.nextMeeting")} ${fedMeetingLabel(scenario.nextMeeting)} · ${t("policy.scenarioDrivers")} ${scenario.drivers.join(" · ") || t("policy.driversPending")}`,
+      tone: "neutral"
+    };
   const cards = [
     {
       eyebrow: "当前利率锚 · EFFR",
       label: "政策设置",
       value: target[1] || "--",
-      status: "按兵不动",
+      status: target[2] || "当前区间",
       detail: `EFFR ${effr[1] || "--"} · 2Y月变动 ${twoYearMove[1] || "--"}`,
       tone: "neutral"
     },
-    {
-      eyebrow: `市场路径 · ${farMeeting.m || "远端"}`,
-      label: "远端加息尾部",
-      value: Number.isFinite(farMeeting.hike) ? `${farMeeting.hike}%` : "--",
-      status: Number(farMeeting.hike || 0) >= 40 ? "尾部转鹰" : "持有为主",
-      detail: `近端持有 ${Number.isFinite(nearMeeting.hold) ? `${nearMeeting.hold}%` : "--"} · 远端持有 ${Number.isFinite(farMeeting.hold) ? `${farMeeting.hold}%` : "--"}`,
-      tone: Number(farMeeting.hike || 0) >= 40 ? "restrictive" : "neutral"
-    },
+    pathCard,
     {
       eyebrow: "资金面 · WALCL-TGA-RRP",
       label: "净流动性",
@@ -2585,11 +2782,17 @@ function renderPolicyDecisionSnapshot() {
     }
   ];
   $("#policyDecisionCards").innerHTML = cards.map(decisionSnapshotCard).join("");
-  $("#policyDecisionRead").innerHTML = `
-    <strong>关键变化</strong>
-    <span>近端会议仍以持有为主（${Number.isFinite(nearMeeting.hold) ? `${nearMeeting.hold}%` : "--"}），但 ${escapeHtml(farMeeting.m || "远端")} 加息尾部升至 ${Number.isFinite(farMeeting.hike) ? `${farMeeting.hike}%` : "--"}。</span>
-    <em>行动含义 · 优先关注前端政策重定价；流动性仍为${escapeHtml(liquidityRead[1] || "中性")}</em>
-  `;
+  $("#policyDecisionRead").innerHTML = probabilitiesAvailable
+    ? `
+      <strong>关键变化</strong>
+      <span>近端会议持有 ${Number.isFinite(nearMeeting.hold) ? `${nearMeeting.hold}%` : "--"}；${escapeHtml(farMeeting.m || "远端")} 政策尾部为 ${Number.isFinite(farMeeting.hike) ? `${farMeeting.hike}%` : "--"}。</span>
+      <em>行动含义 · 优先关注前端政策重定价；流动性仍为${escapeHtml(liquidityRead[1] || "中性")}</em>
+    `
+    : `
+      <strong>${escapeHtml(t("policy.qualitativeScenario"))}</strong>
+      <span>${escapeHtml(scenario.available ? scenario.label : t("policy.unavailableScenario"))}；${escapeHtml(t("policy.scenarioDrivers"))} ${escapeHtml(scenario.drivers.join(" · ") || t("policy.driversPending"))}。</span>
+      <em>${escapeHtml(t("policy.nextMeeting"))} · ${escapeHtml(fedMeetingLabel(scenario.nextMeeting))}</em>
+    `;
 }
 
 function renderSupply() {
@@ -2853,8 +3056,8 @@ function renderEventsDecisionSnapshot() {
       label: eventDisplayLabel(fomc[1] || "FOMC"),
       value: shortEventDate(fomc[0]),
       status: fomc[2] === "高" ? "高影响" : "待确认",
-      detail: "验证远端加息尾部与政策反应函数",
-      tone: "restrictive"
+      detail: hasActionableFedProbabilities() ? "验证会议级路径与政策反应函数" : "验证定性政策情景与政策反应函数",
+      tone: hasActionableFedProbabilities() ? "restrictive" : "neutral"
     },
     {
       eyebrow: "供给验证 · QRA",

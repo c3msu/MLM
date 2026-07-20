@@ -22,7 +22,12 @@ from .sources import SeriesPoint
 DEFAULT_OOS_SPLIT = 0.65
 DEFAULT_HORIZON_DAYS = (7, 30, 91)
 DEFAULT_BOOTSTRAP_SEED = 20260612
+DEFAULT_BOOTSTRAP_REPLICATES = 500
+DEFAULT_RANDOMIZATION_MAX_SHIFTS = 499
 MIN_IC_OBSERVATIONS = 8
+MIN_BOOTSTRAP_NONOVERLAPPING_BLOCKS = 4
+MIN_FOLD_NONOVERLAPPING_BLOCKS = 2
+MIN_RANDOMIZATION_SHIFTS = 9
 FORWARD_POINT_TOLERANCE_DAYS = 10
 ALERT_EPISODE_GAP_DAYS = 14
 DEFAULT_FDR_ALPHA = 0.10
@@ -221,11 +226,12 @@ def spearman_ic(signal_values: list[float | None], forward_returns: list[float |
 
 
 def approximate_correlation_p_value(correlation: float | None, sample_size: int) -> float | None:
-    """Two-sided large-sample p-value used only for multiple-test diagnostics.
+    """Legacy two-sided large-sample p-value retained for compatibility.
 
-    The bootstrap interval remains the primary uncertainty estimate.  Fisher's
-    z approximation gives the factor family a common statistic for BH/FDR
-    correction without introducing a heavy scientific-Python dependency.
+    Production signal rows use the order-preserving circular-shift test below.
+    Fisher's z assumes independent pairs and therefore is not suitable for
+    overlapping forward-return labels; callers outside this module may still
+    use this helper as a clearly labelled approximation.
     """
     if correlation is None or sample_size < 4 or not math.isfinite(correlation):
         return None
@@ -252,6 +258,18 @@ def apply_benjamini_hochberg(
     missing_p_value: set[int] = set()
     for index, row in enumerate(rows):
         raw_p_value = row.get(p_key)
+        p_value_audit = row.get("pValue3mAudit") if isinstance(row.get("pValue3mAudit"), dict) else {}
+        audit_p_value = p_value_audit.get("pValue")
+        # Metric rows expose a rounded display p-value and the exact
+        # randomization result in the audit body.  BH must consume the latter;
+        # rounding a borderline value before multiplicity correction can flip
+        # the family verdict.
+        if (
+            p_key == "pValue3m"
+            and isinstance(audit_p_value, (int, float))
+            and math.isfinite(float(audit_p_value))
+        ):
+            raw_p_value = audit_p_value
         if isinstance(raw_p_value, (int, float)) and math.isfinite(float(raw_p_value)):
             p_value = max(0.0, min(1.0, float(raw_p_value)))
         else:
@@ -275,8 +293,35 @@ def apply_benjamini_hochberg(
         adjusted[original_index] = max(0.0, min(1.0, running))
     for index, row in enumerate(rows):
         q_value = adjusted.get(index)
+        p_value_audit = (
+            row.get("pValue3mAudit")
+            if isinstance(row.get("pValue3mAudit"), dict)
+            else {}
+        )
         row["fdrFamilySize"] = count
         row["fdrAlpha"] = alpha
+        row["fdrMethod"] = "Benjamini-Hochberg"
+        row["fdrInputAvailable"] = index not in missing_p_value
+        row["fdrPValueInput"] = round(indexed[index][1], 8)
+        row["fdrFamilyDefinition"] = "caller-supplied pre-registered fixed family"
+        minimum_p = p_value_audit.get("minimumAttainablePValue")
+        minimum_p = (
+            float(minimum_p)
+            if isinstance(minimum_p, (int, float)) and math.isfinite(float(minimum_p))
+            else None
+        )
+        rank_one_cutoff = alpha / count if count > 0 else None
+        row["fdrResolutionAudit"] = {
+            "available": minimum_p is not None and rank_one_cutoff is not None,
+            "minimumAttainablePValue": round(minimum_p, 8) if minimum_p is not None else None,
+            "rankOneBhCutoff": round(rank_one_cutoff, 8) if rank_one_cutoff is not None else None,
+            "canRejectAsSoleDiscovery": bool(
+                minimum_p is not None
+                and rank_one_cutoff is not None
+                and minimum_p <= rank_one_cutoff
+            ),
+            "note": "Other ordered hypotheses can raise the BH step-up rank; this field audits rank-one resolution only.",
+        }
         row["fdrQValue3m"] = round(q_value, 4) if q_value is not None else None
         row["fdrSignificant3m"] = bool(
             index not in missing_p_value
@@ -284,10 +329,16 @@ def apply_benjamini_hochberg(
             and q_value <= alpha
         )
         fold_stability = row.get("foldStability3m") if isinstance(row.get("foldStability3m"), dict) else {}
+        # Missing inference metadata is not evidence.  Older serialized/LKG
+        # rows pre-date the overlap-validity audit and must therefore remain
+        # research context instead of inheriting an actionable verdict.
+        inference_valid = row.get("inferenceValid3m") is True
         row["actionableRobust"] = bool(
             row.get("robust")
             and row["fdrSignificant3m"]
             and fold_stability.get("stablePositive")
+            and inference_valid
+            and row.get("wrongWay") is not True
         )
 
 
@@ -324,7 +375,24 @@ def fold_ic_stability(
     evaluation = observations[start:]
     if len(evaluation) < MIN_IC_OBSERVATIONS:
         return {"available": False, "reason": "evaluation sample too small", "folds": []}
-    fold_count = max(2, min(folds, len(evaluation) // MIN_IC_OBSERVATIONS))
+    spacing = typical_spacing_days([row[0] for row in evaluation])
+    overlap_block_len = max(1, int(math.ceil(horizon_days / max(spacing, 1.0))))
+    max_folds_by_raw_sample = len(evaluation) // MIN_IC_OBSERVATIONS
+    max_folds_by_effective_sample = (
+        len(evaluation) // (overlap_block_len * MIN_FOLD_NONOVERLAPPING_BLOCKS)
+    )
+    fold_count = min(folds, max_folds_by_raw_sample, max_folds_by_effective_sample)
+    if fold_count < 2:
+        return {
+            "available": False,
+            "reason": "fewer than two folds with two non-overlapping horizon windows each",
+            "horizonDays": horizon_days,
+            "evaluationSampleSize": len(evaluation),
+            "overlapBlockLength": overlap_block_len,
+            "minimumNonOverlappingWindowsPerFold": MIN_FOLD_NONOVERLAPPING_BLOCKS,
+            "stablePositive": False,
+            "folds": [],
+        }
     base_size, remainder = divmod(len(evaluation), fold_count)
     cursor = 0
     fold_rows: list[dict[str, Any]] = []
@@ -340,6 +408,7 @@ def fold_ic_stability(
                 "start": sample[0][0].isoformat(),
                 "end": sample[-1][0].isoformat(),
                 "sampleSize": len(sample),
+                "nonOverlappingWindowCount": len(sample) // overlap_block_len,
                 "ic": round_optional(oriented),
             }
         )
@@ -348,6 +417,10 @@ def fold_ic_stability(
         return {"available": False, "reason": "fold IC unavailable", "folds": fold_rows}
     positive = sum(1 for value in finite_ics if value > 0)
     sign_consistency = positive / len(finite_ics)
+    minimum_effective_windows = min(
+        (int(row.get("nonOverlappingWindowCount") or 0) for row in fold_rows),
+        default=0,
+    )
     return {
         "available": True,
         "horizonDays": horizon_days,
@@ -357,11 +430,20 @@ def fold_ic_stability(
         "medianIc": round_optional(float(median(finite_ics))),
         "worstIc": round_optional(min(finite_ics)),
         "positiveFoldPct": round(sign_consistency * 100, 1),
+        "overlapBlockLength": overlap_block_len,
+        "overlapAdjustment": "calendar horizon divided by median signal spacing, rounded up",
+        "minimumNonOverlappingWindowsPerFold": MIN_FOLD_NONOVERLAPPING_BLOCKS,
+        "minimumObservedNonOverlappingWindowsPerFold": minimum_effective_windows,
+        "independenceClaim": False,
+        "role": "contiguous sign-stability diagnostic",
         "stablePositive": bool(
             len(finite_ics) >= 2
+            and len(finite_ics) == len(fold_rows)
             and median(finite_ics) > 0
             and positive == len(finite_ics)
+            and minimum_effective_windows >= MIN_FOLD_NONOVERLAPPING_BLOCKS
         ),
+        "allFoldsAvailable": len(finite_ics) == len(fold_rows),
         "folds": fold_rows,
     }
 
@@ -370,33 +452,250 @@ def block_bootstrap_ci(
     pairs: list[tuple[float, float]],
     *,
     block_len: int,
-    n_boot: int = 500,
+    n_boot: int = DEFAULT_BOOTSTRAP_REPLICATES,
     seed: int = DEFAULT_BOOTSTRAP_SEED,
     alpha: float = 0.10,
 ) -> tuple[float, float] | None:
-    count = len(pairs)
-    if count < 12 or block_len < 1:
+    result = _block_bootstrap_result(
+        pairs,
+        block_len=block_len,
+        n_boot=n_boot,
+        seed=seed,
+        alpha=alpha,
+    )
+    interval = result.get("interval")
+    if not result.get("available") or not isinstance(interval, tuple):
         return None
+    return interval
+
+
+def _empirical_quantile(values: list[float], probability: float) -> float:
+    """Linearly interpolated empirical quantile for deterministic intervals."""
+    if len(values) == 1:
+        return values[0]
+    position = max(0.0, min(1.0, probability)) * (len(values) - 1)
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return values[lower]
+    weight = position - lower
+    return values[lower] * (1.0 - weight) + values[upper] * weight
+
+
+def _block_bootstrap_result(
+    pairs: list[tuple[float, float]],
+    *,
+    block_len: int,
+    n_boot: int = DEFAULT_BOOTSTRAP_REPLICATES,
+    seed: int = DEFAULT_BOOTSTRAP_SEED,
+    alpha: float = 0.10,
+) -> dict[str, Any]:
+    """Circular moving-block bootstrap with a machine-readable audit trail.
+
+    Resampling adjacent pairs, rather than individual observations, preserves
+    the serial dependence created by overlapping forward-return windows.  The
+    circular variant gives boundary observations equal inclusion probability.
+    """
+    count = len(pairs)
+    method = "circular moving-block bootstrap percentile"
+    if count < 12 or block_len < 1 or n_boot < 1:
+        return {
+            "available": False,
+            "method": method,
+            "reason": "sample too small or invalid resampling parameters",
+            "sampleSize": count,
+            "blockLength": block_len,
+            "nonOverlappingBlockCount": 0,
+            "resamplesRequested": n_boot,
+            "resamplesUsed": 0,
+            "seed": seed,
+            "alpha": alpha,
+            "deterministic": True,
+        }
     block_len = min(block_len, count)
+    nonoverlapping_blocks = count // block_len
+    if nonoverlapping_blocks < MIN_BOOTSTRAP_NONOVERLAPPING_BLOCKS:
+        return {
+            "available": False,
+            "method": method,
+            "reason": "fewer than four non-overlapping horizon blocks",
+            "sampleSize": count,
+            "blockLength": block_len,
+            "nonOverlappingBlockCount": nonoverlapping_blocks,
+            "minimumNonOverlappingBlocks": MIN_BOOTSTRAP_NONOVERLAPPING_BLOCKS,
+            "resamplesRequested": n_boot,
+            "resamplesUsed": 0,
+            "seed": seed,
+            "alpha": alpha,
+            "deterministic": True,
+        }
     rng = random.Random(seed)
-    max_start = count - block_len
     blocks_needed = math.ceil(count / block_len)
     statistics: list[float] = []
     for _ in range(n_boot):
         sample: list[tuple[float, float]] = []
         for _ in range(blocks_needed):
-            start = rng.randint(0, max_start)
-            sample.extend(pairs[start : start + block_len])
+            start = rng.randrange(count)
+            sample.extend(pairs[(start + offset) % count] for offset in range(block_len))
         sample = sample[:count]
         ic = spearman_ic([pair[0] for pair in sample], [pair[1] for pair in sample])
         if ic is not None:
             statistics.append(ic)
     if len(statistics) < n_boot // 2:
-        return None
+        return {
+            "available": False,
+            "method": method,
+            "reason": "too few finite bootstrap statistics",
+            "sampleSize": count,
+            "blockLength": block_len,
+            "nonOverlappingBlockCount": nonoverlapping_blocks,
+            "minimumNonOverlappingBlocks": MIN_BOOTSTRAP_NONOVERLAPPING_BLOCKS,
+            "resamplesRequested": n_boot,
+            "resamplesUsed": len(statistics),
+            "seed": seed,
+            "alpha": alpha,
+            "deterministic": True,
+        }
     statistics.sort()
-    low_index = int(len(statistics) * (alpha / 2))
-    high_index = min(len(statistics) - 1, int(len(statistics) * (1 - alpha / 2)))
-    return (statistics[low_index], statistics[high_index])
+    interval = (
+        _empirical_quantile(statistics, alpha / 2),
+        _empirical_quantile(statistics, 1 - alpha / 2),
+    )
+    return {
+        "available": True,
+        "method": method,
+        "interval": interval,
+        "sampleSize": count,
+        "blockLength": block_len,
+        "nonOverlappingBlockCount": nonoverlapping_blocks,
+        "minimumNonOverlappingBlocks": MIN_BOOTSTRAP_NONOVERLAPPING_BLOCKS,
+        "resamplesRequested": n_boot,
+        "resamplesUsed": len(statistics),
+        "seed": seed,
+        "alpha": alpha,
+        "confidenceLevelPct": round((1.0 - alpha) * 100, 1),
+        "deterministic": True,
+        "preserves": "local serial order of paired observations",
+        "independenceClaim": False,
+    }
+
+
+def _evenly_spaced_offsets(offsets: list[int], maximum: int) -> list[int]:
+    if len(offsets) <= maximum:
+        return offsets
+    if maximum <= 1:
+        return [offsets[len(offsets) // 2]]
+    indices = {
+        round(index * (len(offsets) - 1) / (maximum - 1))
+        for index in range(maximum)
+    }
+    return [offsets[index] for index in sorted(indices)]
+
+
+def order_preserving_circular_shift_test(
+    pairs: list[tuple[float, float]],
+    *,
+    block_len: int,
+    max_shifts: int = DEFAULT_RANDOMIZATION_MAX_SHIFTS,
+    min_shifts: int = MIN_RANDOMIZATION_SHIFTS,
+) -> dict[str, Any]:
+    """Two-sided randomization test that preserves both series' time order.
+
+    The forward-return ranks are circularly shifted relative to signal ranks.
+    All non-identity shifts belong to the cyclic randomization group and are
+    retained: dropping near-alignments would remove the most autocorrelated
+    null draws, bias the p-value downward, and needlessly worsen its minimum
+    attainable resolution.  We still require enough horizon-separated shifts
+    as a sample-support gate before running the complete cyclic test.  All
+    shifts are used up to a deterministic, evenly-spaced cap; no pseudo-random
+    seed is involved.
+    """
+    count = len(pairs)
+    method = "order-preserving circular-shift randomization (two-sided)"
+    if count < MIN_IC_OBSERVATIONS or block_len < 1 or max_shifts < 1:
+        return {
+            "available": False,
+            "method": method,
+            "reason": "sample too small or invalid shift parameters",
+            "sampleSize": count,
+            "blockLength": block_len,
+            "shiftsTested": 0,
+            "deterministic": True,
+        }
+    block_len = min(block_len, count)
+    signal_ranks = average_ranks([pair[0] for pair in pairs])
+    forward_ranks = average_ranks([pair[1] for pair in pairs])
+    observed = pearson_correlation(signal_ranks, forward_ranks)
+    if observed is None:
+        return {
+            "available": False,
+            "method": method,
+            "reason": "observed rank correlation unavailable",
+            "sampleSize": count,
+            "blockLength": block_len,
+            "shiftsTested": 0,
+            "deterministic": True,
+        }
+    horizon_separated_offsets = list(range(block_len, count - block_len + 1))
+    if len(horizon_separated_offsets) < min_shifts:
+        return {
+            "available": False,
+            "method": method,
+            "reason": "too few horizon-separated circular shifts",
+            "sampleSize": count,
+            "blockLength": block_len,
+            "shiftsTested": 0,
+            "horizonSeparatedShiftCount": len(horizon_separated_offsets),
+            "minimumShifts": min_shifts,
+            "deterministic": True,
+        }
+    all_nonidentity_offsets = list(range(1, count))
+    offsets = _evenly_spaced_offsets(all_nonidentity_offsets, max_shifts)
+    null_statistics: list[float] = []
+    for offset in offsets:
+        shifted = forward_ranks[offset:] + forward_ranks[:offset]
+        statistic = pearson_correlation(signal_ranks, shifted)
+        if statistic is not None:
+            null_statistics.append(statistic)
+    if len(null_statistics) < min_shifts:
+        return {
+            "available": False,
+            "method": method,
+            "reason": "too few finite circular-shift statistics",
+            "sampleSize": count,
+            "blockLength": block_len,
+            "shiftsTested": len(null_statistics),
+            "minimumShifts": min_shifts,
+            "deterministic": True,
+        }
+    tolerance = 1e-12
+    exceedances = sum(
+        1 for statistic in null_statistics
+        if abs(statistic) >= abs(observed) - tolerance
+    )
+    # Plus-one correction keeps a finite deterministic randomization sample
+    # from reporting an impossible p=0.
+    p_value = (exceedances + 1) / (len(null_statistics) + 1)
+    return {
+        "available": True,
+        "method": method,
+        "pValue": p_value,
+        "tail": "two-sided",
+        "observedIcRaw": observed,
+        "sampleSize": count,
+        "blockLength": block_len,
+        "excludedNearAlignmentRadius": 0,
+        "nearAlignmentsIncluded": True,
+        "horizonSeparatedShiftCount": len(horizon_separated_offsets),
+        "completeCircularGroupUsed": len(offsets) == len(all_nonidentity_offsets),
+        "shiftsTested": len(null_statistics),
+        "minimumShifts": min_shifts,
+        "maximumShifts": max_shifts,
+        "minimumAttainablePValue": 1 / (len(null_statistics) + 1),
+        "deterministic": True,
+        "preserves": "within-series cyclic rank order and serial dependence",
+        "independenceClaim": False,
+    }
 
 
 def oriented_ic(raw_ic: float | None, direction: str) -> float | None:
@@ -509,6 +808,14 @@ def evaluate_signal(
         for horizon in horizons:
             row[f"forward{horizon}"] = prices.forward_return_pct(signal_date, days=horizon)
         row["forwardDrawdown"] = prices.forward_max_drawdown_pct(signal_date, days=drawdown_horizon_days)
+        drawdown_endpoint_index = prices.index_at_or_after(
+            signal_date + timedelta(days=drawdown_horizon_days)
+        )
+        row["forwardDrawdownEndDate"] = (
+            prices.dates[drawdown_endpoint_index]
+            if drawdown_endpoint_index is not None
+            else None
+        )
         observations.append(row)
 
     if oos_start_date is None:
@@ -517,18 +824,68 @@ def evaluate_signal(
         split_index = bisect_left(signal.dates, oos_start_date)
     calibration = observations[:split_index]
     evaluation = observations[split_index:]
+    if not calibration or not evaluation:
+        return {
+            "available": False,
+            "reason": "calibration or evaluation slice empty at requested OOS boundary",
+        }
+    evaluation_start_date = evaluation[0]["date"]
 
     horizon_rows: list[dict[str, Any]] = []
     for horizon in horizons:
         key = f"forward{horizon}"
         full_pairs = finite_pairs([row["signal"] for row in observations], [row[key] for row in observations])
-        calibration_pairs = finite_pairs([row["signal"] for row in calibration], [row[key] for row in calibration])
+        calibration_candidates = [
+            row
+            for row in calibration
+            if row.get(key) is not None
+            and math.isfinite(float(row["signal"]))
+            and math.isfinite(float(row[key]))
+        ]
+        # Model/factor selection may consume calibration IC.  Purge labels that
+        # reach the OOS start so no calibration statistic can see evaluation-
+        # period prices through an overlapping forward-return window.
+        purged_calibration: list[dict[str, Any]] = []
+        for row in calibration_candidates:
+            endpoint_index = prices.index_at_or_after(
+                row["date"] + timedelta(days=horizon)
+            )
+            endpoint_date = (
+                prices.dates[endpoint_index]
+                if endpoint_index is not None
+                else None
+            )
+            if endpoint_date is not None and endpoint_date < evaluation_start_date:
+                purged_calibration.append(row)
+        calibration_pairs = [
+            (float(row["signal"]), float(row[key]))
+            for row in purged_calibration
+        ]
         oos_pairs = finite_pairs([row["signal"] for row in evaluation], [row[key] for row in evaluation])
         raw_full = spearman_ic([row[0] for row in full_pairs], [row[1] for row in full_pairs])
         raw_calibration = spearman_ic([row[0] for row in calibration_pairs], [row[1] for row in calibration_pairs])
         raw_oos = spearman_ic([row[0] for row in oos_pairs], [row[1] for row in oos_pairs])
-        spacing = typical_spacing_days(signal.dates)
-        overlap_block_len = max(1, int(round(horizon / max(spacing, 1.0))))
+        full_pair_dates = [
+            row["date"]
+            for row in observations
+            if row.get("signal") is not None
+            and row.get(key) is not None
+            and math.isfinite(float(row["signal"]))
+            and math.isfinite(float(row[key]))
+        ]
+        oos_pair_dates = [
+            row["date"]
+            for row in evaluation
+            if row.get("signal") is not None
+            and row.get(key) is not None
+            and math.isfinite(float(row["signal"]))
+            and math.isfinite(float(row[key]))
+        ]
+        spacing = typical_spacing_days(oos_pair_dates or full_pair_dates or signal.dates)
+        # ``ceil`` is intentional: any fractional overlap still means the next
+        # sampled forward label shares part of its price path with the prior one.
+        overlap_block_len = max(1, int(math.ceil(horizon / max(spacing, 1.0))))
+        effective_oos = len(oos_pairs) // overlap_block_len if oos_pairs else 0
         horizon_row: dict[str, Any] = {
             "days": horizon,
             "ic": round_optional(oriented_ic(raw_full, direction)),
@@ -536,28 +893,84 @@ def evaluate_signal(
             "icOos": round_optional(oriented_ic(raw_oos, direction)),
             "sampleSize": len(full_pairs),
             "calibrationSampleSize": len(calibration_pairs),
+            "calibrationCandidateSampleSize": len(calibration_candidates),
+            "calibrationPurgedOverlapCount": len(calibration_candidates) - len(purged_calibration),
+            "calibrationPurgeRule": (
+                "actual first price endpoint on/after signal date + forward horizon "
+                "must be strictly before OOS start"
+            ),
             "oosSampleSize": len(oos_pairs),
             "overlapBlockLength": overlap_block_len,
-            "oosEffectiveSampleSize": max(3, math.ceil(len(oos_pairs) / overlap_block_len)) if oos_pairs else 0,
+            "oosEffectiveSampleSize": effective_oos,
+            "overlapAudit": {
+                "labelHorizonDays": horizon,
+                "medianSignalSpacingDays": round(spacing, 3),
+                "blockLength": overlap_block_len,
+                "blockLengthRule": "ceil(horizon days / median valid-pair spacing days)",
+                "rawOosPairs": len(oos_pairs),
+                "nonOverlappingOosBlocks": effective_oos,
+                "overlappingLabels": overlap_block_len > 1,
+                "independenceClaim": False,
+            },
         }
         if horizon == bootstrap_horizon_days:
             block_len = overlap_block_len
-            interval = block_bootstrap_ci(full_pairs, block_len=block_len)
-            if interval is not None:
+            full_bootstrap = _block_bootstrap_result(full_pairs, block_len=block_len)
+            horizon_row["ciAudit"] = {
+                key: value for key, value in full_bootstrap.items() if key != "interval"
+            }
+            interval = full_bootstrap.get("interval")
+            if full_bootstrap.get("available") and isinstance(interval, tuple):
                 horizon_row["ci"] = oriented_interval(interval, direction)
             # OOS-aligned CI: bootstrap ONLY the out-of-sample slice so the interval
             # qualifies the headline icOos rather than the full-sample IC.  Because ICs
             # are already oriented so positive means useful, a wholly negative interval
             # is statistically non-zero but explicitly wrong-way, never "robust".
-            oos_interval = block_bootstrap_ci(oos_pairs, block_len=block_len)
-            if oos_interval is not None:
+            oos_bootstrap = _block_bootstrap_result(oos_pairs, block_len=block_len)
+            horizon_row["ciOosAudit"] = {
+                key: value for key, value in oos_bootstrap.items() if key != "interval"
+            }
+            oos_interval = oos_bootstrap.get("interval")
+            randomization = order_preserving_circular_shift_test(oos_pairs, block_len=block_len)
+            horizon_row["pValueOosAudit"] = randomization
+            if randomization.get("available"):
+                horizon_row["pValueOos"] = round_optional(
+                    float(randomization["pValue"]),
+                    digits=4,
+                )
+            horizon_row["pValueOosMethod"] = randomization["method"]
+            inference_checks = {
+                "minimumNonOverlappingBlocks": MIN_BOOTSTRAP_NONOVERLAPPING_BLOCKS,
+                "nonOverlappingBlockCount": effective_oos,
+                "enoughNonOverlappingBlocks": effective_oos >= MIN_BOOTSTRAP_NONOVERLAPPING_BLOCKS,
+                "bootstrapAvailable": bool(oos_bootstrap.get("available")),
+                "randomizationAvailable": bool(randomization.get("available")),
+            }
+            inference_valid = all(
+                (
+                    inference_checks["enoughNonOverlappingBlocks"],
+                    inference_checks["bootstrapAvailable"],
+                    inference_checks["randomizationAvailable"],
+                )
+            )
+            horizon_row["inferenceValidOos"] = inference_valid
+            horizon_row["inferenceAudit"] = {
+                "valid": inference_valid,
+                "purpose": "overlap-adjusted OOS IC uncertainty",
+                "checks": inference_checks,
+                "failClosed": True,
+            }
+            if oos_bootstrap.get("available") and isinstance(oos_interval, tuple):
                 ci_oos = oriented_interval(oos_interval, direction)
                 horizon_row["ciOos"] = ci_oos
                 low, high = ci_oos
                 if low is not None and high is not None:
                     horizon_row["statisticallyNonzeroOos"] = bool(low > 0 or high < 0)
                     horizon_row["wrongWayOos"] = bool(high < 0)
-                    horizon_row["robustOos"] = bool(low > 0)
+                    horizon_row["ciExcludesZeroInExpectedDirectionOos"] = bool(low > 0)
+                    horizon_row["robustOos"] = bool(low > 0 and inference_valid)
+            if "robustOos" not in horizon_row:
+                horizon_row["robustOos"] = False
             regime = regime_conditional_split(observations, key, prices, direction=direction, block_len=block_len)
             if regime is not None:
                 horizon_row["regimeSplit"] = regime
@@ -581,11 +994,68 @@ def evaluate_signal(
         "calibrationCount": len(calibration),
         "evaluationCount": len(evaluation),
         "oosSplit": oos_split,
-        "oosStartDate": oos_start_date.isoformat() if oos_start_date is not None else evaluation[0]["date"].isoformat(),
-        "evaluationStartDate": evaluation[0]["date"].isoformat() if evaluation else None,
+        "oosStartDate": oos_start_date.isoformat() if oos_start_date is not None else evaluation_start_date.isoformat(),
+        "evaluationStartDate": evaluation_start_date.isoformat(),
         "horizons": horizon_rows,
         "alert": alert,
     }
+
+
+def _non_overlapping_calendar_anchors(
+    rows: list[dict[str, Any]],
+    *,
+    horizon_days: int,
+) -> list[dict[str, Any]]:
+    """Greedily retain forward-label windows that do not share market dates."""
+    anchors: list[dict[str, Any]] = []
+    last_endpoint: date | None = None
+    for row in sorted(rows, key=lambda item: item["date"]):
+        row_date = row["date"]
+        endpoint = row.get("forwardDrawdownEndDate")
+        if not isinstance(endpoint, date):
+            endpoint = row_date + timedelta(days=horizon_days)
+        if last_endpoint is None or row_date > last_endpoint:
+            anchors.append(row)
+            last_endpoint = endpoint
+    return anchors
+
+
+def _independent_alert_episodes(
+    alerts: list[dict[str, Any]],
+    *,
+    horizon_days: int,
+) -> list[list[dict[str, Any]]]:
+    """Collapse alert streaks and retain episodes with disjoint label windows.
+
+    An episode is a single alerting decision even when the same condition stays
+    above threshold for several observations.  Only the first alert's fixed
+    forward label is evaluated; later persistent alerts de-cluster the series
+    but must not extend the original prediction window with hindsight.
+    """
+    if not alerts:
+        return []
+    episodes: list[list[dict[str, Any]]] = []
+    for row in sorted(alerts, key=lambda item: item["date"]):
+        if episodes and (row["date"] - episodes[-1][-1]["date"]).days <= ALERT_EPISODE_GAP_DAYS:
+            episodes[-1].append(row)
+        else:
+            episodes.append([row])
+
+    independent: list[list[dict[str, Any]]] = []
+    last_endpoint: date | None = None
+    for episode in episodes:
+        start = episode[0]["date"]
+        if last_endpoint is not None and start <= last_endpoint:
+            continue
+        independent.append(episode)
+        first = episode[0]
+        endpoint = first.get("forwardDrawdownEndDate")
+        last_endpoint = (
+            endpoint
+            if isinstance(endpoint, date)
+            else first["date"] + timedelta(days=horizon_days)
+        )
+    return independent
 
 
 def evaluate_alert_rule(
@@ -624,15 +1094,40 @@ def evaluate_alert_rule(
     alerts = [row for row in scored if is_alert(row)]
     events = [row for row in scored if is_event(row)]
     hits = [row for row in alerts if is_event(row)]
-    base_rate = len(events) / len(scored) if scored else None
-    hit_rate = len(hits) / len(alerts) if alerts else None
+    independent_scored = _non_overlapping_calendar_anchors(
+        scored,
+        horizon_days=drawdown_horizon_days,
+    )
+    independent_alert_episodes = _independent_alert_episodes(
+        alerts,
+        horizon_days=drawdown_horizon_days,
+    )
+    independent_events = [row for row in independent_scored if is_event(row)]
+    independent_hit_episodes = [
+        episode
+        for episode in independent_alert_episodes
+        if is_event(episode[0])
+    ]
+    base_rate = (
+        len(independent_events) / len(independent_scored)
+        if independent_scored
+        else None
+    )
+    hit_rate = (
+        len(independent_hit_episodes) / len(independent_alert_episodes)
+        if independent_alert_episodes
+        else None
+    )
     lift = (hit_rate / base_rate) if hit_rate is not None and base_rate else None
 
     lead_times: list[int] = []
-    for row in hits:
-        trough = prices.forward_trough_date(row["date"], days=drawdown_horizon_days)
+    for episode in independent_hit_episodes:
+        trough = prices.forward_trough_date(
+            episode[0]["date"],
+            days=drawdown_horizon_days,
+        )
         if trough is not None:
-            lead_times.append((trough - row["date"]).days)
+            lead_times.append((trough - episode[0]["date"]).days)
     lead_time_days = sum(lead_times) / len(lead_times) if lead_times else None
 
     false_alarm_days = mean_false_alarm_days(alerts, is_event, spacing_days=spacing_days)
@@ -655,7 +1150,7 @@ def evaluate_alert_rule(
         "drawdownThresholdPct": drawdown_threshold_pct,
         "drawdownHorizonDays": drawdown_horizon_days,
         "oosSampleSize": len(scored),
-        "oosAlertCount": len(alerts),
+        "oosAlertCount": len(independent_alert_episodes),
         "oosHitRate": round_optional(hit_rate, digits=3),
         "baseRate": round_optional(base_rate, digits=3),
         "lift": round_optional(lift, digits=2),
@@ -665,6 +1160,23 @@ def evaluate_alert_rule(
         "hitRateTotal": round_optional(hit_rate_total, digits=3),
         "baseRateTotal": round_optional(base_rate_total, digits=3),
         "breachEvents": breach_events,
+        "alertIndependenceAudit": {
+            "method": "one outcome per alert episode with non-overlapping forward-drawdown windows",
+            "horizonDays": drawdown_horizon_days,
+            "episodeGapDays": ALERT_EPISODE_GAP_DAYS,
+            "episodeOutcomeRule": "first alert's fixed forward label only; later alerts only de-cluster",
+            "labelEndpointRule": "actual first market date on/after the calendar horizon when available",
+            "rawOosObservationCount": len(scored),
+            "independentOosObservationCount": len(independent_scored),
+            "rawOosAlertObservationCount": len(alerts),
+            "independentOosAlertCount": len(independent_alert_episodes),
+            "rawOosHitObservationCount": len(hits),
+            "independentOosHitCount": len(independent_hit_episodes),
+            "overlappingLabelsCountedAsIndependent": False,
+        },
+        "rawOosAlertObservationCount": len(alerts),
+        "rawOosHitRate": round_optional(len(hits) / len(alerts), digits=3) if alerts else None,
+        "rawBaseRate": round_optional(len(events) / len(scored), digits=3) if scored else None,
     }
 
 
@@ -900,27 +1412,40 @@ def signal_validation_metric_row(
     if not evaluation.get("available"):
         return None
     horizons = {item["days"]: item for item in evaluation["horizons"]}
-    targets = [point.date for point in signal_points]
-    signal_values: list[float | None] = [point.value for point in signal_points]
+    evaluation_start_raw = (
+        evaluation.get("evaluationStartDate")
+        or evaluation.get("oosStartDate")
+    )
+    try:
+        evaluation_start = date.fromisoformat(str(evaluation_start_raw))
+    except (TypeError, ValueError):
+        evaluation_start = None
+    # Lead/lag comparisons are decision inputs downstream, so compare the
+    # pre-registered 91D forward IC with contemporaneous/trailing correlations
+    # on the same OOS rows that have a complete 91D label.  Mixing an OOS
+    # forward statistic with full-history comparators can change the winning
+    # classification after seeing the research sample.
+    classification_points = [
+        point
+        for point in signal_points
+        if evaluation_start is not None
+        and point.date >= evaluation_start
+        and prices_sorted.forward_return_pct(point.date, days=91) is not None
+    ]
+    targets = [point.date for point in classification_points]
+    signal_values: list[float | None] = [point.value for point in classification_points]
     contemporaneous = spearman_ic(signal_values, trailing_return_values(prices_sorted, targets, days=30))
     trailing = spearman_ic(signal_values, trailing_return_values(prices_sorted, targets, days=91))
-    forward_candidates = [
-        horizons.get(30, {}).get("icOos"),
-        horizons.get(91, {}).get("icOos"),
-    ]
-    forward_candidates = [value for value in forward_candidates if value is not None]
-    if not forward_candidates:
-        forward_candidates = [
-            value
-            for value in (horizons.get(30, {}).get("ic"), horizons.get(91, {}).get("ic"))
-            if value is not None
-        ]
-    forward_ic = max(forward_candidates, key=abs) if forward_candidates else None
     alert = evaluation.get("alert", {})
     horizon_3m = horizons.get(91, {})
+    # Lead/lag classification participates in downstream eligibility checks.
+    # Keep it on the pre-registered 91D endpoint instead of choosing whichever
+    # of 30D/91D looks strongest after seeing the OOS slice.
+    forward_ic = horizon_3m.get("icOos")
     oos_ic_3m = horizon_3m.get("icOos")
     oos_sample_size_3m = int(horizon_3m.get("oosSampleSize") or 0)
     oos_effective_sample_size_3m = int(horizon_3m.get("oosEffectiveSampleSize") or 0)
+    p_value_3m = horizon_3m.get("pValueOos")
     fold_stability = fold_ic_stability(
         signal_points,
         price_points,
@@ -945,11 +1470,13 @@ def signal_validation_metric_row(
         "oosIc3m": oos_ic_3m,
         "oosSampleSize3m": oos_sample_size_3m,
         "oosEffectiveSampleSize3m": oos_effective_sample_size_3m,
-        "pValue3m": round_optional(
-            approximate_correlation_p_value(oos_ic_3m, oos_effective_sample_size_3m),
-            digits=4,
-        ),
-        "pValue3mMethod": "Fisher z with horizon-overlap effective sample size",
+        "pValue3m": round_optional(float(p_value_3m), digits=4) if p_value_3m is not None else None,
+        "pValue3mMethod": horizon_3m.get("pValueOosMethod"),
+        "pValue3mAudit": horizon_3m.get("pValueOosAudit"),
+        "inferenceValid3m": bool(horizon_3m.get("inferenceValidOos")),
+        "inferenceAudit3m": horizon_3m.get("inferenceAudit"),
+        "bootstrapAudit3m": horizon_3m.get("ciOosAudit"),
+        "overlapAudit3m": horizon_3m.get("overlapAudit"),
         "ci3m": horizons.get(91, {}).get("ci"),
         "oosCi3m": horizons.get(91, {}).get("ciOos"),
         "robust": horizons.get(91, {}).get("robustOos"),
@@ -957,6 +1484,10 @@ def signal_validation_metric_row(
         "wrongWay": horizons.get(91, {}).get("wrongWayOos"),
         "regimeSplit": horizons.get(91, {}).get("regimeSplit"),
         "foldStability3m": fold_stability,
+        "classificationEndpointDays": 91,
+        "classificationSelection": "pre_registered_primary_endpoint",
+        "classificationSampleRole": "oos_complete_91d_labels",
+        "classificationSampleSize": len(classification_points),
         "hitRateOos": alert.get("oosHitRate"),
         "baseRate": alert.get("baseRate"),
         "lift": alert.get("lift"),
@@ -969,6 +1500,8 @@ def signal_validation_metric_row(
         "hitRateTotal": alert.get("hitRateTotal"),
         "baseRateTotal": alert.get("baseRateTotal"),
         "breachEvents": alert.get("breachEvents", []),
+        "alertIndependenceAudit": alert.get("alertIndependenceAudit"),
+        "rawOosAlertObservationCount": alert.get("rawOosAlertObservationCount"),
         "classification": classify_lead_lag(
             forward_ic=forward_ic,
             contemporaneous_corr=contemporaneous,

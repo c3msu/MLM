@@ -53,8 +53,10 @@ from .sources import (
     nearest_record,
 )
 from .signal_validation import (
+    DEFAULT_FDR_ALPHA,
     MIN_SIGNAL_VALIDATION_POINTS,
     SortedSeries,
+    apply_benjamini_hochberg,
     signal_validation_metric_row,
     trailing_return_values,
     classify_lead_lag,
@@ -1180,7 +1182,15 @@ def build_conclusion_audit(groups: list[dict[str, Any]], source_status: list[dic
         )
 
     source_status = source_status or []
-    warning_count = sum(1 for source in source_status if _source_status(source) in {"warning", "warn"})
+    stale_count = sum(1 for source in source_status if _source_status(source) == "stale")
+    # A freshness breach is a data-quality warning even when the transport
+    # itself succeeded.  Counting only literal ``warning`` rows previously let
+    # a stale FRED observation leave conclusion confidence unchanged.
+    warning_count = sum(
+        1
+        for source in source_status
+        if _source_status(source) in {"warning", "warn", "stale"}
+    )
     error_count = sum(1 for source in source_status if _source_status(source) == "error")
     absolute_total = sum(abs(item["contribution"]) for item in drivers)
     evidence_quality = (
@@ -1213,6 +1223,7 @@ def build_conclusion_audit(groups: list[dict[str, Any]], source_status: list[dic
             "proxyContributionShare": round(proxy_share, 2),
         },
         "sourceWarningCount": warning_count,
+        "sourceStaleCount": stale_count,
         "sourceErrorCount": error_count,
         "weightRecommendation": conclusion_weight_recommendation(
             evidence_quality=evidence_quality,
@@ -1402,7 +1413,18 @@ def build_macro_liquidity_score(
     score = snapshot["score"]
     components = snapshot["components"]
     modules = snapshot["modules"]
-    eligible_components = [item for item in components if item.get("scoreEligible")]
+    # The headline uses the smoothed Funding module.  Driver/constraint
+    # explanations must therefore use the matching smoothed attribution, not
+    # the legacy current-reading contribution retained on each raw component.
+    eligible_components = [
+        {
+            **item,
+            "contribution": float(item.get("headlineContribution", item.get("contribution", 0.0))),
+            "contributionBasis": "headlineContribution",
+        }
+        for item in components
+        if item.get("scoreEligible")
+    ]
     drivers = sorted(eligible_components, key=lambda item: abs(item["contribution"]), reverse=True)[:4]
     constraint = min(eligible_components, key=lambda item: item["contribution"]) if eligible_components else {}
     offset = max(eligible_components, key=lambda item: item["contribution"]) if eligible_components else {}
@@ -1435,7 +1457,7 @@ def build_macro_liquidity_score(
         "score": score,
         "regime": macro_liquidity_regime(score),
         "bias": "supportive" if score >= 55 else "restrictive" if score <= 45 else "neutral",
-        "method": "Bhadial Conditions Score-compatible 21-factor (redundancy-deduplicated from 30; 2026-06), 7-module 5Y historical percentile composite; module weights follow the public factor-coverage/overlap method; Funding uses EMA(5).",
+        "method": "Bhadial Conditions Score fixed-weight 21-factor public-data compatibility approximation across 7 modules; it is not the current public 30-factor dynamically decorrelated headline. Funding uses EMA over 5 daily data-availability observations.",
         "sourceUrl": BHADIAL_SCORE_SOURCE_URL,
         "moduleCount": len(BHADIAL_CONDITION_MODULES),
         "totalFactorCount": sum(int(module["scored"]) + int(module["display"]) for module in BHADIAL_FACTOR_COVERAGE),
@@ -1449,6 +1471,8 @@ def build_macro_liquidity_score(
         "observedOnlyScore": snapshot["observedOnlyScore"],
         "reliabilityScore": snapshot["reliabilityScore"],
         "scoreContract": "legacy-fixed-weight-compatible",
+        "explanationContributionField": "headlineContribution",
+        "contributionAudit": snapshot.get("contributionAudit"),
         "proxyFactorCount": 5,
         "modules": modules,
         "summary": macro_liquidity_summary(score, constraint, offset, trend),
@@ -1848,12 +1872,21 @@ def global_lppl_summary(available_rows: list[dict[str, Any]], index_rows: list[d
         (
             optional_float((row.get("forwardSignal") or {}).get("score")) or 0.0,
             str(row.get("symbol") or ""),
+            (row.get("forwardSignal") or {}).get("actionable") is True,
         )
         for row in available_rows
         if isinstance(row.get("forwardSignal"), dict) and (row.get("forwardSignal") or {}).get("available")
     ]
-    forward_count = sum(1 for score, _symbol in forward_rows if score >= GLOBAL_LPPL_ALERT_THRESHOLD)
-    forward_leaders = sorted(forward_rows, reverse=True)[:3]
+    # A research-only pressure score remains useful context, but it must not be
+    # counted as a production trigger merely because its display score is high.
+    actionable_forward = [(score, symbol) for score, symbol, actionable in forward_rows if actionable]
+    research_forward_high = [
+        (score, symbol)
+        for score, symbol, actionable in forward_rows
+        if not actionable and score >= GLOBAL_LPPL_ALERT_THRESHOLD
+    ]
+    forward_count = len(actionable_forward)
+    forward_leaders = sorted(actionable_forward, reverse=True)[:3]
     forward_text = ", ".join(f"{symbol} {score:.0f}" for score, symbol in forward_leaders if symbol)
     breadth = build_global_lppl_breadth_confirmation(index_rows)
     breadth_text = (
@@ -1864,10 +1897,20 @@ def global_lppl_summary(available_rows: list[dict[str, Any]], index_rows: list[d
     )
     return (
         f"LPPL逐市场独立评估; "
-        f"{high_risk_count}/{len(available_rows)}个可用指数处于风险阈值上方"
+        f"{high_risk_count}/{len(available_rows)}个可用指数的原始模型分处于风险阈值上方"
         + (f", 当前较高: {leader_text}" if leader_text else "")
         + (f", 最近临界窗口约{nearest}天。" if nearest is not None else "。")
-        + (f" 前瞻压力{forward_count}/{len(available_rows)}个市场高于阈值" + (f", 领先: {forward_text}。" if forward_text else "。") if forward_rows else "")
+        + (
+            f" 生产级前瞻触发{forward_count}/{len(available_rows)}个市场"
+            + (f", 触发: {forward_text}。" if forward_text else "。")
+            + (
+                f" 另有{len(research_forward_high)}个研究层前瞻高压读数,不计入动作层。"
+                if research_forward_high
+                else ""
+            )
+            if forward_rows
+            else ""
+        )
         + breadth_text
         + f" 不计算混合综合分, 图表和回测按{len(index_rows)}个市场分别展示。"
     )
@@ -1935,7 +1978,12 @@ def build_global_lppl_breadth_confirmation(index_rows: list[dict[str, Any]]) -> 
             "riskSharePct": 0.0,
             "weightedRiskSharePct": 0.0,
             "forwardRiskCount": 0,
+            "researchForwardRiskCount": 0,
             "clipLockCount": 0,
+            "validatedCount": 0,
+            "productionEligibleCount": 0,
+            "actionableCount": 0,
+            "scoreUse": "raw_context",
             "regime": "Unavailable",
             "regimeCn": "不可用",
             "summary": "LPPL breadth unavailable; no current market rows with scores.",
@@ -1950,6 +1998,14 @@ def build_global_lppl_breadth_confirmation(index_rows: list[dict[str, Any]]) -> 
         for row in available
         if isinstance(row.get("forwardSignal"), dict)
         and (row.get("forwardSignal") or {}).get("available")
+        and (row.get("forwardSignal") or {}).get("actionable") is True
+    ]
+    research_forward_risk_rows = [
+        row
+        for row in available
+        if isinstance(row.get("forwardSignal"), dict)
+        and (row.get("forwardSignal") or {}).get("available")
+        and (row.get("forwardSignal") or {}).get("actionable") is not True
         and (optional_float((row.get("forwardSignal") or {}).get("score")) or 0.0) >= GLOBAL_LPPL_ALERT_THRESHOLD
     ]
     clip_lock_count = sum(
@@ -1960,9 +2016,14 @@ def build_global_lppl_breadth_confirmation(index_rows: list[dict[str, Any]]) -> 
     validated_count = sum(
         1
         for row in available
-        if optional_float(row.get("effectiveWeightMultiplier")) is not None
-        and (optional_float(row.get("effectiveWeightMultiplier")) or 0.0) >= 0.75
+        if isinstance(row.get("validation"), dict)
+        and (row.get("validation") or {}).get("productionEvidenceAvailable") is True
+        and (row.get("validation") or {}).get("productionActionable") is True
     )
+    production_eligible_count = sum(
+        1 for row in available if row.get("productionEligible") is True
+    )
+    actionable_count = sum(1 for row in available if row.get("actionable") is True)
     total_weight = sum(max(0.0, optional_float(row.get("weight")) or 0.0) for row in available)
     risk_weight = sum(max(0.0, optional_float(row.get("weight")) or 0.0) for row in risk_rows)
     risk_share = 100 * len(risk_rows) / max(1, len(available))
@@ -1983,15 +2044,22 @@ def build_global_lppl_breadth_confirmation(index_rows: list[dict[str, Any]]) -> 
         "riskSharePct": round(risk_share, 1),
         "weightedRiskSharePct": round(weighted_risk_share, 1),
         "forwardRiskCount": len(forward_risk_rows),
+        "researchForwardRiskCount": len(research_forward_risk_rows),
         "clipLockCount": clip_lock_count,
         "validatedCount": validated_count,
+        "productionEligibleCount": production_eligible_count,
+        "actionableCount": actionable_count,
+        "scoreUse": "raw_context",
         "regime": regime,
         "regimeCn": regime_cn,
         "leaders": [str(row.get("symbol") or "") for row in risk_rows[:3] if row.get("symbol")],
         "summary": (
-            f"LPPL breadth {len(risk_rows)}/{len(available)} markets above raw threshold"
+            f"Raw LPPL breadth {len(risk_rows)}/{len(available)} markets above raw threshold"
             f"{f' ({leaders})' if leaders else ''}; weighted breadth {weighted_risk_share:.1f}%, "
-            f"forward risk {len(forward_risk_rows)}, CLIP locks {clip_lock_count}."
+            f"production forward triggers {len(forward_risk_rows)}, "
+            f"research-only high forward scores {len(research_forward_risk_rows)}, "
+            f"CLIP locks {clip_lock_count}, "
+            f"production eligible {production_eligible_count}, actionable {actionable_count}."
         ),
     }
 
@@ -2022,7 +2090,12 @@ def unavailable_global_lppl_risk(
             "riskSharePct": 0.0,
             "weightedRiskSharePct": 0.0,
             "forwardRiskCount": 0,
+            "researchForwardRiskCount": 0,
             "clipLockCount": 0,
+            "validatedCount": 0,
+            "productionEligibleCount": 0,
+            "actionableCount": 0,
+            "scoreUse": "raw_context",
             "regime": "Unavailable",
             "regimeCn": "不可用",
             "summary": reason,
@@ -2210,6 +2283,11 @@ def global_lppl_market_state(
 
 
 REGIONAL_FACTOR_VALIDATION_MIN_WEEKS = 60
+GLOBAL_LPPL_REGIONAL_FACTOR_FAMILY_SIZE = sum(
+    3 if str(spec.get("symbol") or "").upper() == GLOBAL_LPPL_US_BENCHMARK_SYMBOL else 4
+    for spec in GLOBAL_LPPL_INDEX_SPECS
+)
+GLOBAL_LPPL_REGIONAL_COMPOSITE_FAMILY_SIZE = len(GLOBAL_LPPL_INDEX_SPECS)
 
 
 def attach_global_lppl_factor_validation(
@@ -2219,8 +2297,8 @@ def attach_global_lppl_factor_validation(
 ) -> list[dict[str, Any]]:
     """Validate each region's own factors (LPPL score, 3M momentum, relative strength vs
     US, realized vol) against that region's OWN forward returns via the shared walk-forward
-    harness. Upgrades the region price-factors from descriptive to OOS-evaluated, and tells
-    you which factor actually has predictive power for each region's equity."""
+    harness. The rows remain diagnostics unless their complete OOS/FDR/fold gate sets
+    ``actionableRobust``; a lead/lag label alone is never treated as predictive proof."""
     benchmark_bars = bars_by_symbol.get(GLOBAL_LPPL_US_BENCHMARK_SYMBOL, [])
     enriched_rows: list[dict[str, Any]] = []
     for row in index_rows:
@@ -2236,7 +2314,83 @@ def attach_global_lppl_factor_validation(
             is_benchmark=symbol == GLOBAL_LPPL_US_BENCHMARK_SYMBOL,
         )
         enriched_rows.append(enriched)
+    apply_global_lppl_factor_family_correction(enriched_rows)
     return enriched_rows
+
+
+def apply_global_lppl_factor_family_correction(index_rows: list[dict[str, Any]]) -> None:
+    """Correct regional factor evidence across the full monitored market family.
+
+    A region card is not evaluated in isolation: the dashboard scans all six
+    markets and can surface whichever factor looks best.  Correcting each
+    market's 3/4 factors separately understates that selection opportunity.
+    Keep two fixed, pre-registered families (23 factor-market hypotheses and
+    six market-composite hypotheses); unavailable rows remain implicit p=1
+    members through ``family_size``.
+    """
+    factor_rows: list[dict[str, Any]] = []
+    composite_rows: list[dict[str, Any]] = []
+    validations: list[dict[str, Any]] = []
+    for index_row in index_rows:
+        validation = (
+            index_row.get("factorValidation")
+            if isinstance(index_row.get("factorValidation"), dict)
+            else None
+        )
+        if not isinstance(validation, dict):
+            continue
+        validations.append(validation)
+        factor_rows.extend(
+            row
+            for row in validation.get("factors", [])
+            if isinstance(row, dict)
+        )
+        composite = validation.get("composite")
+        if isinstance(composite, dict) and composite.get("available") is True:
+            composite_rows.append(composite)
+
+    apply_benjamini_hochberg(
+        factor_rows,
+        family_size=GLOBAL_LPPL_REGIONAL_FACTOR_FAMILY_SIZE,
+    )
+    apply_benjamini_hochberg(
+        composite_rows,
+        family_size=GLOBAL_LPPL_REGIONAL_COMPOSITE_FAMILY_SIZE,
+    )
+    for row in factor_rows:
+        row["fdrFamilyName"] = "global_lppl_regional_factor_market_family"
+        row["fdrScope"] = "all monitored market x factor hypotheses"
+    for row in composite_rows:
+        row["fdrFamilyName"] = "global_lppl_regional_market_composite_family"
+        row["fdrScope"] = "all monitored market composite hypotheses"
+
+    metadata = {
+        "method": "Benjamini-Hochberg",
+        "alpha": DEFAULT_FDR_ALPHA,
+        "scope": "fixed all-market families; unavailable hypotheses retained as implicit p=1",
+        "families": [
+            {
+                "name": "factor-market",
+                "size": GLOBAL_LPPL_REGIONAL_FACTOR_FAMILY_SIZE,
+                "reportedRows": len(factor_rows),
+                "implicitUnavailableHypotheses": max(
+                    0,
+                    GLOBAL_LPPL_REGIONAL_FACTOR_FAMILY_SIZE - len(factor_rows),
+                ),
+            },
+            {
+                "name": "market-composite",
+                "size": GLOBAL_LPPL_REGIONAL_COMPOSITE_FAMILY_SIZE,
+                "reportedRows": len(composite_rows),
+                "implicitUnavailableHypotheses": max(
+                    0,
+                    GLOBAL_LPPL_REGIONAL_COMPOSITE_FAMILY_SIZE - len(composite_rows),
+                ),
+            },
+        ],
+    }
+    for validation in validations:
+        validation["multipleTesting"] = dict(metadata)
 
 
 def build_index_factor_validation(
@@ -2313,7 +2467,13 @@ def build_index_factor_validation(
             rows.append(row)
     if not rows:
         return {"available": False, "reason": "因子周度样本不足,暂不能验证。", "factors": []}
-    best = max(rows, key=lambda item: abs(optional_float(item.get("oosIc3m")) or 0.0))
+    # Oriented IC is already defined so positive means useful.  Never crown a
+    # large wrong-way (negative) correlation as the region's "best" factor.
+    def oriented_oos_ic(item: dict[str, Any]) -> float:
+        value = optional_float(item.get("oosIc3m"))
+        return value if value is not None else float("-inf")
+
+    best = max(rows, key=oriented_oos_ic)
     composite = build_region_composite_signal(
         factor_specs,
         price_points=price_points,
@@ -2321,16 +2481,37 @@ def build_index_factor_validation(
         best_single_oos_ic3m=optional_float(best.get("oosIc3m")),
         module=symbol,
     )
+    # The regional factor set and its derived composite are a pre-registered
+    # hypothesis family.  Keep unavailable members in the denominator and attach
+    # the same FDR/actionable fields consumed by the live regional gate.
+    validation_family = list(rows)
+    if composite.get("available") is True:
+        validation_family.append(composite)
+    apply_benjamini_hochberg(
+        validation_family,
+        family_size=len(factor_specs) + 1,
+    )
     return {
         "available": True,
+        "validationStatus": "research-validation",
+        "independentHoldout": False,
         "method": (
             "Per-region walk-forward validation: each factor's weekly series is scored against this "
             "region's OWN forward returns (65/35 calibration/OOS split, 91D drawdown definition). "
-            "Higher OOS IC and lift>1 mean the factor genuinely leads this region's equity."
+            "Positive OOS IC and lift>1 are descriptive; only positive, non-wrong-way signals that "
+            "also pass bootstrap CI, regional-family BH/FDR, fold stability and sample/alert floors "
+            "would be statistically eligible. Because the factor set and regional rules have been reviewed "
+            "against the same historical sample, this is research validation rather than an untouched holdout; "
+            "the regional action layer therefore remains fail-closed until a frozen-spec future holdout exists."
         ),
         "observationCount": len(week_dates),
         "bestFactor": str(best.get("id") or ""),
         "bestFactorOosIc3m": best.get("oosIc3m"),
+        "multipleTesting": {
+            "method": "Benjamini-Hochberg",
+            "scope": "within-market research diagnostic; orchestration replaces this with fixed all-market families",
+            "familySize": len(factor_specs) + 1,
+        },
         "composite": composite,
         "factors": rows,
     }
@@ -2359,10 +2540,23 @@ def build_region_composite_signal(
     common_dates = sorted(set.intersection(*[set(series.keys()) for series in series_by_id.values()])) if series_by_id else []
     if len(common_dates) < MIN_SIGNAL_VALIDATION_POINTS:
         return {"available": False, "reason": "因子重叠样本不足,暂不能合成综合信号。"}
-    split_index = max(1, int(len(common_dates) * SIGNAL_VALIDATION_OOS_SPLIT))
-    calibration_dates = common_dates[:split_index]
+    split_index = max(1, min(len(common_dates) - 1, int(len(common_dates) * SIGNAL_VALIDATION_OOS_SPLIT)))
+    oos_start_date = common_dates[split_index]
+    calibration_candidates = common_dates[:split_index]
 
     forward_by_date = {target: prices_sorted.forward_return_pct(target, days=91) for target in common_dates}
+    calibration_dates: list[date] = []
+    calibration_label_end_dates: dict[date, date] = {}
+    for target in calibration_candidates:
+        endpoint_index = prices_sorted.index_at_or_after(target + timedelta(days=91))
+        endpoint_date = prices_sorted.dates[endpoint_index] if endpoint_index is not None else None
+        if (
+            forward_by_date.get(target) is not None
+            and endpoint_date is not None
+            and endpoint_date < oos_start_date
+        ):
+            calibration_dates.append(target)
+            calibration_label_end_dates[target] = endpoint_date
     weights: dict[str, float] = {}
     stats: dict[str, tuple[float, float]] = {}
     factor_weight_rows: list[dict[str, Any]] = []
@@ -2418,23 +2612,30 @@ def build_region_composite_signal(
     improvement = None
     beats_best = None
     if composite_oos is not None and best_single_oos_ic3m is not None:
-        improvement = round(abs(composite_oos) - abs(best_single_oos_ic3m), 3)
-        beats_best = abs(composite_oos) > abs(best_single_oos_ic3m)
+        improvement = round(composite_oos - best_single_oos_ic3m, 3)
+        beats_best = composite_oos > best_single_oos_ic3m
     return {
+        **metric,
         "available": True,
         "method": (
-            "因子定向到'高=高回撤风险'后按校准段定向IC加权(z-score标准化), 仅用校准段定权以保持OOS诚实; "
+            "因子定向到'高=高回撤风险'后按校准段定向IC加权(z-score标准化); 校准权重仅使用实际91D价格端点严格早于OOS起点的样本, "
             "综合信号再经同一走出样本框架验证, 并与最强单因子对比。"
         ),
-        "oosIc3m": metric.get("oosIc3m"),
-        "ic3m": metric.get("ic3m"),
-        "hitRateOos": metric.get("hitRateOos"),
-        "baseRate": metric.get("baseRate"),
-        "lift": metric.get("lift"),
-        "leadTimeDays": metric.get("leadTimeDays"),
-        "classification": metric.get("classification"),
+        "calibrationAudit": {
+            "labelHorizonDays": 91,
+            "oosStartDate": oos_start_date.isoformat(),
+            "candidateCount": len(calibration_candidates),
+            "eligibleCount": len(calibration_dates),
+            "purgedOverlapCount": len(calibration_candidates) - len(calibration_dates),
+            "latestEligibleSignalDate": calibration_dates[-1].isoformat() if calibration_dates else None,
+            "latestEligibleLabelEndDate": (
+                calibration_label_end_dates[calibration_dates[-1]].isoformat()
+                if calibration_dates
+                else None
+            ),
+            "endpointRule": "actual first price endpoint on/after signal date + 91D must be strictly before OOS start",
+        },
         "currentValue": round(composite_points[-1].value, 3),
-        "alertThreshold": metric.get("alertThreshold"),
         "breachCountTotal": metric.get("alertCountTotal"),
         "breachHitRateTotal": metric.get("hitRateTotal"),
         "breachEvents": metric.get("breachEvents", []),
@@ -2511,6 +2712,11 @@ def build_global_lppl_forward_signal(row: dict[str, Any]) -> dict[str, Any]:
         validation_multiplier = optional_float(validation.get("effectiveWeightMultiplier"))
     # No untouched OOS evidence means no validation credit in production.
     validation_multiplier = max(0.0, min(1.0, validation_multiplier if validation_multiplier is not None else 0.0))
+    production_eligible = bool(
+        row.get("productionEligible") is True
+        and validation.get("productionActionable") is True
+    )
+    current_triggered = bool(production_eligible and threshold_distance >= 0.0)
     ensemble_multiplier = global_lppl_ensemble_multiplier(row)
     threshold_pressure = risk_linear(threshold_distance, -15.0, 10.0)
     momentum_pressure = risk_linear(score_momentum_20d if score_momentum_20d is not None else 0.0, -8.0, 12.0)
@@ -2546,6 +2752,8 @@ def build_global_lppl_forward_signal(row: dict[str, Any]) -> dict[str, Any]:
         drivers.append("clip_lock")
     if validation_multiplier < 0.75:
         drivers.append("weak_validation")
+    if not production_eligible:
+        drivers.append("research_only")
     if ensemble_multiplier < 0.85:
         drivers.append("weak_ensemble")
     regime, regime_cn = global_lppl_forward_regime(forward_score, score_momentum_20d)
@@ -2569,8 +2777,22 @@ def build_global_lppl_forward_signal(row: dict[str, Any]) -> dict[str, Any]:
         "clipStatus": str(clip_state.get("status") or "") if isinstance(clip_state, dict) else "",
         "validationMultiplier": round(validation_multiplier, 2),
         "ensembleMultiplier": round(ensemble_multiplier, 2),
+        "rawStatus": str(row.get("status") or ""),
+        "productionEligible": production_eligible,
+        "actionable": current_triggered,
+        "scoreUse": "production_signal" if current_triggered else "research_only",
         "drivers": drivers,
-        "summary": global_lppl_forward_summary(symbol, forward_score, regime_cn, score_momentum_20d, threshold_distance, validation_multiplier, ensemble_multiplier),
+        "summary": global_lppl_forward_summary(
+            symbol,
+            forward_score,
+            regime_cn,
+            score_momentum_20d,
+            threshold_distance,
+            validation_multiplier,
+            ensemble_multiplier,
+            production_eligible=production_eligible,
+            current_triggered=current_triggered,
+        ),
     }
 
 
@@ -2607,12 +2829,25 @@ def global_lppl_forward_summary(
     threshold_distance: float,
     validation_multiplier: float,
     ensemble_multiplier: float,
+    *,
+    production_eligible: bool = False,
+    current_triggered: bool = False,
 ) -> str:
     momentum_text = "20D动量不足" if score_momentum_20d is None else f"20D动量{score_momentum_20d:+.1f}"
     threshold_text = f"距阈值{threshold_distance:+.1f}"
     validation_text = f"验证权重x{validation_multiplier:.2f}"
     ensemble_text = f"窗口一致性x{ensemble_multiplier:.2f}"
-    return f"{symbol} LPPL前瞻压力{score:.1f} ({regime_cn}); {momentum_text}, {threshold_text}, {validation_text}, {ensemble_text}."
+    action_text = (
+        "生产阈值已触发"
+        if current_triggered
+        else "生产验证已通过但当前阈值未触发"
+        if production_eligible
+        else "仅研究背景,未通过生产动作门槛"
+    )
+    return (
+        f"{symbol} LPPL前瞻压力{score:.1f} ({regime_cn}); {momentum_text}, "
+        f"{threshold_text}, {validation_text}, {ensemble_text}; {action_text}."
+    )
 
 
 def apply_global_lppl_index_validation(
@@ -2629,11 +2864,41 @@ def apply_global_lppl_index_validation(
         adjusted = dict(row)
         symbol = str(adjusted.get("symbol") or "").upper()
         validation_row = validation_by_symbol.get(symbol)
+        fit_production_eligible = (
+            adjusted.get("fitProductionEligible") is True
+            if "fitProductionEligible" in adjusted
+            else adjusted.get("productionEligible") is True
+        )
+        adjusted["fitProductionEligible"] = fit_production_eligible
         if validation_row:
             adjusted["validation"] = validation_row
             adjusted["effectiveWeightMultiplier"] = validation_row.get("effectiveWeightMultiplier")
+            predictive_eligible = validation_row.get("productionActionable") is True
+            production_threshold = optional_float(validation_row.get("productionThreshold"))
+            current_score = optional_float(adjusted.get("score"))
+            production_eligible = bool(fit_production_eligible and predictive_eligible)
+            actionable = bool(
+                production_eligible
+                and production_threshold is not None
+                and current_score is not None
+                and current_score >= production_threshold
+            )
+            adjusted["productionEligible"] = production_eligible
+            adjusted["actionable"] = actionable
+            adjusted["actionabilityStatus"] = (
+                "current_threshold_triggered"
+                if actionable
+                else "validated_but_not_triggered"
+                if production_eligible
+                else "fit_or_predictive_validation_not_eligible"
+            )
+            adjusted["scoreUse"] = "production_signal" if actionable else "research_only"
         elif adjusted.get("available"):
             adjusted["effectiveWeightMultiplier"] = 0.0
+            adjusted["productionEligible"] = False
+            adjusted["actionable"] = False
+            adjusted["actionabilityStatus"] = "own_market_oos_validation_unavailable"
+            adjusted["scoreUse"] = "research_only"
         adjusted_rows.append(adjusted)
     return adjusted_rows
 
@@ -2652,7 +2917,12 @@ def build_global_lppl_index_validation(
         bars = bars_by_symbol.get(symbol, [])
         history = histories.get(symbol) if isinstance(histories, dict) else None
         history_points = history.get("points") if isinstance(history, dict) and isinstance(history.get("points"), list) else None
-        row = build_global_lppl_single_index_validation(index_row, bars, history_points=history_points)
+        row = build_global_lppl_single_index_validation(
+            index_row,
+            bars,
+            history_points=history_points,
+            require_production_comparability=True,
+        )
         if row:
             rows.append(row)
     if not rows:
@@ -2673,6 +2943,7 @@ def build_global_lppl_single_index_validation(
     *,
     drawdown_threshold_pct: float = -2.0,
     history_points: list[dict[str, Any]] | None = None,
+    require_production_comparability: bool = False,
 ) -> dict[str, Any] | None:
     symbol = str(index_row.get("symbol") or "").upper()
     clean = normalize_market_bars({symbol: bars}).get(symbol, [])
@@ -2703,17 +2974,28 @@ def build_global_lppl_single_index_validation(
         descriptive_test_15d
     )
 
-    oos_fields = global_lppl_oos_validation_fields(observations, drawdown_threshold_pct)
+    oos_fields = global_lppl_oos_validation_fields(
+        observations,
+        drawdown_threshold_pct,
+        require_model_comparability=require_production_comparability,
+        live_model_spec_id=str(index_row.get("modelSpecId") or "") or None,
+        live_validation_comparable=(
+            index_row.get("validationComparableToProduction") is True
+        ),
+    )
     production_available = oos_fields.get("productionEvidenceAvailable") is True
     threshold = int(
         optional_float(oos_fields.get("productionThreshold"))
         or GLOBAL_LPPL_ALERT_THRESHOLD
     )
-    production_test_15d = (
+    oos_test_15d = (
         oos_fields.get("oosTest15d")
-        if production_available and isinstance(oos_fields.get("oosTest15d"), dict)
+        if isinstance(oos_fields.get("oosTest15d"), dict)
         else {}
     )
+    # Preserve the untouched-OOS diagnostics for audit even when a replay/live
+    # model-spec mismatch correctly disables their production use.
+    production_test_15d = oos_test_15d
     multiplier = optional_float(oos_fields.get("productionEffectiveWeightMultiplier")) or 0.0
     role = str(oos_fields.get("productionValidationRole") or "unvalidated")
     role_cn = str(oos_fields.get("productionValidationRoleCn") or "OOS证据不足")
@@ -2722,6 +3004,8 @@ def build_global_lppl_single_index_validation(
     payload = {
         "symbol": symbol,
         "sourceSymbol": str(index_row.get("sourceSymbol") or symbol),
+        "evidenceIsolation": "own_market_only",
+        "validationMarket": symbol,
         "sampleSize": int(production_test_15d.get("sampleSize") or 0),
         "historyPoints": len(points),
         "threshold": threshold,
@@ -2739,7 +3023,10 @@ def build_global_lppl_single_index_validation(
         "summary": (
             global_lppl_validation_summary(symbol, production_test_15d, multiplier, role_cn)
             if production_available
-            else f"{symbol} production validation disabled: untouched OOS evidence is insufficient."
+            else (
+                f"{symbol} production validation disabled: "
+                f"{str((oos_fields.get('replayModelAudit') or {}).get('reason') or 'untouched OOS evidence is insufficient.')}"
+            )
         ),
         "descriptiveFullSample": {
             "productionUse": False,

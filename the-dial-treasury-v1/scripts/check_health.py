@@ -38,9 +38,19 @@ def format_health(payload: dict[str, Any]) -> tuple[int, str]:
     headline = f"{status.upper()} asOf={as_of} generatedAt={generated_at} sources {source_counts_text(source_counts)} {history_text}".strip()
     errors = payload.get("errors", [])
     warnings = payload.get("warnings", [])
-    if status == "ok" and not errors and not warnings:
+    contract = payload.get("dashboardContract")
+    contract_valid = isinstance(contract, dict) and contract.get("valid") is True
+    if status == "ok" and not errors and not warnings and contract_valid:
         return 0, headline
     lines = [headline]
+    if not isinstance(contract, dict):
+        lines.append("- Dashboard contract: missing health audit (service reload required)")
+    elif contract.get("valid") is not True:
+        contract_issues = contract.get("issues")
+        if isinstance(contract_issues, list) and contract_issues:
+            lines.extend(f"- Dashboard contract: {issue}" for issue in contract_issues)
+        else:
+            lines.append("- Dashboard contract: invalid without issue details")
     if isinstance(errors, list):
         for item in errors:
             if isinstance(item, dict):

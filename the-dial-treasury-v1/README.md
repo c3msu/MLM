@@ -27,19 +27,29 @@ history, and optional daily background updates.
 - Bhadial/The Dial-compatible Conditions Score:
   21 active factors across Liquidity, Funding, Treasury, Rates, Credit,
   Risk, and External modules are converted into 5-year historical percentile
-  scores after redundancy pruning from the original 30-factor baseline.
-  The module roll-up uses public factor-coverage weights with overlap
-  adjustment, Funding uses EMA(5 months), and target-distance, shock-only,
-  deviation, and bounded risk-signal methods follow the public bhadial
-  methodology. The production `score` remains the fixed-weight compatibility
-  score. Each factor declares cadence, maximum age, and minimum warm-up sample
+  scores after public-data proxy and redundancy pruning. This is an auditable
+  fixed-weight compatibility approximation, not a reproduction of the current
+  public 30-scored-factor, dynamically de-correlated headline. The module
+  roll-up uses declared factor-coverage weights with static overlap adjustment,
+  Funding uses EMA over 5 daily availability observations, and target-distance,
+  shock-only, deviation, and bounded risk-signal methods follow the public
+  methodology where the required public inputs exist. The production `score`
+  remains the fixed-weight compatibility score. Each factor declares cadence,
+  maximum age, and minimum warm-up sample
   count; only fresh, warmed factors are `scoreEligible`. The payload also
   exposes `observedOnlyScore`, coverage-attenuated `reliabilityScore`, dynamic
-  `scoredFactorCount`, and effective-weight coverage. Credit and risk-vs-safe
+  `scoredFactorCount`, and effective-weight coverage. Decision consumers treat
+  the reliability score as unknown unless at least 25% of effective factor
+  weight and 5 scored factors are present; the shrinkage value of 50 at zero
+  coverage is not interpreted as observed neutral conditions. Credit and risk-vs-safe
   proxies use blended 63/126-trading-day relative returns against the DGS10
   duration proxy instead of dividing unrelated price levels. Fixed
   30/45/55/70 regimes remain compatible; `trend.regimeCalibration` adds a
-  shadow-only empirical distribution diagnostic. The
+  shadow-only empirical distribution diagnostic. Headline explanations use
+  `headlineContribution`, including factor-level Funding EMA attribution, so
+  factor, module, and headline contributions reconcile exactly. The unsmoothed
+  current-reading `rawContribution` remains available for audit and is never
+  mixed into the headline driver ranking. The
   monthly replay prepares each finite, date-ordered factor history once per
   build, so EMA and rolling-percentile evaluation do not repeatedly sort the
   same source series. This is an execution optimization only; weights, windows,
@@ -48,7 +58,11 @@ history, and optional daily background updates.
   use a numerically stable fixed-window variance state instead of rebuilding
   every sample on every date. Multi-series factors such as net liquidity,
   corridor spreads, ratios, and funding fragmentation share a linear as-of
-  alignment pass that never borrows a future observation. The
+  alignment pass that never borrows a future observation. Factor audits expose
+  observation age separately from availability date/age and the publication-
+  lag basis. NFCI follows the Friday-observation to Wednesday-release schedule;
+  funding-fragmentation robust z-scores use a prior-only median/MAD baseline
+  with a 1bp scale floor, so the current shock cannot normalize itself away. The
   payload also records the current public benchmark score from
   `https://bhadial.com/dashboard` when reachable. The final 0-100 score reads
   higher as a more supportive macro backdrop. ETF-exact factors use documented
@@ -64,7 +78,10 @@ history, and optional daily background updates.
   `MARCO_HISTORY_PAYLOAD_COMPRESSION_LEVEL`.
 - Five-year public historical series backfill into SQLite for Treasury curve,
   FRED macro/liquidity/risk series, derived spreads, and TreasuryDirect
-  bid-to-cover history.
+  bid-to-cover history. FRED bulk history is the latest revised vintage rather
+  than a point-in-time ALFRED vintage, so FRED and FRED-derived backfill rows
+  carry `validationEligible=false`, a structured vintage status, and a durable
+  source suffix; they are descriptive history, not historical validation input.
 - Interactive historical statistics panel with 1Y/3Y/5Y range controls,
   series selector, hover tooltip, and min/max/quantile summaries.
 - Cross-market historical dynamics panel in section 07, with group controls
@@ -80,7 +97,10 @@ history, and optional daily background updates.
   level and 3-month score-change buckets. Scenario construction, decision
   metadata, confidence fields, and the historical equity-impact overlay live in
   `treasury_data/investment_views.py`; `build_dashboard.py` re-exports the same
-  function names as a compatibility facade.
+  function names as a compatibility facade. When supporting layers are
+  research-only or fail their production evidence contract, cards explicitly
+  return `actionable=false`, a research-background direction, and zero sizing;
+  a descriptive score cannot manufacture a trade instruction.
 - Treasury scorecard assembly, percentile score thresholds, and compatibility
   factor construction live in `treasury_data/factor_groups.py`. Shared auction
   parsing and display formatting live in `treasury_data/dashboard_format.py`;
@@ -89,26 +109,56 @@ history, and optional daily background updates.
 - SPY Early Warning Index: an equity-specific 0-100 drawdown-warning overlay
   that reuses the existing Conditions Score components plus 3-month score
   deterioration. High values mean greater SPY/SPX drawdown risk and map to
-  equity allocation guidance from constructive through de-risk.
+  equity allocation guidance from constructive through de-risk. The v3 rule
+  surface requires usable macro coverage and excludes stale or explicitly
+  ineligible factors from every sleeve. Numeric allocation also requires a
+  complete predictive-validity audit, an independent holdout, and all surface
+  and allocation action gates; otherwise the score stays `research_only` and
+  any descriptive band moves to `contextAllocation`. The validation payload,
+  aggregate row, and live surface must all carry the same current
+  `rulesVersion`; missing, mismatched, or coherently stale versions fail closed.
+  Non-production summaries are rewritten as research background, while their
+  original interpretation is retained only in `contextSummary`.
 - Short-Term Equity Risk Index: a daily 0-100 tactical risk layer for SPY that
   combines Nasdaq OHLCV market structure, sector/leader rotation, hot-stock
   reversal, downside trend-break/defensive-rotation fragility, weak
   relief-rally traps, turnover support, official event risk, optional Cboe SPY
-  option OI, and the existing SPY macro warning, with a pure-overextension
-  dampener when event and breakdown confirmation are absent. The configured
-  weights are calibrated toward historically replayable factors: multi-scale
-  volatility pressure, market-flow/downtrend structure, hot-stock reversal,
-  turnover confirmation, and QQQ/TLT rotation carry most of the score, while
-  non-replayable calendar/news context and historically weak standalone
-  rotation breaks remain low-weight. Backtest payloads also expose a
-  high-precision execution threshold, separate from the earlier strong-alert
-  threshold, so the dashboard can distinguish early warning from higher
-  confidence de-risking. Its `scoreAdjustments` audit reconciles `baseScore`,
+  option OI, and the existing SPY macro warning. Its production/backtest scale
+  is `equity-risk-ohlcv-core-v2`: exactly six replayable OHLCV factors
+  (volatility pressure, QQQ/TLT rotation, market flow, sector rotation,
+  hot-stock reversal, and turnover) may affect the score or any adjustment.
+  Event calendars, macro overlays, option OI, and their presence or absence are
+  context/audit-only until complete point-in-time archives exist; they cannot
+  indirectly change breadth amplifiers, dampeners, or score floors. The live
+  and every replay row publish the same canonical normalized six-factor weight
+  vector; component or weight drift invalidates the v2 score scale, prevents a
+  cache hit, and disables action. Backtest
+  payloads expose calibration-selected caution and
+  high-precision thresholds as research diagnostics, but only the
+  pre-registered score>=75 rule may bind a production allocation. That rule
+  must pass the purged final holdout with at least 30 complete labels, three
+  independent 15-session alert episodes, and the episode-precision 95% Wilson
+  lower bound at least 5 percentage points above the event base rate. A replay
+  score is known only after the completed signal-date close, so the earliest
+  executable label starts at the next trading-session open. That session is
+  session 1: forward return is
+  measured from its open to the horizon close. Legacy `maxDrawdown*d` fields
+  are explicitly maximum adverse excursion from that execution open to the
+  minimum low through the horizon end, not path peak-to-trough drawdown. Score
+  buckets expose separate complete denominators for 1/5/10/15 sessions. The
+  70/30 chronological split removes every training label whose
+  `labelEndDate15d` reaches or crosses the first OOS signal date. Its
+  `scoreAdjustments` audit reconciles `baseScore`,
   additive amplifier rules, the first matching dampener, any score floor, and
   the final score with stable rule IDs. A separate `volatilityEstimatorAudit`
   keeps the current arithmetic-mean Parkinson aggregation in production while
   replaying the standard RMS estimator as a shadow candidate against the same
-  score≥75, 15-day drawdown and 70/30 walk-forward tests. It is separate from
+  score>=75, executable 15-session drawdown and single 70/30 purged holdout.
+  Candidate and production must share the same OOS label fingerprint and
+  episode rule; full-sample changes are descriptive only. RMS must first pass
+  the fixed-threshold OOS gate and then have at least five independent episodes,
+  a 2-point episode-precision improvement, and no worse lift or false positives
+  even to remain a promising shadow candidate. It is separate from
   the monthly macro lead study and
   includes a `lookAheadGuard.dataThrough` field so a 2026-06-04 warning can be
   audited without using 2026-06-05 price action as an input.
@@ -125,6 +175,25 @@ history, and optional daily background updates.
   converts the raw LPPL fit into a validation- and ensemble-weighted
   forward-pressure read using same-day-or-earlier LPPL history momentum,
   threshold distance, critical-window timing, and multi-window tc agreement.
+  Raw current status stays visible as a research diagnostic, while production
+  credit requires a matching live/replay model fingerprint and own-market,
+  non-overlapping OOS evidence after a fixed six-market correction.
+  The regional monitor consumes that production contract: raw LPPL risk remains
+  context-only, while a numeric LPPL-driven regional action requires
+  a complete fit/validation fingerprint, `productionEligible=true`, and a
+  currently triggered own-market threshold. A validated regional factor is
+  still context until its current reading actually breaches the validated
+  threshold; health alerts and rotation recheck the same chain instead of
+  trusting serialized `breached` or favor/reduce flags.
+  Regional price-factor validation is labeled `research-validation` and cannot
+  raise confidence or trigger an alert until a frozen-spec independent holdout
+  exists. Multiple testing uses two fixed all-market families (23 market-factor
+  hypotheses and 6 market-composite hypotheses); unavailable members remain in
+  the denominator as `p=1`. Its evidence-weighted composite purges calibration
+  rows whenever the actual rolled 91-day label endpoint reaches the OOS
+  boundary. Without production LPPL or independent factor evidence, numeric
+  bands and rotation tilts remain explicitly labeled context and cannot bind an
+  allocation.
   Its pure validation layer is isolated in `treasury_data/scoring_lppl_validation.py`:
   forward drawdown labels, threshold calibration, OOS fields, validation weights,
   and per-index backtests remain independent from the dashboard orchestration facade.
@@ -175,9 +244,10 @@ refresh every 30 minutes by default (`--equity-interval-minutes 30`) so
 `equityShortTermRisk` can refetch Nasdaq OHLCV and rebuild the short-term
 market-risk block without waiting for the slower macro refresh. Use
 `--equity-interval-minutes 0` to disable that lightweight loop. After 16:00 New
-York close plus a 20-minute data lag, the server expects the latest weekday's
-daily bar to be available; if `equityShortTermRisk.asOf` is still behind that
-expected session, the equity-only loop switches to a 5-minute catch-up cadence
+York close plus a 20-minute data lag, the server expects the latest completed
+U.S. exchange session's daily bar; if `equityShortTermRisk.asOf` is still
+behind that expected session, the equity-only loop switches to a 5-minute
+catch-up cadence
 (`--equity-catchup-interval-minutes 5`) until the snapshot catches up. After
 each scheduled daily refresh, the server also refreshes the public historical
 SQLite backfill for the last 5 years unless `--history-years 0` is passed.
@@ -202,7 +272,18 @@ degraded source path.
 
 The partial updater persists an incremental market-bar cache under
 `data/cache/market-bars-v1.json`, refetches only a 10-day overlap, and skips
-expensive scoring when the served snapshot already covers the newest bars.
+expensive scoring only when the served snapshot covers the newest bars and has
+a complete current equity decision contract. Runtime health and this updater
+share `treasury_data/equity_calendar.py`, including U.S. exchange holidays and
+the post-close availability lag. Every required OHLCV symbol is checked both
+against SPY and against the expected completed U.S. session; a uniformly old
+but internally aligned cache therefore cannot qualify as a hit. A valid cache
+hit still rebuilds signal validation, SPY robustness, regional monitoring, and
+portfolio overview before publication. When a failed, misaligned, or regressed
+refresh borrows the last-known-good equity root, its former allocation is
+retained only as `contextAllocation`; root/allocation actionability and the
+numeric band are cleared, `productionValidation.refreshEligible` becomes false,
+and the same dependent surfaces are rebuilt.
 Cold total failures and LPPL symbol-set regressions retain the last healthy
 risk roots together with their dependent regional/portfolio surfaces; fallback
 snapshots are not added to history.
@@ -272,7 +353,16 @@ python3 the-dial-treasury-v1/scripts/check_health.py --url http://127.0.0.1:8451
 `/api/health` includes `equityRiskFreshness` when the short-term equity block
 has an `asOf` date. If the source date is behind the expected U.S. equity daily
 bar, health returns `degraded` with an `Equity Short-Term Risk` warning so the
-daily health checker can surface stale short-term monitoring.
+daily health checker can surface stale short-term monitoring. It also exposes
+`dashboardContract`, which audits the published decision contract. A legacy
+snapshot with an actionable numeric band but without the required
+`scoreScale` / `actionable` / `productionValidation` evidence is degraded even
+when its source rows are otherwise fresh. A health response without this audit
+means the local service still runs pre-contract code and must be reloaded.
+For every numeric equity, SPY, LPPL-derived, or regional action, the audit
+cross-checks the serialized verdict against its underlying scale, replay/OOS,
+rule-version, model-fingerprint, threshold, and current-reading evidence as
+applicable; copied action flags alone cannot satisfy the contract.
 
 If the full public-data refresh is slow but the short-term equity warning needs
 fresh market-structure history, refresh only the equity block:
@@ -320,29 +410,46 @@ Current real public sources:
   `scoreEligible`, observation age, freshness, scoring status, and effective
   sample count. Only eligible rows enter driver/focus/balance summaries; the
   compatibility score and reliability-adjusted shadow score remain separate.
+  Driver, constraint, offset, focus, and balance explanations use the smoothed
+  `headlineContribution`; `rawContribution` is retained only as a current-read
+  audit field, with residuals published in `contributionAudit`.
 - The SPY Early Warning Index is separate from the headline Conditions Score.
   It converts the same component scores into risk sleeves for macro level,
   macro deterioration, liquidity, funding, rates/curve, credit/volatility, and
   external shocks. It is calibrated against the existing monthly S&P 500
   lead-study diagnostics and should be read as a risk-control overlay, not a
-  standalone return forecast.
+  standalone return forecast. The v3 sleeve builder excludes explicitly
+  ineligible factors, requires usable macro coverage, and computes rule-level
+  forward means on the same OOS-complete population as its base rate. Missing
+  aggregate validation always produces research context rather than preserving
+  a legacy numeric production band.
 - The Short-Term Equity Risk Index is a separate daily market-structure
   overlay. It uses Nasdaq historical OHLCV rows for SPY, QQQ, SMH, XLK, RSP,
   IWM, defensive/consumer sector ETFs, and large hot-stock proxies such as
   NVDA, AVGO, AMD, TSLA, META, MSFT, AAPL, AMZN, and GOOGL. It scores rally
   extension, downtrend continuation, weak relief-rally traps after recent
   high-to-low stress, sector rotation breaks, hot-stock close/high reversals,
-  SPY turnover support, high-importance official event risk, the existing macro
-  warning, and Cboe SPY put/call OI when the OI snapshot is dated on or before
-  the signal date. Its `weightCalibration` payload exposes the current
+  and SPY turnover support. High-importance official event risk, the existing
+  macro warning, and Cboe SPY put/call OI remain context/audit inputs because
+  their complete point-in-time histories are unavailable. Its
+  `weightCalibration` payload exposes the current
   historical factor audit: validated replayable factors are retained at higher
   weight, while low-replay or weak standalone factors are reduced to context or
   audit roles. Its `highPrecisionThresholdTest` payload scans stricter score
   cutoffs above the early strong-alert threshold and reports the highest
-  historical precision candidate for execution-level risk reduction. Pure
-  overextension signals are damped when they lack both event risk and
-  downtrend-break confirmation. Later OI snapshots are displayed as coverage
+  historical precision candidate as a research diagnostic. Production remains
+  fixed to the score>=75 rule on the exact v2 six-factor scale and requires the
+  episode-precision 95% Wilson lower bound to clear the OOS event base rate by
+  at least five points. Later OI snapshots are displayed as coverage
   metadata but excluded from the no-forward-looking score.
+  Cross-sectional daily components require every compared symbol to have an
+  exact signal-date bar; a prior-session close is never mixed into a current-
+  session comparison. The named stocks are only a candidate universe: a stock
+  must have gained at least 15% over the point-in-time 63-session window before
+  its reversal can count as a hot-stock reversal. Adaptive Parkinson target
+  volatility requires all 65 rolling 22-session estimates (86 completed bars);
+  shorter histories may expose a 12% diagnostic reference, but are marked
+  `scaleComparable=false` and cannot satisfy the action contract.
 - The Global LPPL Risk indicator is a separate research diagnostic under
   `globalLpplRisk`. It uses the same Nasdaq OHLCV fetcher for SPY, QQQ, and
   ETF proxies: EWY for Korea/KOSPI exposure, EWH for Hong Kong/Hang Seng
@@ -361,8 +468,9 @@ Current real public sources:
   Each available index row also exposes `fitEnsemble` and `tcAggregation`, so
   the UI and smoke check can distinguish single-fit noise from multi-window
   `(tc)` convergence.
-  The top-level `breadthConfirmation` summarizes how many current market
-  proxies are above raw/forward thresholds or have CLIP locks; it is a
+  The top-level `breadthConfirmation` separates raw LPPL threshold breadth,
+  production-triggered forward signals, and research-only high forward scores;
+  only the production-triggered count enters the action summary. It is a
   dashboard proxy breadth check, not a full CRSP/KRX/TWSE/HKEX stock-universe
   scan. The top-level
   `history`/`backtest` remain unavailable placeholders to prevent an implied
@@ -401,9 +509,10 @@ Current real public sources:
   inflation/commodity panel.
 - Nasdaq public historical quote API for roughly three years of daily OHLCV
   market-structure inputs used by `equityShortTermRisk`, including the
-  historical replay/backtest of forward SPY returns and next-10-trading-day
-  drawdowns by score bucket, alert threshold, simple historical regressions,
-  and the rendered risk-score versus SPY-indexed history curve.
+  historical replay/backtest of 1D/5D/10D/15D forward SPY returns and maximum
+  adverse excursions measured from the next-session open, by score bucket, alert
+  threshold, simple historical regressions, and the rendered risk-score versus
+  SPY-indexed history curve.
 - Nasdaq public historical quote API is also used for the Global LPPL ETF
   proxy set (`SPY`, `QQQ`, `EWY`, `EWH`, `EWT`, `EWJ`). The UI labels the Asia
   markets as proxies and does not fabricate direct index histories when a
@@ -487,20 +596,40 @@ original 4xx/5xx statuses and bodies are never rewritten as 304.
 
 `signalValidation` is labeled `research-validation`, not an independent
 holdout. A factor becomes `actionableRobust` only when positive 3-month OOS
-evidence, Benjamini-Hochberg FDR, and contiguous-fold positive stability all
-pass. Publication lag, freshness, and warm-up rules mirror production scoring.
+evidence, overlap-aware circular moving-block bootstrap confidence, an
+order-preserving circular-shift p-value, Benjamini-Hochberg FDR, and
+contiguous-fold positive stability all pass. The randomization test uses the
+complete circular-shift group and reports its attainable p-value resolution;
+BH consumes the unrounded p-value. Each fold needs at least two non-overlapping
+label windows, alert streaks count once using the first alert's fixed outcome,
+and lead/lag classification is fixed to a common-sample OOS 91-day endpoint
+without full-history fallback. Underpowered overlapping samples fail closed.
+Publication lag, freshness, and warm-up rules mirror production scoring.
+
+Live-source parsers reject future-dated observations and records. Monthly and
+quarterly FRED reference periods must be complete, Cboe option snapshots require
+a valid nonfuture source timestamp, and current-day Nasdaq/Stooq bars are
+excluded unless the request is for a completed historical date. These checks
+prevent future or still-forming rows from appearing fresh through `ageDays=0`.
+Forward FOMC, FRED-release, and BEA calendars are the deliberate exception:
+their latest date is recorded as `freshnessBasis=calendar-horizon` and
+`coverageThrough`, not as a future observation. A horizon covering the
+dashboard as-of date remains current; an expired horizon is marked stale.
 
 List-style endpoints that carry ISO dates, such as `/api/events`, accept
 `from=YYYY-MM-DD` and `to=YYYY-MM-DD`. Dashboard slice routes handled by
 `treasury_data.api` can be exported as CSV with `format=csv`; this excludes
 `/api/health`, `/api/history*`, and `POST /api/update`. Curve exports are
 transposed by tenor.
-`/api/health` returns `ok` or `degraded` plus source-status counts and update
-timestamps for local monitoring. It also includes the SQLite history summary
-and latest 5-year history backfill run. Critical or degraded backfill source
-errors are surfaced as health warnings so the daily health checker can notify
-on background-history issues; warning-severity source errors remain in
-`history.latestBackfill.sourceErrors` without making health fail.
+`/api/health` returns `ok` or `degraded` plus source-status counts, update
+timestamps, and the `dashboardContract` decision-safety audit for local
+monitoring. It also includes the SQLite history summary and latest 5-year
+history backfill run. Critical or degraded backfill source errors are surfaced
+as health warnings so the daily health checker can notify on background-history
+issues; warning-severity source errors remain in
+`history.latestBackfill.sourceErrors` without making health fail. The command-
+line checker treats a missing `dashboardContract` field as a service-reload
+requirement instead of silently accepting an old server process.
 `POST /api/update` starts a background refresh and returns `202 accepted` with
 the current `asOf` and `generatedAt`; repeated calls while it is active return
 `running` without launching duplicate source fetches.

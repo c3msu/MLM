@@ -10,7 +10,11 @@ from typing import Any, Callable
 
 from .dashboard_core import bounded_score, optional_float, pct_metric
 from .scoring_equity import normalize_market_bars
-from .scoring_lppl import GLOBAL_LPPL_MIN_OBSERVATIONS, fit_global_lppl_signal, lppl_percentile
+from .scoring_lppl import (
+    GLOBAL_LPPL_MIN_OBSERVATIONS,
+    fit_global_lppl_signal,
+    lppl_percentile,
+)
 from .scoring_lppl_validation import build_global_lppl_backtest, global_lppl_status
 from .series_math import bar_index_at_or_before
 from .sources import MarketDailyBar
@@ -18,7 +22,7 @@ from .sources import MarketDailyBar
 
 GLOBAL_LPPL_HISTORY_STEP = 1
 GLOBAL_LPPL_CRITICAL_DATE_APPROXIMATION = (
-    "US business-day approximation (Mon-Fri; exchange holidays are not modeled)"
+    "Weekday-session approximation (Mon-Fri; local exchange holidays are not modeled)"
 )
 LpplIndexRowBuilder = Callable[..., dict[str, Any]]
 LpplHistoryPointsBuilder = Callable[[str, list[MarketDailyBar]], list[dict[str, Any]]]
@@ -107,6 +111,9 @@ def global_lppl_index_row(
     score = bounded_score(float(fit["score"]))
     confidence = max(0.0, min(1.0, float(fit.get("confidence") or 0.0)))
     status, status_cn = global_lppl_status(score, confidence)
+    # Missing eligibility metadata is not evidence.  Older/mocked fit payloads
+    # therefore remain visible as raw LPPL context but fail closed for action.
+    fit_production_eligible = fit.get("productionEligible") is True
     sessions_to_critical = int(fit["daysToCritical"])
     critical_date = approximate_us_session_date(latest.date, sessions_to_critical)
     calendar_days_to_critical = (critical_date - latest.date).days
@@ -134,6 +141,20 @@ def global_lppl_index_row(
         "passesLpplDiagnostics": bool(fit.get("passesLpplDiagnostics")),
         "residualDiagnostics": fit.get("residualDiagnostics"),
         "fitEnsemble": fit.get("fitEnsemble"),
+        "modelSpecId": str(fit.get("modelSpecId") or "legacy-unknown"),
+        "validationComparableToProduction": bool(fit.get("validationComparableToProduction")),
+        "modelSelectionAudit": fit.get("modelSelectionAudit"),
+        "fitProductionEligible": fit_production_eligible,
+        "productionEligible": fit_production_eligible,
+        # Own-market OOS validation is attached later.  A fit-quality pass by
+        # itself must never be presented as an actionable market call.
+        "actionable": False,
+        "actionabilityStatus": (
+            "pending_own_market_oos_validation"
+            if fit_production_eligible
+            else "fit_diagnostics_not_eligible"
+        ),
+        "scoreUse": "production_candidate" if fit_production_eligible else "research_only",
         "windowDays": int(fit["windowDays"]),
         "windowDaysRange": fit.get("windowDaysRange"),
         "selectionBasis": str(fit.get("selectionBasis") or "fit_quality"),
@@ -185,6 +206,9 @@ def build_single_index_lppl_history_points(
                 "passesLpplDiagnostics",
                 "lpplImprovementPct",
                 "oscillationCount",
+                "modelSpecId",
+                "validationComparableToProduction",
+                "productionEligible",
             ):
                 if key in row:
                     point[key] = row[key]
@@ -222,6 +246,12 @@ def build_global_lppl_single_index_history(
 ) -> dict[str, Any]:
     symbol = str(index_row.get("symbol") or "").upper()
     clean = normalize_market_bars({symbol: bars}).get(symbol, [])
+    # Historical/as-of dashboard builds must not silently replay scores beyond
+    # the live row's information date.  This also keeps the canonical history
+    # and its later validation sample on the same clock.
+    as_of = parse_lppl_point_date(index_row.get("asOf"))
+    if as_of is not None:
+        clean = [bar for bar in clean if bar.date <= as_of]
     if len(clean) < GLOBAL_LPPL_MIN_OBSERVATIONS:
         return {
             "available": False,
@@ -234,6 +264,13 @@ def build_global_lppl_single_index_history(
         if history_points_builder is not None
         else build_single_index_lppl_history_points(symbol, clean, row_builder=row_builder)
     )
+    score_points = [
+        point
+        for point in score_points
+        if isinstance(point, dict)
+        and (point_date := parse_lppl_point_date(point.get("date"))) is not None
+        and point_date <= clean[-1].date
+    ]
     if not score_points:
         return {
             "available": False,
@@ -241,11 +278,18 @@ def build_global_lppl_single_index_history(
             "points": [],
             "summary": "LPPL history replay produced no valid fit points",
         }
-    first_index = bar_index_at_or_before(clean, parse_lppl_point_date(score_points[0].get("date")) or clean[0].date)
+    first_index = bar_index_at_or_before(
+        clean,
+        parse_lppl_point_date(score_points[0].get("date")) or clean[0].date,
+    )
     base_close = clean[first_index if first_index is not None else 0].close
     points: list[dict[str, Any]] = []
     for point in score_points:
         point_date = parse_lppl_point_date(point.get("date"))
+        if point_date is not None and point_date > clean[-1].date:
+            # A custom/legacy history builder must not extend an as-of artifact
+            # by mapping a future replay date back onto the final known bar.
+            continue
         bar_index = bar_index_at_or_before(clean, point_date) if point_date else None
         if bar_index is None:
             continue
@@ -267,6 +311,9 @@ def build_global_lppl_single_index_history(
             "passesLpplDiagnostics",
             "lpplImprovementPct",
             "oscillationCount",
+            "modelSpecId",
+            "validationComparableToProduction",
+            "productionEligible",
         ):
             if key in point:
                 enriched[key] = point[key]
@@ -371,7 +418,15 @@ def build_global_lppl_per_index_backtests(
     backtests: dict[str, Any] = {}
     for symbol, history in histories.items():
         points = history.get("points", []) if isinstance(history, dict) else []
-        backtests[symbol] = build_global_lppl_backtest(points, bars_by_symbol.get(symbol, []), symbol=symbol)
+        source_bars = bars_by_symbol.get(symbol, [])
+        history_end = (
+            parse_lppl_point_date((history.get("dateRange") or {}).get("end"))
+            if isinstance(history, dict) and isinstance(history.get("dateRange"), dict)
+            else None
+        )
+        if history_end is not None:
+            source_bars = [bar for bar in source_bars if bar.date <= history_end]
+        backtests[symbol] = build_global_lppl_backtest(points, source_bars, symbol=symbol)
     return backtests
 
 

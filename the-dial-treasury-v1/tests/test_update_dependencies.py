@@ -402,10 +402,37 @@ class EquityUpdateDependencyTests(unittest.TestCase):
         ]
         market_bars["QQQ"] = [make_bar("QQQ", date(2026, 7, 8))]
 
-        alignment = update_equity_risk.assess_equity_refresh_alignment(market_bars)
+        alignment = update_equity_risk.assess_equity_refresh_alignment(
+            market_bars,
+            expected_market_date=date(2026, 7, 10),
+            max_absolute_lag_trading_days=2,
+        )
 
         self.assertFalse(alignment["blocked"])
         self.assertEqual(alignment["laggedSymbols"], [])
+
+    def test_uniformly_old_required_bars_fail_absolute_freshness_gate(self):
+        market_bars = complete_market_bars(date(2026, 7, 10))
+
+        alignment = update_equity_risk.assess_equity_refresh_alignment(
+            market_bars,
+            expected_market_date=date(2026, 7, 13),
+        )
+
+        self.assertTrue(alignment["blocked"])
+        self.assertEqual(alignment["expectedDate"], "2026-07-13")
+        self.assertEqual(
+            alignment["absoluteStaleSymbols"],
+            sorted(EQUITY_RISK_SYMBOLS),
+        )
+        self.assertEqual(alignment["laggedSymbols"], [])
+        self.assertTrue(
+            all(
+                details["absoluteLagTradingDays"] == 1
+                and details["reasons"] == ["stale-vs-expected"]
+                for details in alignment["symbolAges"].values()
+            )
+        )
 
 
 if __name__ == "__main__":

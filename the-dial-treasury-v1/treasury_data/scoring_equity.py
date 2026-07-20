@@ -1,12 +1,20 @@
 """Short-horizon equity risk scoring from replayable OHLCV factors and backtests."""
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from statistics import median
 from typing import Any
 
+from .dashboard_contract import (
+    CURRENT_EQUITY_RISK_NORMALIZED_WEIGHTS,
+    CURRENT_EQUITY_RISK_PRODUCTION_THRESHOLD,
+    CURRENT_EQUITY_RISK_RAW_WEIGHTS,
+    CURRENT_EQUITY_RISK_SCORE_SCALE_ID,
+    CURRENT_EQUITY_RISK_SCORED_COMPONENTS,
+)
 from .sources import CalendarEvent, MarketDailyBar, OptionOpenInterestSnapshot, SeriesPoint, TimeSeries
 from .dashboard_core import (
     average_optional,
@@ -68,17 +76,12 @@ PARKINSON_ESTIMATOR_STANDARD_RMS = "standardRms"
 PARKINSON_ESTIMATORS = {PARKINSON_ESTIMATOR_LEGACY_MEAN, PARKINSON_ESTIMATOR_STANDARD_RMS}
 
 
-# 2026-06-16 评审结论: 这三项(optionOI=0/audit-only, eventRisk 0.01, macroOverlay 0.03)并非"冗余/噪声",
-# 而是OOS校准时就刻意保留的低权重"上下文"项, 且高风险regime边界(score>=75)是在含这些项的标度上经OOS审计
-# 锚定的。实测将其归零会把4个"无催化确认"的良性情景推过75(误报回归), 故【保留原权重】, 不在本次精简中动它们;
-# 真正的去噪在宏观综合分(去冗余簇c1/c2/c3 + effr_iorb/kre_spy/high_beta噪声)。如需移除须重跑equity OOS校准。
+# The six OHLCV components define the production/backtest score scale.  Event
+# calendars and the current macro snapshot do not have complete point-in-time
+# archives across the replay, so they remain context-only: including either in
+# the live denominator would make threshold evidence incomparable.
 EQUITY_RISK_COMPONENT_WEIGHTS: dict[str, float] = {
-    "volTargetPressure": 0.22,
-    "qqqTltRotation": 0.14,
-    "marketFlow": 0.22,
-    "sectorRotation": 0.06,
-    "hotStockReversal": 0.18,
-    "turnover": 0.14,
+    **CURRENT_EQUITY_RISK_RAW_WEIGHTS,
     "macroOverlay": 0.03,
     "eventRisk": 0.01,
     "optionOI": 0.00,
@@ -88,14 +91,16 @@ EQUITY_RISK_COMPONENT_WEIGHTS: dict[str, float] = {
 # input is the 22-session Parkinson window calibrated over 65 realized-vol
 # observations, which needs 86 sessions in total.
 EQUITY_RISK_REPLAY_WARMUP_SESSIONS = 86
-EQUITY_RISK_REPLAY_CORE_COMPONENTS = {
-    "volTargetPressure",
-    "qqqTltRotation",
-    "marketFlow",
-    "sectorRotation",
-    "hotStockReversal",
-    "turnover",
-}
+EQUITY_RISK_REPLAY_CORE_COMPONENTS = set(CURRENT_EQUITY_RISK_SCORED_COMPONENTS)
+
+# A production threshold is meaningful only on this exact score surface.  Keep
+# the identifier, membership, and weights in the dependency-free dashboard
+# contract so scoring, refresh, and final publication share one source of truth.
+# These aliases preserve the scoring module's existing public API.
+EQUITY_RISK_SCORE_SCALE_ID = CURRENT_EQUITY_RISK_SCORE_SCALE_ID
+EQUITY_RISK_REPLAY_SCORED_COMPONENTS = CURRENT_EQUITY_RISK_SCORED_COMPONENTS
+EQUITY_RISK_PRODUCTION_THRESHOLD = CURRENT_EQUITY_RISK_PRODUCTION_THRESHOLD
+EQUITY_RISK_V2_CANONICAL_NORMALIZED_WEIGHTS = CURRENT_EQUITY_RISK_NORMALIZED_WEIGHTS
 
 
 @dataclass(frozen=True)
@@ -107,10 +112,6 @@ class EquityAdjustmentContext:
     turnover_score: float
     vol_target_score: float
     qqq_tlt_score: float
-    event_score: float
-    macro_score: float
-    has_event_evidence: bool
-    has_macro_evidence: bool
     downtrend_score: float
     downtrend_failed_rebound: float
     downtrend_relief_rally_trap: float
@@ -170,6 +171,7 @@ def build_equity_short_term_risk_index(
         option_open_interest=option_open_interest,
     )
     next_shock = equity_next_session_shock(spy_bars, target)
+    signal = bind_equity_production_action(signal, backtest)
     signal.update(
         {
             "title": "短期股市风险预警",
@@ -183,8 +185,10 @@ def build_equity_short_term_risk_index(
             "nextSessionShock": next_shock,
             "lookAheadGuard": {
                 "dataThrough": target.isoformat(),
-                "scoreInputs": "Only same-day or earlier OHLCV, official event calendar, existing macro factors, and option OI snapshots dated on/before the signal date are scored.",
-                "auditOnly": "Post-signal and prior-session shock diagnostics are audit-only and never choose or replace the current score date.",
+                "scoreInputs": "Only same-day or earlier replayable OHLCV factors enter the production score; event calendars remain context-only.",
+                "decisionPoint": "Signal is final only after the signal-date close because it uses the completed daily OHLCV bar.",
+                "earliestExecution": "Next trading session open; the signal-date close is not treated as an executable fill.",
+                "auditOnly": "Current macro context, option OI, post-signal, and prior-session shock diagnostics never choose or replace the replay-comparable score.",
             },
             "dataCoverage": equity_risk_data_coverage(bars_by_symbol, option_open_interest, target),
         }
@@ -274,6 +278,42 @@ def normalize_market_bars(market_bars: dict[str, list[MarketDailyBar]]) -> dict[
     return normalized
 
 
+def equity_bar_on_signal_date(bars: list[MarketDailyBar], target: date) -> MarketDailyBar | None:
+    """Return the completed bar for ``target`` without borrowing an older close.
+
+    Cross-sectional daily factors compare instruments at one decision point.  An
+    as-of lookup is safe for slow macro series, but here it would compare a stale
+    prior-session move in one symbol with the target-session move in another.
+    """
+    bar = bar_at_or_before(bars, target)
+    return bar if bar is not None and bar.date == target else None
+
+
+def equity_trailing_return_on_signal_date(
+    bars: list[MarketDailyBar],
+    target: date,
+    lookback: int,
+) -> float | None:
+    if equity_bar_on_signal_date(bars, target) is None:
+        return None
+    return trailing_return(bars, target, lookback)
+
+
+def equity_inputs_share_completed_session(
+    bars_by_symbol: dict[str, list[MarketDailyBar]],
+    symbols: tuple[str, ...],
+    target: date,
+) -> bool:
+    """Require every cross-sectional leg to resolve to one completed session.
+
+    Production targets are SPY trading dates, so the common date is normally
+    ``target``.  Allowing a common earlier date keeps the low-level factor
+    helpers usable for weekend/as-of diagnostics without ever mixing sessions.
+    """
+    resolved = [bar_at_or_before(bars_by_symbol.get(symbol, []), target) for symbol in symbols]
+    return all(bar is not None for bar in resolved) and len({bar.date for bar in resolved if bar is not None}) == 1
+
+
 def choose_equity_risk_signal_date(spy_bars: list[MarketDailyBar]) -> tuple[date, MarketDailyBar | None]:
     latest = spy_bars[-1]
     latest_return = one_day_return(spy_bars, latest.date)
@@ -323,13 +363,46 @@ def equity_short_term_signal_at(
         and component.get("scoreUse") == "scored"
         and optional_float(component.get("score")) is not None
     ]
-    if len(observed) < 3:
+    observed_core_keys = {
+        str(component.get("key") or "")
+        for component in observed
+        if str(component.get("key") or "") in EQUITY_RISK_REPLAY_CORE_COMPONENTS
+        and component.get("scaleComparable") is not False
+    }
+    observed_score_keys = {str(component.get("key") or "") for component in observed}
+    observed_normalized_weights = equity_normalized_score_weights(observed)
+    weight_mismatches = equity_score_weight_mismatches(observed_normalized_weights)
+    missing_core_keys = sorted(EQUITY_RISK_REPLAY_CORE_COMPONENTS - observed_core_keys)
+    missing_scale_keys = sorted(EQUITY_RISK_REPLAY_SCORED_COMPONENTS - observed_score_keys)
+    unexpected_scale_keys = sorted(observed_score_keys - EQUITY_RISK_REPLAY_SCORED_COMPONENTS)
+    weights_match_canonical = not weight_mismatches
+    threshold_comparable = (
+        not missing_core_keys
+        and not missing_scale_keys
+        and not unexpected_scale_keys
+        and weights_match_canonical
+    )
+    if not observed:
         return unavailable_equity_short_term_risk("可用短周期股市风险分项不足。")
     weight_total = sum(float(component["weight"]) for component in observed)
     base_score = sum(float(component["score"]) * float(component["weight"]) for component in observed) / weight_total
     score_adjustments = equity_score_adjustments(observed, base_score=base_score)
     score = float(score_adjustments["finalScore"])
-    allocation = equity_short_term_risk_allocation(score)
+    context_allocation = equity_short_term_risk_allocation(score)
+    if not threshold_comparable:
+        allocation = {
+            "horizon": context_allocation["horizon"],
+            "horizonCn": context_allocation["horizonCn"],
+            "regime": context_allocation["regime"],
+            "regimeCn": context_allocation["regimeCn"],
+            "stance": "数据不完整，仅作诊断",
+            "equityExposure": "不依据部分重标分数调整仓位",
+            "exposureBandPct": None,
+            "hedgeAction": "等待完整且同口径的评分分项齐备",
+            "actionable": False,
+        }
+    else:
+        allocation = {**context_allocation, "actionable": True}
     drivers = equity_short_term_risk_drivers(observed)
     spy_bar = bar_at_or_before(bars_by_symbol.get("SPY", []), target)
     summary = equity_short_term_risk_summary(score, allocation, drivers, target)
@@ -340,13 +413,36 @@ def equity_short_term_signal_at(
         "available": True,
         "score": round(score, 1),
         "baseScore": round(base_score, 1),
+        "actionable": threshold_comparable,
+        "scoreScale": {
+            "id": EQUITY_RISK_SCORE_SCALE_ID,
+            "requiredCoreComponents": sorted(EQUITY_RISK_REPLAY_CORE_COMPONENTS),
+            "requiredScoredComponents": sorted(EQUITY_RISK_REPLAY_SCORED_COMPONENTS),
+            "canonicalNormalizedWeights": dict(EQUITY_RISK_V2_CANONICAL_NORMALIZED_WEIGHTS),
+            "observedNormalizedWeights": observed_normalized_weights,
+            "weightMismatches": weight_mismatches,
+            "weightsMatchCanonical": weights_match_canonical,
+            "observedCoreComponents": sorted(observed_core_keys),
+            "missingCoreComponents": missing_core_keys,
+            "missingScoredComponents": missing_scale_keys,
+            "unexpectedScoredComponents": unexpected_scale_keys,
+            "coreComplete": not missing_core_keys,
+            "thresholdComparable": threshold_comparable,
+            "scoredComponents": sorted(observed_score_keys),
+            "contextComponents": sorted(
+                str(component.get("key") or "")
+                for component in components
+                if component.get("scoreUse") == "context"
+            ),
+        },
         "scoreAdjustments": score_adjustments,
         "regime": allocation["regime"],
         "regimeCn": allocation["regimeCn"],
         "asOf": target.isoformat(),
-        "method": "0-100 short-horizon equity risk index from replayable OHLCV factors: Parkinson multi-scale volatility pressure, QQQ/TLT rotation, sector/leader rotation, hot-stock reversal, market-flow structure, and turnover confirmation. Macro and event inputs are low-weight context; option OI is audit-only unless archived same-date history is available. Higher means greater 1-15 trading-day drawdown risk.",
+        "method": "0-100 short-horizon equity risk index from six replayable OHLCV factors: Parkinson multi-scale volatility pressure, QQQ/TLT rotation, sector/leader rotation, hot-stock reversal, market-flow structure, and turnover confirmation. Event risk, the current macro overlay, and option OI are context/audit-only unless complete point-in-time history is available. Higher means greater 1-15 trading-day drawdown risk.",
         "summary": summary,
         "allocation": allocation,
+        "contextAllocation": context_allocation if not threshold_comparable else None,
         "components": components,
         "drivers": drivers,
         "factorEvidence": factor_evidence,
@@ -373,6 +469,87 @@ def equity_component_scores_payload(components: list[dict[str, Any]]) -> dict[st
     return payload
 
 
+def equity_normalized_score_weights(components: dict[str, Any] | list[dict[str, Any]]) -> dict[str, float]:
+    """Return normalized weights for the exact v2 scored component set."""
+    if isinstance(components, dict):
+        rows = [
+            {**(payload if isinstance(payload, dict) else {}), "key": str(key)}
+            for key, payload in components.items()
+        ]
+    else:
+        rows = components
+    raw_weights: dict[str, float] = {}
+    for component in rows:
+        if not isinstance(component, dict):
+            continue
+        key = str(component.get("key") or "")
+        if key not in EQUITY_RISK_REPLAY_SCORED_COMPONENTS:
+            continue
+        weight = optional_float(component.get("weight"))
+        if weight is None or weight < 0:
+            continue
+        raw_weights[key] = weight
+    if set(raw_weights) != set(EQUITY_RISK_REPLAY_SCORED_COMPONENTS):
+        return {}
+    total = sum(raw_weights.values())
+    if total <= 0:
+        return {}
+    return {key: round(raw_weights[key] / total, 8) for key in sorted(raw_weights)}
+
+
+def equity_score_weight_mismatches(normalized_weights: dict[str, float]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for key, expected in EQUITY_RISK_V2_CANONICAL_NORMALIZED_WEIGHTS.items():
+        observed = optional_float(normalized_weights.get(key))
+        if observed != expected:
+            rows.append({"component": key, "expected": expected, "observed": observed})
+    for key in sorted(set(normalized_weights) - set(EQUITY_RISK_V2_CANONICAL_NORMALIZED_WEIGHTS)):
+        rows.append({"component": key, "expected": None, "observed": normalized_weights[key]})
+    return rows
+
+
+def equity_backtest_score_scale_contract(observations: list[dict[str, Any]]) -> dict[str, Any]:
+    """Describe whether every replay row uses the production score surface."""
+    expected = set(EQUITY_RISK_REPLAY_SCORED_COMPONENTS)
+    comparable_rows = 0
+    mismatched_rows = 0
+    weight_mismatched_rows = 0
+    weight_mismatch_counts = {key: 0 for key in sorted(expected)}
+    latest_observed_weights: dict[str, float] = {}
+    for row in observations:
+        component_scores = row.get("componentScores")
+        observed = set(component_scores) if isinstance(component_scores, dict) else set()
+        normalized_weights = equity_normalized_score_weights(component_scores if isinstance(component_scores, dict) else {})
+        weight_mismatches = equity_score_weight_mismatches(normalized_weights)
+        keys_match = observed == expected
+        weights_match = not weight_mismatches
+        if keys_match and weights_match:
+            comparable_rows += 1
+        else:
+            mismatched_rows += 1
+        if not weights_match:
+            weight_mismatched_rows += 1
+            for mismatch in weight_mismatches:
+                key = str(mismatch.get("component") or "")
+                if key in weight_mismatch_counts:
+                    weight_mismatch_counts[key] += 1
+        if normalized_weights:
+            latest_observed_weights = normalized_weights
+    return {
+        "id": EQUITY_RISK_SCORE_SCALE_ID,
+        "requiredScoredComponents": sorted(expected),
+        "canonicalNormalizedWeights": dict(EQUITY_RISK_V2_CANONICAL_NORMALIZED_WEIGHTS),
+        "observedNormalizedWeights": latest_observed_weights,
+        "observationCount": len(observations),
+        "comparableObservationCount": comparable_rows,
+        "mismatchedObservationCount": mismatched_rows,
+        "weightMismatchedObservationCount": weight_mismatched_rows,
+        "weightMismatchCounts": weight_mismatch_counts,
+        "weightsMatchCanonical": bool(observations) and weight_mismatched_rows == 0,
+        "thresholdComparable": bool(observations) and mismatched_rows == 0,
+    }
+
+
 def equity_vol_target_pressure_component(
     bars_by_symbol: dict[str, list[MarketDailyBar]],
     target: date,
@@ -382,6 +559,8 @@ def equity_vol_target_pressure_component(
 ) -> dict[str, Any]:
     qqq_bars = bars_by_symbol.get("QQQ", [])
     spy_bars = bars_by_symbol.get("SPY", [])
+    if not equity_inputs_share_completed_session(bars_by_symbol, ("QQQ", "SPY"), target):
+        return unavailable_equity_component("volTargetPressure", "多尺度波动目标压力", weight, "QQQ/SPY目标日高低价未对齐")
     qqq_vol_22 = annualized_parkinson_vol(qqq_bars, target, 22, estimator=estimator)
     spy_vol_22 = annualized_parkinson_vol(spy_bars, target, 22, estimator=estimator)
     if qqq_vol_22 is None or spy_vol_22 is None:
@@ -390,8 +569,15 @@ def equity_vol_target_pressure_component(
     qqq_vol_5 = annualized_parkinson_vol(qqq_bars, target, 5, estimator=estimator)
     spy_vol_3 = annualized_parkinson_vol(spy_bars, target, 3, estimator=estimator)
     spy_vol_5 = annualized_parkinson_vol(spy_bars, target, 5, estimator=estimator)
-    qqq_target = adaptive_parkinson_target_vol(qqq_bars, target, estimator=estimator) or 0.12
-    spy_target = adaptive_parkinson_target_vol(spy_bars, target, estimator=estimator) or 0.12
+    qqq_target = adaptive_parkinson_target_vol(qqq_bars, target, estimator=estimator)
+    spy_target = adaptive_parkinson_target_vol(spy_bars, target, estimator=estimator)
+    target_sample_complete = qqq_target is not None and spy_target is not None
+    # Keep the legacy 12% reference solely so short synthetic histories and
+    # diagnostics retain a visible score.  ``scaleComparable=False`` below
+    # prevents that diagnostic fallback from satisfying the production core or
+    # exposing a threshold-bound action.
+    qqq_target = qqq_target if qqq_target is not None else 0.12
+    spy_target = spy_target if spy_target is not None else 0.12
     qqq_pressure = qqq_vol_22 / max(qqq_target, 1e-6)
     spy_pressure = spy_vol_22 / max(spy_target, 1e-6)
     burst_values = [
@@ -424,7 +610,7 @@ def equity_vol_target_pressure_component(
                 score,
             )
         )
-    return equity_component(
+    component = equity_component(
         "volTargetPressure",
         "多尺度波动目标压力",
         weight,
@@ -442,13 +628,21 @@ def equity_vol_target_pressure_component(
             "qqqVolPressure": round(qqq_pressure, 3),
             "spyVolPressure": round(spy_pressure, 3),
             "multiScaleBurstRatio": round(burst_ratio, 3),
+            "targetVolSampleComplete": target_sample_complete,
+            "targetVolSource": "adaptive65x22" if target_sample_complete else "diagnostic12pctFallback",
         },
     )
+    component["scaleComparable"] = target_sample_complete
+    if not target_sample_complete:
+        component["detail"] += "; 自适应目标样本不足,12%仅作诊断且不绑定生产阈值"
+    return component
 
 
 def equity_qqq_tlt_rotation_component(bars_by_symbol: dict[str, list[MarketDailyBar]], target: date, *, weight: float) -> dict[str, Any]:
     qqq_bars = bars_by_symbol.get("QQQ", [])
     tlt_bars = bars_by_symbol.get("TLT", [])
+    if not equity_inputs_share_completed_session(bars_by_symbol, ("QQQ", "TLT"), target):
+        return unavailable_equity_component("qqqTltRotation", "QQQ/TLT风险切换", weight, "QQQ/TLT目标日收盘未对齐")
     qqq_20 = trailing_return(qqq_bars, target, 20)
     tlt_20 = trailing_return(tlt_bars, target, 20)
     qqq_5 = trailing_return(qqq_bars, target, 5)
@@ -457,14 +651,14 @@ def equity_qqq_tlt_rotation_component(bars_by_symbol: dict[str, list[MarketDaily
     tlt_63 = trailing_return(tlt_bars, target, 63)
     qqq_day = one_day_return(qqq_bars, target)
     tlt_day = one_day_return(tlt_bars, target)
-    if qqq_20 is None or tlt_20 is None or qqq_day is None or tlt_day is None:
-        return unavailable_equity_component("qqqTltRotation", "QQQ/TLT风险切换", weight, "QQQ/TLT日线样本不足")
+    if any(value is None for value in (qqq_5, tlt_5, qqq_20, tlt_20, qqq_63, tlt_63, qqq_day, tlt_day)):
+        return unavailable_equity_component("qqqTltRotation", "QQQ/TLT风险切换", weight, "QQQ/TLT 5/20/63日线样本不足")
     risk_off_gap = tlt_20 - qqq_20
-    short_risk_off_gap = (tlt_5 - qqq_5) if qqq_5 is not None and tlt_5 is not None else risk_off_gap
-    risk_on_gap = (qqq_63 - tlt_63) if qqq_63 is not None and tlt_63 is not None else None
+    short_risk_off_gap = tlt_5 - qqq_5
+    risk_on_gap = qqq_63 - tlt_63
     risk_off_score = risk_linear(risk_off_gap, 0.015, 0.10)
     short_rotation_score = risk_linear(short_risk_off_gap, 0.008, 0.065)
-    crowding_score = risk_linear(risk_on_gap, 0.12, 0.32) if risk_on_gap is not None else 45.0
+    crowding_score = risk_linear(risk_on_gap, 0.12, 0.32)
     hedge_failure_score = 0.0
     if qqq_day <= -0.004 and tlt_day <= 0:
         hedge_failure_score = 82.0 + 8.0 * min(1.0, abs(qqq_day) / 0.02)
@@ -510,6 +704,9 @@ def equity_qqq_tlt_rotation_component(bars_by_symbol: dict[str, list[MarketDaily
 
 
 def equity_market_flow_component(bars_by_symbol: dict[str, list[MarketDailyBar]], target: date, *, weight: float) -> dict[str, Any]:
+    required_symbols = ("SPY", "QQQ", "SMH")
+    if not equity_inputs_share_completed_session(bars_by_symbol, required_symbols, target):
+        return unavailable_equity_component("marketFlow", "股市资金/趋势", weight, "SPY/QQQ/SMH目标日收盘未对齐")
     spy_63 = trailing_return(bars_by_symbol.get("SPY", []), target, 63)
     spy_20 = trailing_return(bars_by_symbol.get("SPY", []), target, 20)
     qqq_63 = trailing_return(bars_by_symbol.get("QQQ", []), target, 63)
@@ -583,15 +780,15 @@ def equity_downtrend_fragility_profile(bars_by_symbol: dict[str, list[MarketDail
     spy_dd63 = drawdown_from_recent_high(bars_by_symbol.get("SPY", []), target, 63)
     spy_ma20_gap = moving_average_gap(bars_by_symbol.get("SPY", []), target, 20)
     leader20 = average_optional(
-        trailing_return(bars_by_symbol.get(symbol, []), target, 20)
+        equity_trailing_return_on_signal_date(bars_by_symbol.get(symbol, []), target, 20)
         for symbol in ("QQQ", "SMH", "XLK")
     )
     cyclical20 = average_optional(
-        trailing_return(bars_by_symbol.get(symbol, []), target, 20)
+        equity_trailing_return_on_signal_date(bars_by_symbol.get(symbol, []), target, 20)
         for symbol in ("QQQ", "SMH", "XLY", "IWM")
     )
     defensive20 = average_optional(
-        trailing_return(bars_by_symbol.get(symbol, []), target, 20)
+        equity_trailing_return_on_signal_date(bars_by_symbol.get(symbol, []), target, 20)
         for symbol in ("XLV", "XLU", "XLP")
     )
     defensive_gap = defensive20 - cyclical20 if defensive20 is not None and cyclical20 is not None else None
@@ -671,6 +868,9 @@ def equity_downtrend_fragility_profile(bars_by_symbol: dict[str, list[MarketDail
 
 
 def equity_sector_rotation_component(bars_by_symbol: dict[str, list[MarketDailyBar]], target: date, *, weight: float) -> dict[str, Any]:
+    required_symbols = ("SPY", "QQQ", "SMH", "XLK", "RSP")
+    if not equity_inputs_share_completed_session(bars_by_symbol, required_symbols, target):
+        return unavailable_equity_component("sectorRotation", "板块轮动断裂", weight, "SPY/QQQ/SMH/XLK/RSP目标日收盘未对齐")
     spy_day = one_day_return(bars_by_symbol.get("SPY", []), target)
     qqq_day = one_day_return(bars_by_symbol.get("QQQ", []), target)
     smh_day = one_day_return(bars_by_symbol.get("SMH", []), target)
@@ -678,9 +878,9 @@ def equity_sector_rotation_component(bars_by_symbol: dict[str, list[MarketDailyB
     rsp_63 = trailing_return(bars_by_symbol.get("RSP", []), target, 63)
     spy_63 = trailing_return(bars_by_symbol.get("SPY", []), target, 63)
     smh_63 = trailing_return(bars_by_symbol.get("SMH", []), target, 63)
-    leaders = [value for value in (qqq_day, smh_day, xlk_day) if value is not None]
-    if spy_day is None or not leaders:
-        return unavailable_equity_component("sectorRotation", "板块轮动断裂", weight, "QQQ/SMH/XLK或SPY日线不足")
+    if any(value is None for value in (spy_day, qqq_day, smh_day, xlk_day, rsp_63, spy_63, smh_63)):
+        return unavailable_equity_component("sectorRotation", "板块轮动断裂", weight, "SPY/QQQ/SMH/XLK/RSP日线样本不足")
+    leaders = [qqq_day, smh_day, xlk_day]
     avg_leader_underperf = sum(value - spy_day for value in leaders) / len(leaders)
     underperf_score = risk_linear(-avg_leader_underperf, 0.002, 0.015)
     breadth_gap = None
@@ -715,14 +915,18 @@ def equity_hot_stock_reversal_component(bars_by_symbol: dict[str, list[MarketDai
     hot_count = reversal_count = heavy_reversal_count = 0
     for symbol in EQUITY_RISK_HOT_STOCKS:
         bars = bars_by_symbol.get(symbol, [])
-        bar = bar_at_or_before(bars, target)
+        bar = equity_bar_on_signal_date(bars, target)
         ret_63 = trailing_return(bars, target, 63)
         day_ret = one_day_return(bars, target)
         if bar is None or ret_63 is None or day_ret is None:
             continue
         high_gap = bar.close / bar.high - 1 if bar.high > 0 else 0.0
         close_location = close_location_value(bar)
-        is_hot = ret_63 >= 0.15 or symbol in {"NVDA", "AVGO", "AMD", "TSLA"}
+        # The fixed list is only the candidate universe.  Point-in-time price
+        # strength must decide whether a candidate is actually hot; treating a
+        # currently familiar ticker as unconditionally hot contaminates replay
+        # history and turns ordinary declines in cold names into reversals.
+        is_hot = ret_63 >= 0.15
         is_reversal = is_hot and (day_ret <= -0.01 or high_gap <= -0.012 or close_location <= 0.35)
         is_heavy = is_hot and day_ret <= -0.03
         if is_hot:
@@ -736,7 +940,9 @@ def equity_hot_stock_reversal_component(bars_by_symbol: dict[str, list[MarketDai
         return unavailable_equity_component("hotStockReversal", "热点股集体回落", weight, "热点股票日线不足")
     hot_share = hot_count / max(1, len(observed))
     raw_reversal_share = reversal_count / max(1, hot_count)
-    small_sample_adjusted = hot_count < 3
+    # A zero-hot basket is substantive low-risk evidence, not a missing
+    # conditional-reversal sample that should be shrunk toward a 50% prior.
+    small_sample_adjusted = 0 < hot_count < 3
     if small_sample_adjusted:
         shrink_weight = hot_count / 3
         reversal_share = 0.50 * (1 - shrink_weight) + raw_reversal_share * shrink_weight
@@ -771,9 +977,9 @@ def equity_hot_stock_reversal_component(bars_by_symbol: dict[str, list[MarketDai
 
 def equity_turnover_component(bars_by_symbol: dict[str, list[MarketDailyBar]], target: date, *, weight: float) -> dict[str, Any]:
     spy_bars = bars_by_symbol.get("SPY", [])
-    bar = bar_at_or_before(spy_bars, target)
+    bar = equity_bar_on_signal_date(spy_bars, target)
     if bar is None:
-        return unavailable_equity_component("turnover", "成交承接", weight, "SPY成交量缺失")
+        return unavailable_equity_component("turnover", "成交承接", weight, "SPY目标日成交量缺失")
     volume_pct = volume_percentile_at(spy_bars, target, window=60)
     close_loc = close_location_value(bar)
     day_ret = one_day_return(spy_bars, target)
@@ -853,7 +1059,8 @@ def equity_event_risk_component(
             ],
             "nextEventDate": upcoming[0].date.isoformat() if upcoming else None,
             "daysToNextEvent": (upcoming[0].date - target).days if upcoming else None,
-            "knownBeforeSignal": True,
+            "knownBeforeSignal": None,
+            "pointInTimeAvailabilityVerified": False,
         },
     )
 
@@ -1059,10 +1266,10 @@ def equity_factor_evidence_for_component(
             source="Official macro release calendar",
             source_quality="medium",
             historical_replay=False,
-            score_use="scored" if available else "missing",
+            score_use="context" if available else "missing",
             coverage={"start": "", "end": target.isoformat(), "observations": int(metrics.get("eventCount") or 0)},
-            timestamp_policy="Scores only events known before the signal date and dated within the forward window.",
-            reason="Forward calendar is decision-relevant, but long archived calendar coverage is partial in the free data set.",
+            timestamp_policy="Filters event dates to the target window, but the free schedule has no archived publication timestamp; historical point-in-time availability is unverified.",
+            reason="Forward calendar is decision-relevant context, but incomplete point-in-time archive coverage prevents it from sharing the replay-calibrated score denominator.",
         )
     if key == "macroOverlay":
         return equity_factor_evidence_payload(
@@ -1070,10 +1277,10 @@ def equity_factor_evidence_for_component(
             source="Existing macroLiquidityEquity and SPY Early Warning factors",
             source_quality="medium",
             historical_replay=False,
-            score_use="scored" if available else "missing",
+            score_use="context" if available else "missing",
             coverage={"start": "", "end": target.isoformat(), "observations": 1 if available else 0},
             timestamp_policy="Uses already-generated macro and monthly equity-warning payload available at signal time.",
-            reason="Macro overlay is bounded to a small weight because it mixes lower-frequency and partially replayed inputs.",
+            reason="Current macro state is context-only because a point-in-time historical archive is unavailable; it cannot share the replay-calibrated score denominator.",
         )
     if key == "optionOI":
         snapshot_after_signal = bool(option_open_interest and option_open_interest.as_of > target)
@@ -1176,6 +1383,7 @@ def equity_source_quality_summary(components: list[dict[str, Any]], target: date
         and optional_float(component.get("score")) is not None
     ]
     audit_components = [component for component in components if component.get("scoreUse") == "auditOnly"]
+    context_components = [component for component in components if component.get("scoreUse") == "context"]
     score_weight = sum(float(component.get("weight") or 0.0) for component in scored_components)
     high_quality_weight = sum(float(component.get("weight") or 0.0) for component in scored_components if component.get("sourceQuality") == "high")
     replayable_weight = sum(float(component.get("weight") or 0.0) for component in scored_components if component.get("historicalReplay") is True)
@@ -1202,10 +1410,15 @@ def equity_source_quality_summary(components: list[dict[str, Any]], target: date
         "historicalReplayableWeightPct": round(replayable_pct, 1),
         "highQualityWeightPct": round(high_quality_pct, 1),
         "auditOnlyWeightPct": round(100 * audit_weight / denominator, 1),
+        "contextOnlyWeightPct": round(
+            100 * sum(float(component.get("weight") or 0.0) for component in context_components) / denominator,
+            1,
+        ),
         "scoredComponentCount": len(scored_components),
         "auditOnlyComponentCount": len(audit_components),
         "scoredComponents": [str(component.get("key") or "") for component in scored_components],
         "auditOnlyComponents": [str(component.get("key") or "") for component in audit_components],
+        "contextOnlyComponents": [str(component.get("key") or "") for component in context_components],
     }
 
 
@@ -1240,6 +1453,10 @@ def equity_weight_calibration_summary(
             calibrated_role = "validated"
             calibrated_role_cn = "验证保留"
             validated_weight += weight
+        elif score_use == "context":
+            calibrated_role = "context"
+            calibrated_role_cn = "背景低权重"
+            context_weight += weight
         elif decision == "trim" or score_use != "scored":
             calibrated_role = "downweighted"
             calibrated_role_cn = "降权/审计"
@@ -1251,6 +1468,14 @@ def equity_weight_calibration_summary(
         precision = optional_float(diagnostic.get("precision")) if isinstance(diagnostic, dict) else None
         recall = optional_float(diagnostic.get("recall")) if isinstance(diagnostic, dict) else None
         false_positives = diagnostic.get("falsePositives") if isinstance(diagnostic, dict) else None
+        recommendation = str(diagnostic.get("recommendation") or "") if isinstance(diagnostic, dict) else ""
+        if not recommendation:
+            if calibrated_role == "context":
+                recommendation = "仅作背景上下文，不进入生产评分或仓位动作。"
+            elif calibrated_role == "downweighted":
+                recommendation = "仅作审计或降权观察，不单独触发生产动作。"
+            else:
+                recommendation = "保留既定权重，并等待独立样本外证据确认。"
         rows.append(
             {
                 "component": key,
@@ -1269,7 +1494,7 @@ def equity_weight_calibration_summary(
                 "precision": round(precision, 1) if precision is not None else None,
                 "recall": round(recall, 1) if recall is not None else None,
                 "falsePositives": int(false_positives) if isinstance(false_positives, int) else None,
-                "recommendation": str(diagnostic.get("recommendation") or "") if isinstance(diagnostic, dict) else "",
+                "recommendation": recommendation,
             }
         )
     denominator = total_weight if total_weight > 0 else 1.0
@@ -1318,7 +1543,7 @@ def equity_forward_catalyst_risk(components: list[dict[str, Any]]) -> dict[str, 
     if event_count:
         summary = f"未来{window_days}天有{event_count}个高重要性事件; 首个事件距信号日{metrics.get('daysToNextEvent')}天。"
     else:
-        summary = f"未来{window_days}天没有高重要性事件,事件分项仅保留基准风险。"
+        summary = f"未来{window_days}天没有高重要性事件; 事件日历仅保留为上下文。"
     return {
         "available": event_component.get("available") is True,
         "score": round(score, 1) if score is not None else None,
@@ -1328,6 +1553,7 @@ def equity_forward_catalyst_risk(components: list[dict[str, Any]]) -> dict[str, 
         "nextEventDate": metrics.get("nextEventDate"),
         "daysToNextEvent": metrics.get("daysToNextEvent"),
         "knownBeforeSignal": bool(metrics.get("knownBeforeSignal")),
+        "pointInTimeAvailabilityVerified": metrics.get("pointInTimeAvailabilityVerified") is True,
         "scoreUse": str(event_component.get("scoreUse") or "missing"),
         "summary": summary,
     }
@@ -1351,6 +1577,8 @@ def equity_adjustment_context(components: list[dict[str, Any]]) -> EquityAdjustm
     metrics_by_key: dict[str, dict[str, Any]] = {}
     for component in components:
         key = str(component.get("key") or "")
+        if key not in EQUITY_RISK_REPLAY_SCORED_COMPONENTS or component.get("scoreUse") != "scored":
+            continue
         score = optional_float(component.get("score"))
         if key and score is not None:
             scores[key] = score
@@ -1369,10 +1597,6 @@ def equity_adjustment_context(components: list[dict[str, Any]]) -> EquityAdjustm
         turnover_score=scores.get("turnover", 0.0),
         vol_target_score=scores.get("volTargetPressure", 0.0),
         qqq_tlt_score=scores.get("qqqTltRotation", 0.0),
-        event_score=scores.get("eventRisk", 0.0),
-        macro_score=scores.get("macroOverlay", 0.0),
-        has_event_evidence="eventRisk" in scores,
-        has_macro_evidence="macroOverlay" in scores,
         downtrend_score=optional_float(market_metrics.get("downtrendFragilityScore")) or 0.0,
         downtrend_failed_rebound=optional_float(market_metrics.get("downtrendFailedReboundScore")) or 0.0,
         downtrend_relief_rally_trap=optional_float(market_metrics.get("downtrendReliefRallyTrapScore")) or 0.0,
@@ -1414,15 +1638,6 @@ def equity_convexity_amplifier_result(context: EquityAdjustmentContext) -> dict[
     ):
         rules.append(equity_adjustment_rule("confirmedRotationBreak", "轮动与波动共同确认", "amplifier", 4.0))
     if (
-        context.sector_score >= 90
-        and context.hot_stock_score >= 90
-        and context.market_score >= 80
-        and context.qqq_tlt_score >= 80
-        and context.has_event_evidence
-        and context.event_score >= 78
-    ):
-        rules.append(equity_adjustment_rule("eventConfirmedRotation", "事件窗口确认轮动压力", "amplifier", 4.0))
-    if (
         context.sector_score >= 95
         and context.hot_stock_score >= 95
         and context.market_score >= 88
@@ -1456,9 +1671,9 @@ def equity_noise_dampener_result(context: EquityAdjustmentContext) -> dict[str, 
         rule = equity_adjustment_rule(key, label, "dampener", offset)
         return equity_adjustment_result(offset, [rule])
 
-    low_event_evidence = context.has_event_evidence and context.event_score < 60
-    low_macro_evidence = context.has_macro_evidence and context.macro_score < 60
-    low_catalyst_evidence = low_event_evidence and low_macro_evidence
+    # Every adjustment below must be derivable from the same archived OHLCV
+    # surface as the base score.  Event/macro context and their absence cannot
+    # amplify or dampen a replay-calibrated score.
 
     if (
         context.sector_score >= 85
@@ -1467,7 +1682,6 @@ def equity_noise_dampener_result(context: EquityAdjustmentContext) -> dict[str, 
         and context.qqq_tlt_score >= 75
         and context.vol_target_score < 50
         and context.downtrend_score < 50
-        and low_catalyst_evidence
     ):
         return dampen("rotationWithoutVolConfirmation", "轮动缺少波动与趋势确认", -14.0)
     if (
@@ -1476,16 +1690,14 @@ def equity_noise_dampener_result(context: EquityAdjustmentContext) -> dict[str, 
         and context.hot_stock_score >= 85
         and max(context.vol_target_score, context.qqq_tlt_score) >= 85
         and context.turnover_score >= 75
-        and low_catalyst_evidence
     ):
-        return dampen("narrowStressWithoutBreadth", "高压但缺少板块广度", -25.0)
+        return dampen("narrowStressWithoutBreadth", "高压但缺少板块广度", -27.0)
     if (
         context.market_score >= 85
         and context.hot_stock_score >= 85
         and context.downtrend_score < 50
-        and low_catalyst_evidence
     ):
-        return dampen("extensionWithoutCatalyst", "上涨扩张缺少破位与催化确认", -8.0)
+        return dampen("extensionWithoutCatalyst", "上涨扩张缺少破位确认", -8.0)
     if (
         context.downtrend_score >= 75
         and context.downtrend_sell_pressure >= 78
@@ -1502,16 +1714,14 @@ def equity_noise_dampener_result(context: EquityAdjustmentContext) -> dict[str, 
         and context.defensive_gap >= 5.0
         and context.smh_rsp_gap is not None
         and context.smh_rsp_gap >= 8.0
-        and low_catalyst_evidence
     ):
-        return dampen("capitulationWashout", "放量低收后的宣泄性抛售", -18.0)
+        return dampen("capitulationWashout", "放量低收后的宣泄性抛售", -19.0)
     if (
         context.market_score < 75
         and context.downtrend_score < 50
         and context.sector_score >= 80
         and context.hot_stock_score >= 90
         and context.turnover_score >= 75
-        and low_catalyst_evidence
     ):
         return dampen("hotRotationWithoutMarketFlow", "热点回落缺少大盘趋势确认", -18.0)
     if (
@@ -1527,7 +1737,6 @@ def equity_noise_dampener_result(context: EquityAdjustmentContext) -> dict[str, 
         and context.qqq63_return > -3.0
         and context.smh63_return is not None
         and context.smh63_return > -3.0
-        and low_catalyst_evidence
     ):
         return dampen("aftershockWithoutBroadStress", "短线余震缺少中期扩散", -18.0)
     if (
@@ -1536,16 +1745,14 @@ def equity_noise_dampener_result(context: EquityAdjustmentContext) -> dict[str, 
         and context.turnover_score >= 80
         and context.spy_day_return is not None
         and context.spy_day_return > -1.0
-        and low_catalyst_evidence
     ):
-        return dampen("shallowDistribution", "浅跌分配缺少催化确认", -14.0)
+        return dampen("shallowDistribution", "浅跌分配缺少跨市场确认", -14.0)
     if (
         context.downtrend_sell_pressure >= 78
         and context.spy20_return is not None
         and context.spy20_return > 0.0
         and context.smh63_return is not None
         and context.smh63_return <= -10.0
-        and low_catalyst_evidence
     ):
         return dampen("sectorSpecificSemiconductorSlump", "半导体下跌未扩散至SPY", -18.0)
     if (
@@ -1557,18 +1764,8 @@ def equity_noise_dampener_result(context: EquityAdjustmentContext) -> dict[str, 
         and context.smh_rsp_gap <= 0.0
         and context.smh63_return is not None
         and context.smh63_return <= 5.0
-        and low_catalyst_evidence
     ):
         return dampen("lightHotDamageWithoutBreadth", "热点受损较轻且缺少防御扩散", -18.0)
-    if (
-        context.has_event_evidence
-        and context.event_score >= 78
-        and context.market_score < 75
-        and context.downtrend_score < 50
-        and context.turnover_score < 80
-        and context.heavy_reversal_count <= 1
-    ):
-        return dampen("eventWatchWithoutMarketConfirmation", "事件窗口缺少市场确认", -14.0)
     if (
         context.downtrend_score >= 80
         and context.downtrend_sell_pressure <= 5
@@ -1584,7 +1781,6 @@ def equity_noise_dampener_result(context: EquityAdjustmentContext) -> dict[str, 
         and context.defensive_gap >= 12.0
         and context.smh_rsp_gap is not None
         and context.smh_rsp_gap <= 0.0
-        and low_catalyst_evidence
     ):
         return dampen("repairRallyAfterWashout", "深跌后的修复性反弹", -14.0)
     return equity_adjustment_result(0.0, [])
@@ -1681,12 +1877,163 @@ def equity_short_term_risk_allocation(score: float) -> dict[str, Any]:
     }
 
 
+def bind_equity_production_action(
+    signal: dict[str, Any],
+    backtest: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind a displayed position action to the pre-registered OOS test.
+
+    The score and its descriptive regime remain visible even when evidence is
+    insufficient.  Only the fixed ``score >= 75`` production rule may expose a
+    numeric allocation band; calibration-selected thresholds are research-only
+    and cannot silently rewrite today's action.
+    """
+    result = dict(signal)
+    allocation = result.get("allocation") if isinstance(result.get("allocation"), dict) else {}
+    context_allocation = (
+        result.get("contextAllocation")
+        if isinstance(result.get("contextAllocation"), dict)
+        else allocation
+    )
+    walk_forward = backtest.get("walkForward") if isinstance(backtest.get("walkForward"), dict) else {}
+    production_test = next(
+        (
+            row
+            for row in walk_forward.get("thresholdTests", [])
+            if isinstance(row, dict) and row.get("productionUse") is True
+        ),
+        None,
+    )
+    score = optional_float(result.get("score"))
+    threshold = optional_float(production_test.get("threshold")) if production_test else None
+    score_scale = result.get("scoreScale") if isinstance(result.get("scoreScale"), dict) else {}
+    backtest_score_scale = backtest.get("scoreScale") if isinstance(backtest.get("scoreScale"), dict) else {}
+    signal_components = score_scale.get("scoredComponents")
+    required_components = sorted(EQUITY_RISK_REPLAY_SCORED_COMPONENTS)
+    canonical_weights = dict(EQUITY_RISK_V2_CANONICAL_NORMALIZED_WEIGHTS)
+    score_weights_match_backtest = bool(
+        score_scale.get("weightsMatchCanonical") is True
+        and backtest_score_scale.get("weightsMatchCanonical") is True
+        and score_scale.get("canonicalNormalizedWeights") == canonical_weights
+        and score_scale.get("observedNormalizedWeights") == canonical_weights
+        and backtest_score_scale.get("canonicalNormalizedWeights") == canonical_weights
+        and backtest_score_scale.get("observedNormalizedWeights") == canonical_weights
+        and int(optional_float(backtest_score_scale.get("weightMismatchedObservationCount")) or 0) == 0
+    )
+    score_scale_matches_backtest = bool(
+        score_scale.get("id") == EQUITY_RISK_SCORE_SCALE_ID
+        and backtest_score_scale.get("id") == EQUITY_RISK_SCORE_SCALE_ID
+        and backtest_score_scale.get("thresholdComparable") is True
+        and signal_components == required_components
+        and backtest_score_scale.get("requiredScoredComponents") == required_components
+        and score_weights_match_backtest
+    )
+    score_contract_allows_action = bool(
+        result.get("actionable") is True
+        and allocation.get("actionable") is True
+        and score_scale.get("coreComplete") is True
+        and score_scale.get("thresholdComparable") is True
+        and score_scale_matches_backtest
+    )
+    production_sample = int(optional_float(production_test.get("sampleSize")) or 0) if production_test else 0
+    production_clusters = (
+        int(optional_float(production_test.get("independentAlertClusters")) or 0)
+        if production_test
+        else 0
+    )
+    production_hits = (
+        int(optional_float(production_test.get("independentHitClusters")) or 0)
+        if production_test
+        else 0
+    )
+    production_base_rate = optional_float(production_test.get("baseRate")) if production_test else None
+    precision_lower_bound = equity_wilson_lower_bound_pct(production_hits, production_clusters)
+    validation_evidence_complete = bool(
+        production_test
+        and threshold == float(EQUITY_RISK_PRODUCTION_THRESHOLD)
+        and production_test.get("sampleRole") == "walkForwardOos"
+        and production_test.get("validationStatus") == "validated"
+        and production_sample >= 30
+        and production_clusters >= 3
+        and 0 <= production_hits <= production_clusters
+        and production_base_rate is not None
+        and precision_lower_bound is not None
+        and precision_lower_bound >= production_base_rate + 5.0
+    )
+    threshold_validated = bool(
+        production_test
+        and production_test.get("oosValidated") is True
+        and validation_evidence_complete
+    )
+    current_triggered = bool(score is not None and threshold is not None and score >= threshold)
+    action_allowed = score_contract_allows_action and threshold_validated and current_triggered
+
+    if action_allowed:
+        result["allocation"] = {**allocation, "actionable": True}
+        result["contextAllocation"] = None
+    else:
+        regime = str(context_allocation.get("regime") or result.get("regime") or "")
+        regime_cn = str(context_allocation.get("regimeCn") or result.get("regimeCn") or "")
+        result["contextAllocation"] = context_allocation or None
+        result["allocation"] = {
+            "horizon": str(context_allocation.get("horizon") or "1-10d"),
+            "horizonCn": str(context_allocation.get("horizonCn") or "1-10个交易日"),
+            "regime": regime,
+            "regimeCn": regime_cn,
+            "stance": "研究观察，暂不绑定仓位",
+            "equityExposure": "不依据未验证或未触发的生产阈值调整仓位",
+            "exposureBandPct": None,
+            "hedgeAction": (
+                "等待预注册强告警阈值的独立OOS证据"
+                if current_triggered and not threshold_validated
+                else "当前未触发经OOS验证的生产动作"
+            ),
+            "actionable": False,
+        }
+    result["actionable"] = action_allowed
+    result["productionValidation"] = {
+        "available": production_test is not None,
+        "validationPath": "equityShortTermRisk.backtest.walkForward.thresholdTests[productionUse=true]",
+        "threshold": threshold,
+        "expectedThreshold": EQUITY_RISK_PRODUCTION_THRESHOLD,
+        "scoreContractAllowsAction": score_contract_allows_action,
+        "scoreScaleMatchesBacktest": score_scale_matches_backtest,
+        "scoreWeightsMatchBacktest": score_weights_match_backtest,
+        "validationEvidenceComplete": validation_evidence_complete,
+        "thresholdValidated": threshold_validated,
+        "currentTriggered": current_triggered,
+        "actionable": action_allowed,
+        "sampleRole": "walkForwardOos",
+        "independentHoldout": False,
+        "independentAlertClusters": (
+            int(optional_float(production_test.get("independentAlertClusters")) or 0)
+            if production_test
+            else 0
+        ),
+        "precision": optional_float(production_test.get("precision")) if production_test else None,
+        "clusterPrecision": optional_float(production_test.get("clusterPrecision")) if production_test else None,
+        "clusterPrecisionWilsonLower95": precision_lower_bound,
+        "baseRate": optional_float(production_test.get("baseRate")) if production_test else None,
+        "reason": (
+            str(production_test.get("validationReason") or "")
+            if production_test
+            else "No pre-registered OOS production-threshold test is available."
+        ),
+    }
+    if not action_allowed:
+        result["summary"] = (
+            f"{result.get('asOf') or ''}短周期风险评分为{score if score is not None else '--'}; "
+            "当前只保留研究诊断，不输出生产仓位带。"
+        )
+    return result
+
+
 def equity_short_term_risk_summary(score: float, allocation: dict[str, str], drivers: list[dict[str, Any]], target: date) -> str:
     if drivers:
         driver_text = "、".join(str(driver.get("name") or "") for driver in drivers[:3])
     else:
         driver_text = "未出现单一主导风险"
-    return f"{target.isoformat()}收盘前短周期风险为{allocation['regimeCn']}({score:.1f}); 主要来自{driver_text}。动作: {allocation['hedgeAction']}。"
+    return f"{target.isoformat()}收盘后短周期风险为{allocation['regimeCn']}({score:.1f}); 主要来自{driver_text}。动作最早于下一交易日开盘执行: {allocation['hedgeAction']}。"
 
 
 def build_equity_short_term_risk_trend(
@@ -1725,12 +2072,18 @@ def build_equity_short_term_risk_trend(
         component_scores = equity_component_scores_payload(
             snapshot.get("components", []) if isinstance(snapshot.get("components"), list) else []
         )
-        if not EQUITY_RISK_REPLAY_CORE_COMPONENTS.issubset(component_scores):
+        score_scale = snapshot.get("scoreScale") if isinstance(snapshot.get("scoreScale"), dict) else {}
+        if (
+            score_scale.get("id") != EQUITY_RISK_SCORE_SCALE_ID
+            or score_scale.get("thresholdComparable") is not True
+            or set(component_scores) != EQUITY_RISK_REPLAY_SCORED_COMPONENTS
+        ):
             excluded_incomplete_core += 1
             continue
         points.append(
             {
                 "date": bar.date.isoformat(),
+                "decisionPoint": "afterClose",
                 "score": optional_float(snapshot.get("score")),
                 "regime": str(snapshot.get("regime") or ""),
                 "regimeCn": str(snapshot.get("regimeCn") or ""),
@@ -1744,6 +2097,8 @@ def build_equity_short_term_risk_trend(
         "available": bool(points),
         "warmupSessions": EQUITY_RISK_REPLAY_WARMUP_SESSIONS,
         "requiredCoreComponents": sorted(EQUITY_RISK_REPLAY_CORE_COMPONENTS),
+        "requiredScoredComponents": sorted(EQUITY_RISK_REPLAY_SCORED_COMPONENTS),
+        "scoreScaleId": EQUITY_RISK_SCORE_SCALE_ID,
         "excludedIncompleteCoreSnapshots": excluded_incomplete_core,
         "summary": "短周期股市风险日度回放; 仅保留完成86日预热且六个核心分项齐备的同口径评分。",
         "points": points,
@@ -1796,7 +2151,8 @@ def build_equity_short_term_risk_backtest(
         if index is None or index + 1 >= len(clean_bars):
             continue
         current = clean_bars[index]
-        if current.close <= 0:
+        execution = clean_bars[index + 1]
+        if current.close <= 0 or execution.open <= 0:
             continue
         end_index = min(len(clean_bars) - 1, index + horizon)
         future_bars = clean_bars[index + 1: end_index + 1]
@@ -1808,6 +2164,10 @@ def build_equity_short_term_risk_backtest(
             "regime": str(point.get("regime") or ""),
             "regimeCn": str(point.get("regimeCn") or ""),
             "spyClose": round(current.close, 2),
+            "decisionPoint": "afterClose",
+            "executionPolicy": "nextSessionOpen",
+            "executionDate": execution.date.isoformat(),
+            "executionOpen": round(execution.open, 2),
         }
         component_scores = point.get("componentScores")
         if isinstance(component_scores, dict):
@@ -1827,6 +2187,7 @@ def build_equity_short_term_risk_backtest(
                 target_horizon,
                 drawdown_threshold_pct,
             )
+            observation[f"labelStartDate{target_horizon}d"] = execution.date.isoformat()
             observation[f"labelEndDate{target_horizon}d"] = (
                 clean_bars[index + target_horizon].date.isoformat()
                 if index + target_horizon < len(clean_bars)
@@ -1884,6 +2245,7 @@ def build_equity_short_term_risk_backtest(
             "worstWindows": [],
             "alertWindows": [],
         }
+    backtest_score_scale = equity_backtest_score_scale_contract(observations)
     score_buckets = [
         equity_backtest_bucket(label, label_cn, low, high, observations, drawdown_threshold_pct)
         for label, label_cn, low, high in buckets
@@ -1976,20 +2338,31 @@ def build_equity_short_term_risk_backtest(
     avg_strong_drawdown = strong_bucket.get(f"avgMaxDrawdown{preferred_horizon}d")
     summary = (
         f"历史回放完整{preferred_horizon}日标签{len(preferred_observations)}个; score>=75告警{preferred_threshold_test.get('alertDays', 0)}次,"
-        f"{preferred_horizon}日内<-2%回撤命中率{format_optional_percent_value(precision)},"
+        f"{preferred_horizon}日内<-2%最大不利波动命中率{format_optional_percent_value(precision)},"
         f"命中平均提前{format_optional_number(preferred_threshold_test.get('avgDrawdownLeadDaysWhenHit'))}个交易日,"
         f"告警簇命中率{format_optional_percent_value(alert_cluster_test.get('precision'))};"
-        f"强告警桶平均{preferred_horizon}日最大回撤{format_optional_percent_value(avg_strong_drawdown)}。"
+        f"强告警桶平均{preferred_horizon}日最大不利波动{format_optional_percent_value(avg_strong_drawdown)}。"
     )
     return {
         "available": True,
         "target": f"1-{preferred_horizon} trading-day SPY drawdown warning",
-        "method": f"For each historical equityShortTermRisk score, measure forward 1D/5D/{horizon}D/{preferred_horizon}D SPY return and the worst next-{preferred_horizon}-trading-day SPY drawdown from same-day close. The next-day audit is never used in the score; the preferred accuracy view allows signals to be two or three days early before a drawdown window.",
+        "method": f"Each score is finalized after the signal-date close from the completed daily OHLCV bar. Assume the earliest executable fill is the next trading session open, then measure 1D/5D/{horizon}D/{preferred_horizon}D SPY return and maximum adverse excursion from that fill over the corresponding execution-session window. The next-session outcome is never used in the score.",
+        "decisionExecutionPolicy": {
+            "signalDecisionPoint": "afterSignalDateClose",
+            "earliestExecutionPoint": "nextTradingSessionOpen",
+            "returnBasis": "executionOpenToHorizonClose",
+            "drawdownBasis": "executionOpenToMinimumLowThroughHorizonEnd",
+            "drawdownMetric": "maximumAdverseExcursionFromExecutionOpen",
+            "pathPeakToTroughDrawdown": False,
+            "horizonSessionCount": "Execution session is session 1; label end is signal index + horizon.",
+        },
+        "scoreScale": backtest_score_scale,
+        "scoreScaleId": backtest_score_scale["id"],
         "sampleSize": len(preferred_observations),
         "trendObservationCount": len(observations),
         "excludedIncompleteTailCount": len(observations) - len(preferred_observations),
         "dateRange": {"start": preferred_observations[0]["date"], "end": preferred_observations[-1]["date"]},
-        "drawdownEvent": f"next {preferred_horizon} trading days max drawdown <= {drawdown_threshold_pct:.1f}%",
+        "drawdownEvent": f"maximum adverse excursion from next-session open through {preferred_horizon} execution-window sessions <= {drawdown_threshold_pct:.1f}%",
         "preferredHorizon": preferred_horizon,
         "summary": summary,
         "scoreBuckets": score_buckets,
@@ -2012,10 +2385,11 @@ def build_equity_short_term_risk_backtest(
         "caveats": [
             "Nasdaq daily OHLCV supports historical replay for price, volume, sector rotation, and hot-stock reversal factors.",
             "Historical replay excludes the current macroOverlay snapshot to avoid contaminating past scores with today's macro state.",
+            "Completed signal-date OHLCV is known only after the close; all executable return/drawdown labels therefore start at the next session open and exclude the untradeable overnight gap into that open.",
             "Threshold recommendations are selected only on the purged 70% calibration slice and evaluated once on the final 30%; full-sample threshold grids are descriptive and never production inputs.",
             "Component diagnostics use the walk-forward OOS slice when available and remain read-only research evidence; they do not mutate configured production weights.",
             f"The final {len(observations) - len(preferred_observations)} rows without a complete {preferred_horizon}-session outcome window are excluded from all preferred-horizon denominators.",
-            "Free Cboe option OI and broad news feeds are current snapshots or curated feeds, so full historical option/news backfills are excluded unless an archived feed is added.",
+            "Event calendars and free Cboe option OI are current/partial snapshots, so they remain context-only until complete point-in-time archives are available.",
             "This is a risk-control backtest, not a standalone return forecast or personal investment recommendation.",
         ],
     }
@@ -2065,6 +2439,10 @@ def build_equity_volatility_estimator_audit(
     candidate_current = equity_estimator_current_metrics(candidate_signal)
     production_metrics = equity_estimator_backtest_metrics(production_backtest)
     candidate_metrics = equity_estimator_backtest_metrics(candidate_backtest)
+    comparison_contract = equity_estimator_comparison_contract(
+        production_metrics,
+        candidate_metrics,
+    )
     verdict = equity_estimator_audit_verdict(production_metrics, candidate_metrics)
     return {
         "available": True,
@@ -2072,6 +2450,12 @@ def build_equity_volatility_estimator_audit(
         "candidateEstimator": PARKINSON_ESTIMATOR_STANDARD_RMS,
         "productionUnchanged": True,
         "method": "Replay the same OHLCV history, factor weights, score thresholds, and 15D drawdown labels; change only Parkinson window aggregation from arithmetic mean to root-mean-square.",
+        "evidenceScope": {
+            "promotionMetric": "purged final-30% OOS independent alert episodes at pre-registered score>=75",
+            "fullSampleRole": "descriptive_only",
+            "fullSampleEligibleForPromotion": False,
+        },
+        "comparisonContract": comparison_contract,
         "current": {
             "production": production_current,
             "candidate": candidate_current,
@@ -2085,10 +2469,15 @@ def build_equity_volatility_estimator_audit(
             "oosPrecisionDelta": equity_metric_delta(candidate_metrics.get("oosPrecision"), production_metrics.get("oosPrecision")),
             "oosLiftDelta": equity_metric_delta(candidate_metrics.get("oosLiftVsBaseRate"), production_metrics.get("oosLiftVsBaseRate")),
             "oosFalsePositiveDelta": equity_metric_delta(candidate_metrics.get("oosFalsePositives"), production_metrics.get("oosFalsePositives")),
+            "oosIndependentEpisodeDelta": equity_metric_delta(
+                candidate_metrics.get("oosAlertEpisodes"),
+                production_metrics.get("oosAlertEpisodes"),
+            ),
         },
         "verdict": verdict["verdict"],
         "verdictCn": verdict["verdictCn"],
         "recommendedAction": verdict["recommendedAction"],
+        "shadowPromotionEligible": verdict["verdict"] == "candidatePromising",
         "summary": verdict["summary"],
     }
 
@@ -2114,6 +2503,8 @@ def equity_estimator_current_metrics(signal: dict[str, Any]) -> dict[str, Any]:
 
 def equity_estimator_backtest_metrics(backtest: dict[str, Any]) -> dict[str, Any]:
     preferred = backtest.get("preferredThresholdTest") if isinstance(backtest.get("preferredThresholdTest"), dict) else {}
+    walk_forward = backtest.get("walkForward") if isinstance(backtest.get("walkForward"), dict) else {}
+    oos_summary = walk_forward.get("outOfSample") if isinstance(walk_forward.get("outOfSample"), dict) else {}
     oos_tests = backtest.get("outOfSampleThresholdTests") if isinstance(backtest.get("outOfSampleThresholdTests"), list) else []
     oos = next(
         (row for row in oos_tests if isinstance(row, dict) and int(row.get("threshold") or -1) == 75),
@@ -2124,62 +2515,211 @@ def equity_estimator_backtest_metrics(backtest: dict[str, Any]) -> dict[str, Any
         (row for row in diagnostics if isinstance(row, dict) and row.get("component") == "volTargetPressure"),
         {},
     )
+    oos_cluster_precision = optional_float(oos.get("clusterPrecision"))
+    oos_base_rate = optional_float(oos.get("baseRate"))
+    oos_episode_lift = (
+        round(oos_cluster_precision / oos_base_rate, 2)
+        if oos_cluster_precision is not None and oos_base_rate is not None and oos_base_rate > 0
+        else None
+    )
+    independent_episode_metrics_available = bool(
+        optional_float(oos.get("independentAlertClusters")) is not None
+        and oos_cluster_precision is not None
+        and optional_float(oos.get("independentFalseClusters")) is not None
+    )
     return {
         "sampleSize": backtest.get("sampleSize"),
         "threshold": 75,
         "horizon": preferred.get("horizon") or backtest.get("preferredHorizon"),
+        "eventDefinition": backtest.get("drawdownEvent"),
+        "fullSampleRole": "descriptive_only",
+        "fullSampleEligibleForPromotion": False,
         "alertDays": preferred.get("alertDays"),
         "precision": preferred.get("precision"),
         "recall": preferred.get("recall"),
         "falsePositives": preferred.get("falsePositives"),
         "liftVsBaseRate": preferred.get("liftVsBaseRate"),
         "avgDrawdownLeadDaysWhenHit": preferred.get("avgDrawdownLeadDaysWhenHit"),
+        "validationDesign": walk_forward.get("validationDesign"),
+        "splitDate": walk_forward.get("splitDate"),
+        "purgedTrainingRows": walk_forward.get("purgedTrainingRows"),
+        "purgeRule": walk_forward.get("purgeRule"),
+        "oosSampleSize": oos.get("sampleSize") or oos_summary.get("sampleSize"),
+        "oosDateRange": oos_summary.get("dateRange"),
+        "oosObservationFingerprint": walk_forward.get("oosObservationFingerprint"),
+        "oosSampleRole": oos.get("sampleRole"),
+        "oosProductionUse": oos.get("productionUse"),
+        "oosClusterDedupeRule": oos.get("clusterDedupeRule"),
+        "oosIndependentEpisodeMetricsAvailable": independent_episode_metrics_available,
+        "oosPrecisionMetric": (
+            "independentAlertClusterPrecision"
+            if independent_episode_metrics_available
+            else "unavailable"
+        ),
+        "oosAlertEpisodes": oos.get("independentAlertClusters"),
+        "oosHitEpisodes": oos.get("independentHitClusters"),
+        "oosFalsePositives": oos.get("independentFalseClusters"),
+        "oosPrecision": oos.get("clusterPrecision"),
+        "oosLiftVsBaseRate": oos_episode_lift,
+        "oosBaseRate": oos.get("baseRate"),
+        "oosValidated": oos.get("oosValidated"),
+        "oosValidationStatus": oos.get("validationStatus"),
+        "oosValidationReason": oos.get("validationReason"),
+        # Daily rows overlap for the full label horizon.  Retain them as
+        # diagnostics, but never let a long alert streak masquerade as many
+        # independent observations in estimator promotion.
         "oosAlertDays": oos.get("alertDays"),
-        "oosPrecision": oos.get("precision"),
-        "oosRecall": oos.get("recall"),
-        "oosFalsePositives": oos.get("falsePositives"),
-        "oosLiftVsBaseRate": oos.get("liftVsBaseRate"),
+        "oosDailyPrecision": oos.get("precision"),
+        "oosDailyRecall": oos.get("recall"),
+        "oosDailyFalsePositives": oos.get("falsePositives"),
+        "oosDailyLiftVsBaseRate": oos.get("liftVsBaseRate"),
         "volComponentPrecision": volatility.get("precision"),
         "volComponentRecall": volatility.get("recall"),
         "volComponentFalsePositives": volatility.get("falsePositives"),
     }
 
 
+def equity_estimator_comparison_contract(
+    production: dict[str, Any],
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    """Prove that estimator metrics came from the same purged holdout.
+
+    A candidate may change alert membership, but not the label sample, split,
+    horizon, event definition, pre-registered threshold, or episode de-duplication
+    rule.  Full-sample statistics are intentionally absent from this contract.
+    """
+    required_fields = (
+        "validationDesign",
+        "splitDate",
+        "purgedTrainingRows",
+        "purgeRule",
+        "threshold",
+        "horizon",
+        "eventDefinition",
+        "oosSampleSize",
+        "oosDateRange",
+        "oosObservationFingerprint",
+        "oosSampleRole",
+        "oosProductionUse",
+        "oosClusterDedupeRule",
+    )
+    metadata_detected = any(
+        production.get(field) is not None or candidate.get(field) is not None
+        for field in required_fields
+    )
+    if not metadata_detected:
+        return {
+            "available": False,
+            "comparable": None,
+            "samePurgedHoldout": None,
+            "checkedFields": [],
+            "missingFields": list(required_fields),
+            "mismatchedFields": [],
+            "promotionMetric": "independentAlertClusterPrecision",
+            "fullSampleExcluded": True,
+            "reason": "Legacy metric dictionaries do not expose a validation-sample contract.",
+        }
+
+    missing_fields: list[str] = []
+    mismatched_fields: list[str] = []
+    checked_fields: list[str] = []
+    for field in required_fields:
+        production_value = production.get(field)
+        candidate_value = candidate.get(field)
+        if production_value is None or candidate_value is None:
+            missing_fields.append(field)
+            continue
+        checked_fields.append(field)
+        if production_value != candidate_value:
+            mismatched_fields.append(field)
+    comparable = not missing_fields and not mismatched_fields
+    if missing_fields:
+        reason = "Validation contract is incomplete: " + ", ".join(missing_fields) + "."
+    elif mismatched_fields:
+        reason = "Production and candidate use different validation evidence: " + ", ".join(mismatched_fields) + "."
+    else:
+        reason = "Production and candidate use the same purged OOS labels and independent-episode rule."
+    return {
+        "available": True,
+        "comparable": comparable,
+        "samePurgedHoldout": comparable,
+        "checkedFields": checked_fields,
+        "missingFields": missing_fields,
+        "mismatchedFields": mismatched_fields,
+        "promotionMetric": "independentAlertClusterPrecision",
+        "fullSampleExcluded": True,
+        "reason": reason,
+    }
+
+
 def equity_estimator_audit_verdict(
     production: dict[str, Any],
     candidate: dict[str, Any],
-) -> dict[str, str]:
-    candidate_oos_alerts = int(optional_float(candidate.get("oosAlertDays")) or 0)
-    production_oos_precision = optional_float(production.get("oosPrecision"))
-    candidate_oos_precision = optional_float(candidate.get("oosPrecision"))
-    production_oos_lift = optional_float(production.get("oosLiftVsBaseRate"))
-    candidate_oos_lift = optional_float(candidate.get("oosLiftVsBaseRate"))
-    production_full_precision = optional_float(production.get("precision"))
-    candidate_full_precision = optional_float(candidate.get("precision"))
-    production_oos_false = optional_float(production.get("oosFalsePositives"))
-    candidate_oos_false = optional_float(candidate.get("oosFalsePositives"))
-    if candidate_oos_alerts < 5 or candidate_oos_precision is None or candidate_oos_lift is None:
+) -> dict[str, Any]:
+    comparison_contract = equity_estimator_comparison_contract(production, candidate)
+    strict_contract = comparison_contract.get("available") is True
+    if strict_contract and comparison_contract.get("comparable") is not True:
         return {
             "verdict": "insufficientEvidence",
             "verdictCn": "证据不足",
             "recommendedAction": "retainProduction",
-            "summary": "标准RMS候选的OOS告警不足5次或指标不可用,暂不切换生产口径。",
+            "comparisonContract": comparison_contract,
+            "summary": "标准RMS候选与生产口径未使用完全相同的purged OOS标签、阈值或episode规则,不可比较且不得晋级。",
+        }
+    if strict_contract and candidate.get("oosIndependentEpisodeMetricsAvailable") is not True:
+        return {
+            "verdict": "insufficientEvidence",
+            "verdictCn": "证据不足",
+            "recommendedAction": "retainProduction",
+            "comparisonContract": comparison_contract,
+            "summary": "标准RMS候选缺少独立OOS告警episode指标; 连续告警天数不能替代独立证据。",
+        }
+    if strict_contract and candidate.get("oosValidated") is not True:
+        return {
+            "verdict": "insufficientEvidence",
+            "verdictCn": "证据不足",
+            "recommendedAction": "retainProduction",
+            "comparisonContract": comparison_contract,
+            "summary": "标准RMS候选尚未通过预注册阈值的OOS样本、独立episode与精确率提升门槛,不得晋级。",
+        }
+
+    candidate_episode_value = candidate.get("oosAlertEpisodes")
+    if candidate_episode_value is None and not strict_contract:
+        # Backward-compatible support for old callers.  New backtest payloads
+        # always carry strict metadata and therefore cannot take this fallback.
+        candidate_episode_value = candidate.get("oosAlertDays")
+    candidate_oos_episodes = int(optional_float(candidate_episode_value) or 0)
+    production_oos_precision = optional_float(production.get("oosPrecision"))
+    candidate_oos_precision = optional_float(candidate.get("oosPrecision"))
+    production_oos_lift = optional_float(production.get("oosLiftVsBaseRate"))
+    candidate_oos_lift = optional_float(candidate.get("oosLiftVsBaseRate"))
+    production_oos_false = optional_float(production.get("oosFalsePositives"))
+    candidate_oos_false = optional_float(candidate.get("oosFalsePositives"))
+    if candidate_oos_episodes < 5 or candidate_oos_precision is None or candidate_oos_lift is None:
+        return {
+            "verdict": "insufficientEvidence",
+            "verdictCn": "证据不足",
+            "recommendedAction": "retainProduction",
+            "comparisonContract": comparison_contract,
+            "summary": "标准RMS候选的独立OOS告警episode不足5个或指标不可用,暂不切换生产口径。",
         }
     precision_improved = production_oos_precision is None or candidate_oos_precision >= production_oos_precision + 2.0
     lift_not_worse = production_oos_lift is None or candidate_oos_lift >= production_oos_lift
-    full_not_worse = production_full_precision is None or candidate_full_precision is not None and candidate_full_precision >= production_full_precision - 2.0
     false_not_worse = production_oos_false is None or candidate_oos_false is not None and candidate_oos_false <= production_oos_false
-    if precision_improved and lift_not_worse and full_not_worse and false_not_worse:
+    if precision_improved and lift_not_worse and false_not_worse:
         return {
             "verdict": "candidatePromising",
             "verdictCn": "候选更优",
             "recommendedAction": "keepShadowTesting",
-            "summary": "标准RMS候选改善OOS精确率且未明显损害完整样本表现,继续影子验证后再考虑切换。",
+            "comparisonContract": comparison_contract,
+            "summary": "标准RMS候选在同一purged OOS的独立告警episode上改善精确率且未增加误报; 完整样本仅作描述,继续影子验证后再考虑切换。",
         }
     return {
         "verdict": "retainLegacy",
         "verdictCn": "保留现口径",
         "recommendedAction": "retainProduction",
+        "comparisonContract": comparison_contract,
         "summary": "标准RMS候选未同时改善OOS精确率、lift与误报,继续保留当前算术平均口径。",
     }
 
@@ -2195,20 +2735,31 @@ def equity_metric_delta(candidate: Any, production: Any) -> float | None:
 def equity_forward_return_pct(bars: list[MarketDailyBar], index: int, days: int) -> float | None:
     if days < 1 or index < 0 or index + days >= len(bars):
         return None
+    execution_index = index + 1
     end_index = index + days
-    if bars[index].close <= 0:
+    if bars[execution_index].open <= 0:
         return None
-    return pct_metric(bars[end_index].close / bars[index].close - 1)
+    return pct_metric(bars[end_index].close / bars[execution_index].open - 1)
 
 
 def equity_forward_max_drawdown_pct(bars: list[MarketDailyBar], index: int, days: int) -> float | None:
-    if days < 1 or index < 0 or index + days >= len(bars) or bars[index].close <= 0:
+    """Maximum adverse excursion from the executable next-session open.
+
+    This is deliberately not a rolling peak-to-trough drawdown: the risk-control
+    question is how far the tradable position moves against the execution price
+    during the horizon.  Public metadata keeps that distinction explicit while
+    the legacy ``maxDrawdown*`` field names remain stable for consumers.
+    """
+    if days < 1 or index < 0 or index + days >= len(bars):
+        return None
+    execution_index = index + 1
+    if bars[execution_index].open <= 0:
         return None
     end_index = index + days
-    future_lows = [bar.low for bar in bars[index + 1: end_index + 1] if bar.low > 0]
+    future_lows = [bar.low for bar in bars[execution_index: end_index + 1] if bar.low > 0]
     if not future_lows:
         return None
-    return pct_metric(min(future_lows) / bars[index].close - 1)
+    return pct_metric(min(future_lows) / bars[execution_index].open - 1)
 
 
 def equity_forward_drawdown_lead_days(
@@ -2217,11 +2768,14 @@ def equity_forward_drawdown_lead_days(
     days: int,
     drawdown_threshold_pct: float,
 ) -> int | None:
-    if days < 1 or index < 0 or index + days >= len(bars) or bars[index].close <= 0:
+    if days < 1 or index < 0 or index + days >= len(bars):
+        return None
+    execution_index = index + 1
+    if bars[execution_index].open <= 0:
         return None
     end_index = index + days
-    for lead_days, bar in enumerate(bars[index + 1: end_index + 1], start=1):
-        if bar.low > 0 and pct_metric(bar.low / bars[index].close - 1) <= drawdown_threshold_pct:
+    for lead_days, bar in enumerate(bars[execution_index: end_index + 1], start=1):
+        if bar.low > 0 and pct_metric(bar.low / bars[execution_index].open - 1) <= drawdown_threshold_pct:
             return lead_days
     return None
 
@@ -2242,6 +2796,10 @@ def equity_backtest_bucket(
         "labelCn": label_cn,
         "scoreRange": f"{low:.0f}-{min(high, 100.0):.0f}",
         "count": len(members),
+        "sampleSize1d": sum(1 for row in members if optional_float(row.get("forward1d")) is not None),
+        "sampleSize5d": sum(1 for row in members if optional_float(row.get("maxDrawdown5d")) is not None),
+        "sampleSize10d": len(members_10d),
+        "sampleSize15d": len(members_15d),
         "avgScore": round(equity_average_metric(members, "score"), 1) if members else None,
         "avgForward1d": equity_average_metric(members, "forward1d"),
         "avgForward5d": equity_average_metric(members, "forward5d"),
@@ -2288,7 +2846,7 @@ def equity_backtest_threshold_test(
         "threshold": threshold,
         "horizon": horizon,
         "rule": f"score >= {threshold}",
-        "event": f"maxDrawdown{horizon}d <= {drawdown_threshold_pct:.1f}%",
+        "event": f"maximum adverse excursion (legacy field maxDrawdown{horizon}d) <= {drawdown_threshold_pct:.1f}%",
         "sampleSize": len(eligible_rows),
         "alertDays": len(alert_rows),
         "drawdownEvents": len(event_rows),
@@ -2355,6 +2913,20 @@ def equity_backtest_tiered_threshold_tests(horizon_tests: list[dict[str, Any]], 
     return tiered
 
 
+def equity_threshold_independent_alert_count(row: dict[str, Any]) -> int:
+    clustered = optional_float(row.get("independentAlertClusters"))
+    if clustered is not None:
+        return max(0, int(clustered))
+    return max(0, int(optional_float(row.get("alertDays")) or 0))
+
+
+def equity_threshold_validation_precision(row: dict[str, Any]) -> float | None:
+    clustered = optional_float(row.get("clusterPrecision"))
+    if clustered is not None:
+        return clustered
+    return optional_float(row.get("precision"))
+
+
 def equity_recommended_caution_threshold(calibration_grid: list[dict[str, Any]]) -> dict[str, Any]:
     sample_size = max((int(optional_float(row.get("sampleSize")) or 0) for row in calibration_grid), default=0)
     minimum_alert_days = min(10, max(3, sample_size // 100))
@@ -2362,19 +2934,24 @@ def equity_recommended_caution_threshold(calibration_grid: list[dict[str, Any]])
         row
         for row in calibration_grid
         if 55 <= int(row.get("threshold") or 0) <= 70
-        and (optional_float(row.get("alertDays")) or 0) >= minimum_alert_days
+        and equity_threshold_independent_alert_count(row) >= minimum_alert_days
     ]
     if not candidates:
         return {
             "available": False,
-            "reason": f"No calibration threshold had the required {minimum_alert_days} alert observations.",
+            "reason": f"No calibration threshold had the required {minimum_alert_days} independent alert episodes.",
             "minimumPrecision": 50.0,
             "minimumAlertDays": minimum_alert_days,
+            "minimumIndependentAlertClusters": minimum_alert_days,
         }
     base_rate = max(optional_float(row.get("baseRate")) or 0.0 for row in candidates)
     required_precision = max(50.0, base_rate + 5.0)
     min_precision = min(100.0, required_precision)
-    qualifying = [row for row in candidates if (optional_float(row.get("precision")) or 0.0) >= required_precision]
+    qualifying = [
+        row
+        for row in candidates
+        if (equity_threshold_validation_precision(row) or 0.0) >= required_precision
+    ]
     if not qualifying:
         return {
             "available": False,
@@ -2382,11 +2959,12 @@ def equity_recommended_caution_threshold(calibration_grid: list[dict[str, Any]])
             "minimumPrecision": round(min_precision, 1),
             "requiredPrecisionUncapped": round(required_precision, 1),
             "minimumAlertDays": minimum_alert_days,
+            "minimumIndependentAlertClusters": minimum_alert_days,
         }
 
     def calibration_score(row: dict[str, Any]) -> tuple[float, float, float]:
         recall = optional_float(row.get("recall")) or 0.0
-        precision = optional_float(row.get("precision")) or 0.0
+        precision = equity_threshold_validation_precision(row) or 0.0
         threshold = optional_float(row.get("threshold")) or 0.0
         return (recall, precision, threshold)
 
@@ -2400,6 +2978,12 @@ def equity_recommended_caution_threshold(calibration_grid: list[dict[str, Any]])
             "useCase": "推荐观察层; 在保持基础精确率约束下尽量提高回撤覆盖率。",
             "minimumPrecision": round(min_precision, 1),
             "minimumAlertDays": minimum_alert_days,
+            "minimumIndependentAlertClusters": minimum_alert_days,
+            "selectionPrecisionMetric": (
+                "independentAlertClusterPrecision"
+                if optional_float(selected.get("clusterPrecision")) is not None
+                else "alertDayPrecision"
+            ),
         }
     )
     return selected
@@ -2411,7 +2995,7 @@ def equity_high_precision_threshold(precision_grid: list[dict[str, Any]]) -> dic
     candidates = [
         row
         for row in precision_grid
-        if (optional_float(row.get("alertDays")) or 0.0) >= minimum_alert_days
+        if equity_threshold_independent_alert_count(row) >= minimum_alert_days
     ]
     if not candidates:
         return {
@@ -2419,11 +3003,16 @@ def equity_high_precision_threshold(precision_grid: list[dict[str, Any]]) -> dic
             "reason": "No high-precision calibration threshold had enough alert observations.",
             "minimumPrecision": 75.0,
             "minimumAlertDays": minimum_alert_days,
+            "minimumIndependentAlertClusters": minimum_alert_days,
         }
     base_rate = max(optional_float(row.get("baseRate")) or 0.0 for row in candidates)
     required_precision = max(75.0, base_rate + 25.0)
     min_precision = min(100.0, required_precision)
-    qualifying = [row for row in candidates if (optional_float(row.get("precision")) or 0.0) >= required_precision]
+    qualifying = [
+        row
+        for row in candidates
+        if (equity_threshold_validation_precision(row) or 0.0) >= required_precision
+    ]
     if not qualifying:
         return {
             "available": False,
@@ -2431,10 +3020,11 @@ def equity_high_precision_threshold(precision_grid: list[dict[str, Any]]) -> dic
             "minimumPrecision": round(min_precision, 1),
             "requiredPrecisionUncapped": round(required_precision, 1),
             "minimumAlertDays": minimum_alert_days,
+            "minimumIndependentAlertClusters": minimum_alert_days,
         }
 
     def precision_score(row: dict[str, Any]) -> tuple[float, float, float, float]:
-        precision = optional_float(row.get("precision")) or 0.0
+        precision = equity_threshold_validation_precision(row) or 0.0
         recall = optional_float(row.get("recall")) or 0.0
         alert_days = optional_float(row.get("alertDays")) or 0.0
         threshold = optional_float(row.get("threshold")) or 0.0
@@ -2450,6 +3040,12 @@ def equity_high_precision_threshold(precision_grid: list[dict[str, Any]]) -> dic
             "useCase": "更偏执行层的高置信降风险阈值; 牺牲覆盖率来提高历史精确率。",
             "minimumPrecision": round(min_precision, 1),
             "minimumAlertDays": minimum_alert_days,
+            "minimumIndependentAlertClusters": minimum_alert_days,
+            "selectionPrecisionMetric": (
+                "independentAlertClusterPrecision"
+                if optional_float(selected.get("clusterPrecision")) is not None
+                else "alertDayPrecision"
+            ),
         }
     )
     return selected
@@ -2463,6 +3059,71 @@ def equity_descriptive_test_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def equity_backtest_threshold_test_with_clusters(
+    threshold: int,
+    observations: list[dict[str, Any]],
+    drawdown_threshold_pct: float,
+    *,
+    horizon: int,
+    sample_role: str,
+    production_use: bool = False,
+) -> dict[str, Any]:
+    result = equity_backtest_threshold_test(
+        threshold,
+        observations,
+        drawdown_threshold_pct,
+        horizon=horizon,
+    )
+    cluster = equity_backtest_alert_cluster_test(
+        threshold,
+        observations,
+        drawdown_threshold_pct,
+        horizon=horizon,
+        sample_role=sample_role,
+        production_use=production_use,
+    )
+    return {
+        **result,
+        "sampleRole": sample_role,
+        "productionUse": production_use,
+        "independentAlertClusters": cluster.get("clusterCount"),
+        "independentHitClusters": cluster.get("hitClusters"),
+        "independentFalseClusters": cluster.get("falseClusters"),
+        "clusterPrecision": cluster.get("precision"),
+        "clusterPrecisionWilsonLower95": cluster.get("precisionWilsonLower95"),
+        "clusterAvgLeadDays": cluster.get("avgLeadDays"),
+        "clusterDedupeRule": cluster.get("dedupeRule"),
+    }
+
+
+def equity_validation_sample_fingerprint(
+    observations: list[dict[str, Any]],
+    *,
+    horizon: int,
+) -> str:
+    """Hash OOS signal dates and labels without including candidate scores."""
+    drawdown_key = f"maxDrawdown{horizon}d"
+    event_key = f"drawdownEvent{horizon}d"
+    label_start_key = f"labelStartDate{horizon}d"
+    label_end_key = f"labelEndDate{horizon}d"
+    canonical_rows: list[str] = []
+    for row in sorted(observations, key=lambda item: str(item.get("date") or "")):
+        drawdown = optional_float(row.get(drawdown_key))
+        canonical_rows.append(
+            "|".join(
+                (
+                    str(row.get("date") or ""),
+                    str(row.get("executionDate") or ""),
+                    str(row.get(label_start_key) or ""),
+                    str(row.get(label_end_key) or ""),
+                    "" if drawdown is None else f"{drawdown:.8f}",
+                    str(row.get(event_key)),
+                )
+            )
+        )
+    return hashlib.sha256("\n".join(canonical_rows).encode("utf-8")).hexdigest()
+
+
 def equity_walk_forward_partition(
     observations: list[dict[str, Any]],
     *,
@@ -2470,9 +3131,12 @@ def equity_walk_forward_partition(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], int, str]:
     """Create a chronological 70/30 split with a label-end-date purge.
 
-    Production observations carry the exact trading-session label end.  Older
-    callers without that metadata use the conservative legacy fallback of
-    dropping ``horizon`` training observations.
+    Scores are known after their signal-date close and execute at the next
+    session open.  A training label may therefore remain only when its final
+    outcome session ends strictly before the first OOS signal date; equality
+    would reuse the OOS feature day's low/close in calibration.  Older callers
+    without exact metadata use the conservative fallback of dropping
+    ``horizon`` training observations.
     """
     drawdown_key = f"maxDrawdown{horizon}d"
     eligible = sorted(
@@ -2568,12 +3232,24 @@ def equity_walk_forward_backtest(
         }
     thresholds = (50, 55, 60, 65, 70, 75)
     in_grid = [
-        equity_backtest_threshold_test(threshold, in_sample, drawdown_threshold_pct, horizon=horizon)
+        equity_backtest_threshold_test_with_clusters(
+            threshold,
+            in_sample,
+            drawdown_threshold_pct,
+            horizon=horizon,
+            sample_role="purged70PctCalibration",
+        )
         for threshold in thresholds
     ]
     precision_thresholds = (75, 78, 80, 82, 85, 88, 90)
     in_precision_grid = [
-        equity_backtest_threshold_test(threshold, in_sample, drawdown_threshold_pct, horizon=horizon)
+        equity_backtest_threshold_test_with_clusters(
+            threshold,
+            in_sample,
+            drawdown_threshold_pct,
+            horizon=horizon,
+            sample_role="purged70PctCalibration",
+        )
         for threshold in precision_thresholds
     ]
     selected = equity_recommended_caution_threshold(in_grid)
@@ -2586,7 +3262,14 @@ def equity_walk_forward_backtest(
     )
     tested_thresholds = sorted({75, *([selected_threshold] if selected_threshold is not None else []), *([selected_high_threshold] if selected_high_threshold is not None else [])})
     out_grid = [
-        equity_backtest_threshold_test(threshold, out_sample, drawdown_threshold_pct, horizon=horizon)
+        equity_backtest_threshold_test_with_clusters(
+            threshold,
+            out_sample,
+            drawdown_threshold_pct,
+            horizon=horizon,
+            sample_role="walkForwardOos",
+            production_use=threshold == 75,
+        )
         for threshold in tested_thresholds
     ]
     selected_out = next(
@@ -2603,6 +3286,7 @@ def equity_walk_forward_backtest(
         evaluation: dict[str, Any],
         *,
         use_case: str,
+        minimum_uplift_pct: float,
     ) -> dict[str, Any]:
         if not calibration.get("available"):
             return {
@@ -2613,14 +3297,40 @@ def equity_walk_forward_backtest(
                 "useCase": use_case,
                 "productionUse": False,
             }
-        oos_alert_days = int(optional_float(evaluation.get("alertDays")) or 0)
-        if oos_alert_days < 3 or optional_float(evaluation.get("precision")) is None:
+        independent_alerts = equity_threshold_independent_alert_count(evaluation)
+        oos_precision = equity_threshold_validation_precision(evaluation)
+        oos_precision_lower_bound = optional_float(evaluation.get("clusterPrecisionWilsonLower95"))
+        oos_base_rate = optional_float(evaluation.get("baseRate"))
+        if independent_alerts < 3 or oos_precision is None or oos_precision_lower_bound is None:
             return {
                 "available": False,
                 "threshold": calibration.get("threshold"),
-                "reason": "Calibration selected a threshold, but fewer than 3 OOS alerts were available for validation.",
+                "reason": "Calibration selected a threshold, but fewer than 3 independent OOS alert episodes were available for validation.",
                 "minimumPrecision": calibration.get("minimumPrecision", 75.0),
                 "minimumOosAlertDays": 3,
+                "minimumIndependentOosAlertClusters": 3,
+                "calibration": calibration,
+                "oosEvaluation": evaluation,
+                "useCase": use_case,
+                "productionUse": False,
+            }
+        required_oos_precision = max(
+            optional_float(calibration.get("minimumPrecision")) or 0.0,
+            (oos_base_rate + minimum_uplift_pct) if oos_base_rate is not None else 0.0,
+        )
+        if oos_precision_lower_bound < required_oos_precision:
+            return {
+                "available": False,
+                "threshold": calibration.get("threshold"),
+                "reason": (
+                    f"Selected threshold failed OOS precision confidence gate: 95% Wilson lower bound "
+                    f"{oos_precision_lower_bound:.1f}% < "
+                    f"required {required_oos_precision:.1f}%."
+                ),
+                "minimumPrecision": round(required_oos_precision, 1),
+                "observedPrecision": round(oos_precision, 1),
+                "precisionWilsonLower95": round(oos_precision_lower_bound, 1),
+                "minimumIndependentOosAlertClusters": 3,
                 "calibration": calibration,
                 "oosEvaluation": evaluation,
                 "useCase": use_case,
@@ -2635,20 +3345,69 @@ def equity_walk_forward_backtest(
             "useCase": use_case,
             "productionUse": False,
             "minimumOosAlertDays": 3,
+            "minimumIndependentOosAlertClusters": 3,
+            "precisionWilsonLower95": round(oos_precision_lower_bound, 1),
+            "validatedPrecisionMetric": (
+                "independentAlertClusterPrecision"
+                if optional_float(evaluation.get("clusterPrecision")) is not None
+                else "alertDayPrecision"
+            ),
         }
 
     caution_recommendation = recommendation_payload(
         selected,
         selected_out,
         use_case="校准段选阈值、OOS只评估一次; 研究审计用途,不动态改写生产分档。",
+        minimum_uplift_pct=5.0,
     )
     high_precision_recommendation = recommendation_payload(
         selected_high_precision,
         selected_high_out,
         use_case="校准段选高精度阈值、OOS只评估一次; 研究审计用途,不动态改写生产分档。",
+        minimum_uplift_pct=25.0,
     )
+
+    production_test = next(
+        (row for row in out_grid if row.get("productionUse") is True),
+        None,
+    )
+    if production_test is not None:
+        production_precision = equity_threshold_validation_precision(production_test)
+        production_precision_lower_bound = optional_float(production_test.get("clusterPrecisionWilsonLower95"))
+        production_base_rate = optional_float(production_test.get("baseRate"))
+        production_clusters = equity_threshold_independent_alert_count(production_test)
+        production_sample = int(optional_float(production_test.get("sampleSize")) or 0)
+        production_validated = bool(
+            production_sample >= 30
+            and production_clusters >= 3
+            and production_precision is not None
+            and production_precision_lower_bound is not None
+            and production_base_rate is not None
+            and production_precision_lower_bound >= production_base_rate + 5.0
+        )
+        production_test["oosValidated"] = production_validated
+        production_test["validationStatus"] = "validated" if production_validated else "research-only"
+        production_test["minimumOosSampleSize"] = 30
+        production_test["minimumIndependentOosAlertClusters"] = 3
+        production_test["minimumPrecisionUpliftPct"] = 5.0
+        production_test["precisionConfidenceMethod"] = "two-sided 95% Wilson lower bound over independent alert episodes"
+        if production_validated:
+            production_test["validationReason"] = (
+                "Pre-registered threshold passed OOS sample, independent-alert, and precision-uplift gates."
+            )
+        elif production_sample < 30:
+            production_test["validationReason"] = "OOS sample has fewer than 30 complete labels."
+        elif production_clusters < 3:
+            production_test["validationReason"] = "OOS has fewer than 3 independent alert episodes after label-window de-duplication."
+        else:
+            production_test["validationReason"] = "OOS independent-alert precision 95% Wilson lower bound did not exceed the event base rate by 5 percentage points."
     if selected_threshold is None:
         summary = "校准段没有阈值达到最低精确率门槛; OOS仅保留预注册score>=75诊断,不发布推荐阈值。"
+    elif not caution_recommendation.get("available"):
+        summary = (
+            f"IS选择阈值{selected_threshold},但OOS未通过独立告警簇/精确率门槛; "
+            "该阈值保持研究用途,不绑定生产动作。"
+        )
     else:
         summary = (
             f"IS选择阈值{selected_threshold}; OOS告警{selected_out.get('alertDays', 0)}次, "
@@ -2657,11 +3416,21 @@ def equity_walk_forward_backtest(
         )
     return {
         "available": True,
-        "method": f"70/30 chronological walk-forward with exact {horizon}-session label-end purging before the OOS boundary; choose thresholds on purged training data and evaluate only selected thresholds plus the pre-registered score>=75 rule on the final 30%.",
+        "validationDesign": "singlePurgedChronologicalHoldout",
+        "walkForwardFoldCount": 1,
+        "method": f"70/30 chronological purged holdout with exact {horizon}-session label-end purging before the OOS boundary; choose thresholds on purged training data and evaluate only selected thresholds plus the pre-registered score>=75 rule on the final 30%. Overlapping OOS alerts are collapsed into independent label-window episodes.",
         "splitDate": out_sample[0]["date"] if out_sample else None,
+        "oosObservationFingerprint": equity_validation_sample_fingerprint(
+            out_sample,
+            horizon=horizon,
+        ),
         "purgedTrainingRows": purge_count,
         "purgeRule": purge_rule,
+        "embargoSessions": 0,
+        "embargoRule": "No additional post-split embargo is required for a single final chronological holdout after exact training-label purge; overlapping OOS labels are controlled by independent alert episodes.",
         "thresholdSelectionAvailable": selected_threshold is not None,
+        "thresholdRecommendationAvailable": caution_recommendation.get("available") is True,
+        "productionThresholdValidated": bool(production_test and production_test.get("oosValidated") is True),
         "selectedThreshold": selected_threshold,
         "selectedHighPrecisionThreshold": selected_high_threshold,
         "recommendedCautionThreshold": caution_recommendation,
@@ -2680,7 +3449,7 @@ def equity_walk_forward_backtest(
             "selectedThresholdTest": selected_out,
             "selectedHighPrecisionThresholdTest": selected_high_out,
         },
-        "thresholdTests": [{**row, "sampleRole": "walkForwardOos", "productionUse": int(row.get("threshold") or -1) == 75} for row in out_grid],
+        "thresholdTests": out_grid,
         "summary": summary,
     }
 
@@ -2775,7 +3544,7 @@ def equity_backtest_component_diagnostics(
                 "sampleRole": sample_role,
                 "productionUse": bool(production_use),
                 "independentHoldout": False,
-                "event": f"maxDrawdown{horizon}d <= {drawdown_threshold_pct:.1f}%",
+                "event": f"maximum adverse excursion (legacy field maxDrawdown{horizon}d) <= {drawdown_threshold_pct:.1f}%",
                 "sampleSize": len(rows),
                 "alertDays": len(high_rows),
                 "drawdownEvents": len(event_rows),
@@ -2810,19 +3579,44 @@ def equity_backtest_alert_cluster_test(
     drawdown_threshold_pct: float,
     *,
     horizon: int,
+    sample_role: str = "descriptiveFullSample",
+    production_use: bool = False,
 ) -> dict[str, Any]:
     event_key = f"drawdownEvent{horizon}d"
     drawdown_key = f"maxDrawdown{horizon}d"
     lead_key = f"drawdownLeadDays{horizon}d"
+    label_end_key = f"labelEndDate{horizon}d"
+    eligible_rows = sorted(
+        [row for row in observations if optional_float(row.get(drawdown_key)) is not None],
+        key=lambda row: str(row.get("date") or ""),
+    )
+    alert_rows = [row for row in eligible_rows if float(row["score"]) >= threshold]
     clusters: list[list[dict[str, Any]]] = []
     active: list[dict[str, Any]] = []
-    eligible_rows = [row for row in observations if optional_float(row.get(drawdown_key)) is not None]
-    for row in eligible_rows:
-        if float(row["score"]) >= threshold:
-            active.append(row)
-        elif active:
-            clusters.append(active)
-            active = []
+    active_end: date | None = None
+    fallback_start_position = -10_000
+    row_positions = {id(row): index for index, row in enumerate(eligible_rows)}
+    for row in alert_rows:
+        try:
+            row_date = date.fromisoformat(str(row.get("date") or ""))
+        except ValueError:
+            row_date = None
+        if active:
+            if active_end is not None and row_date is not None:
+                same_episode = row_date <= active_end
+            else:
+                same_episode = row_positions[id(row)] - fallback_start_position <= horizon
+            if not same_episode:
+                clusters.append(active)
+                active = []
+                active_end = None
+        if not active:
+            fallback_start_position = row_positions[id(row)]
+            try:
+                active_end = date.fromisoformat(str(row.get(label_end_key) or ""))
+            except ValueError:
+                active_end = None
+        active.append(row)
     if active:
         clusters.append(active)
     cluster_rows = []
@@ -2834,6 +3628,8 @@ def equity_backtest_alert_cluster_test(
                 "start": first.get("date"),
                 "end": cluster[-1].get("date"),
                 "days": len(cluster),
+                "alertDays": len(cluster),
+                "labelWindowEnd": first.get(label_end_key),
                 "maxScore": max(float(row["score"]) for row in cluster),
                 "hit": hit,
                 f"maxDrawdown{horizon}d": first.get(drawdown_key),
@@ -2847,9 +3643,10 @@ def equity_backtest_alert_cluster_test(
     return {
         "threshold": threshold,
         "horizon": horizon,
-        "sampleRole": "descriptiveFullSample",
-        "productionUse": False,
-        "event": f"first alert in cluster maxDrawdown{horizon}d <= {drawdown_threshold_pct:.1f}%",
+        "sampleRole": sample_role,
+        "productionUse": production_use,
+        "event": f"first alert in cluster: maximum adverse excursion (legacy field maxDrawdown{horizon}d) <= {drawdown_threshold_pct:.1f}%",
+        "dedupeRule": f"Start an independent episode at the first alert and absorb later alerts through its labelEndDate{horizon}d; evaluate the outcome only from the first alert.",
         "clusterCount": len(cluster_rows),
         "hitClusters": hit_clusters,
         "falseClusters": len(cluster_rows) - hit_clusters,
@@ -2857,6 +3654,7 @@ def equity_backtest_alert_cluster_test(
         "maxFalseClusterStart": max_false_cluster.get("start"),
         "maxFalseClusterEnd": max_false_cluster.get("end"),
         "precision": equity_rate_pct(hit_clusters, len(cluster_rows)),
+        "precisionWilsonLower95": equity_wilson_lower_bound_pct(hit_clusters, len(cluster_rows)),
         "avgLeadDays": round(sum(hit_leads) / len(hit_leads), 1) if hit_leads else None,
         "clusters": cluster_rows[:8],
     }
@@ -2877,9 +3675,9 @@ def equity_backtest_regression_tests(observations: list[dict[str, Any]]) -> list
             observations,
             key="maxDrawdown10d",
             target="maxDrawdown10d",
-            label="10D max drawdown",
+            label="10D maximum adverse excursion from execution open",
             unit="pct",
-            summary_template="score每升10分,未来10日最大回撤变化{delta}个百分点",
+            summary_template="score每升10分,未来10日最大不利波动变化{delta}个百分点",
             hac_lag=9,
         ),
         equity_backtest_linear_probability_regression(observations, horizon=10),
@@ -2887,9 +3685,9 @@ def equity_backtest_regression_tests(observations: list[dict[str, Any]]) -> list
             observations,
             key="maxDrawdown15d",
             target="maxDrawdown15d",
-            label="15D max drawdown",
+            label="15D maximum adverse excursion from execution open",
             unit="pct",
-            summary_template="score每升10分,未来15日最大回撤变化{delta}个百分点",
+            summary_template="score每升10分,未来15日最大不利波动变化{delta}个百分点",
             hac_lag=14,
         ),
         equity_backtest_linear_probability_regression(observations, horizon=15),
@@ -3011,6 +3809,10 @@ def equity_backtest_window_payload(row: dict[str, Any]) -> dict[str, Any]:
         "regime": str(row.get("regime") or ""),
         "regimeCn": str(row.get("regimeCn") or ""),
         "spyClose": row.get("spyClose"),
+        "decisionPoint": row.get("decisionPoint"),
+        "executionPolicy": row.get("executionPolicy"),
+        "executionDate": row.get("executionDate"),
+        "executionOpen": row.get("executionOpen"),
         "forward1d": row.get("forward1d"),
         "forward5d": row.get("forward5d"),
         "forward10d": row.get("forward10d"),
@@ -3019,6 +3821,10 @@ def equity_backtest_window_payload(row: dict[str, Any]) -> dict[str, Any]:
         "maxDrawdown15d": row.get("maxDrawdown15d"),
         "drawdownLeadDays10d": row.get("drawdownLeadDays10d"),
         "drawdownLeadDays15d": row.get("drawdownLeadDays15d"),
+        "labelStartDate10d": row.get("labelStartDate10d"),
+        "labelEndDate10d": row.get("labelEndDate10d"),
+        "labelStartDate15d": row.get("labelStartDate15d"),
+        "labelEndDate15d": row.get("labelEndDate15d"),
     }
 
 
@@ -3050,6 +3856,26 @@ def equity_rate_pct(numerator: int, denominator: int) -> float | None:
     if denominator <= 0:
         return None
     return round(100 * numerator / denominator, 1)
+
+
+def equity_wilson_lower_bound_pct(
+    successes: int,
+    observations: int,
+    *,
+    z_score: float = 1.959963984540054,
+) -> float | None:
+    """Two-sided 95% Wilson lower bound for a binomial success rate."""
+    if observations <= 0 or successes < 0 or successes > observations or z_score <= 0:
+        return None
+    probability = successes / observations
+    z_squared = z_score * z_score
+    denominator = 1.0 + z_squared / observations
+    center = probability + z_squared / (2.0 * observations)
+    margin = z_score * math.sqrt(
+        probability * (1.0 - probability) / observations
+        + z_squared / (4.0 * observations * observations)
+    )
+    return round(100.0 * (center - margin) / denominator, 1)
 
 
 def equity_risk_data_coverage(
@@ -3165,11 +3991,16 @@ def adaptive_parkinson_target_vol(
     lookback: int = 65,
     estimator: str = PARKINSON_ESTIMATOR_LEGACY_MEAN,
 ) -> float | None:
+    if window <= 0 or lookback <= 0:
+        return None
     index = bar_index_at_or_before(bars, target)
     if index is None:
         return None
     history = bars[: index + 1]
-    if len(history) < window + 5:
+    # ``lookback`` denotes the number of complete rolling volatility estimates,
+    # not merely a maximum history cap.  Fewer observations make the discrete
+    # 8/10/12/14/16% target unstable and silently change the production scale.
+    if len(history) < window + lookback - 1:
         return None
     start_index = max(window - 1, len(history) - lookback)
     daily_vols = [parkinson_daily_volatility(bar) for bar in history]

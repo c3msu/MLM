@@ -135,7 +135,7 @@ class FrontendCssTests(unittest.TestCase):
         app_js = FRONTEND_JS
         css = (PROJECT_ROOT / "styles.css").read_text(encoding="utf-8")
 
-        for element_id, label in (("resetState", "恢复默认计分"), ("exportState", "导出当前页面HTML")):
+        for element_id, label in (("resetState", "重置情景计分"), ("exportState", "导出当前页面HTML")):
             button = re.search(rf'<button id="{element_id}"[^>]*>', html)
             self.assertIsNotNone(button)
             self.assertIn(f'aria-label="{label}"', button.group(0))
@@ -642,6 +642,66 @@ class FrontendCssTests(unittest.TestCase):
         self.assertIn(".decision-snapshot-cards", css)
         self.assertIn(".decision-snapshot-read", css)
         self.assertIn(".decision-detail-list", css)
+
+    def test_live_stances_use_backend_conclusion_audit_and_scenario_state_uses_factor_ids(self):
+        app_js = FRONTEND_JS
+
+        hero = app_js[app_js.index("function renderHero()") : app_js.index("function renderConclusionAudit()")]
+        audit = app_js[app_js.index("function renderConclusionAudit()") : app_js.index("function decisionSnapshotCard")]
+        curve_snapshot = app_js[
+            app_js.index("function renderCurveDecisionSnapshot()") : app_js.index("function renderCurve()")
+        ]
+        self.assertIn('liveConclusionPresentation("duration")', hero)
+        self.assertIn('liveConclusionPresentation("curve")', hero)
+        self.assertNotIn("aggregates()", hero)
+        self.assertIn("const audit = liveConclusionAudit();", audit)
+        self.assertNotIn("aggregateDetails()", audit)
+        self.assertIn('liveConclusionPresentation("curve")', curve_snapshot)
+        self.assertNotIn("aggregates()", curve_snapshot)
+        self.assertIn("factorScoresById", app_js)
+        self.assertIn("groupWeightsById", app_js)
+        self.assertIn("function stableFactorId(group, factor)", app_js)
+        self.assertIn("data-factor-id=", app_js)
+        self.assertNotIn("scores: group.factors.map", app_js)
+        self.assertNotIn("savedGroup.scores?.[index]", app_js)
+
+    def test_curve_copy_is_derived_from_moves_and_belly_sign(self):
+        app_js = FRONTEND_JS
+        curve = app_js[app_js.index("function renderCurve()") : app_js.index("function drawCurveChart")]
+
+        self.assertIn("curveMetricRead(s2s10, twoYearDay, tenYearDay)", curve)
+        self.assertIn("curveMetricRead(s5s30, fiveYearDay, thirtyYearDay)", curve)
+        self.assertIn("bellyRelativeLabel(fly)", curve)
+        self.assertNotIn('t("curve.positiveBearSteepener")', curve)
+        self.assertNotIn('t("curve.longEndSteepening")', curve)
+        self.assertIn('if (fly > 2) return t("curve.bellyCheap")', app_js)
+        self.assertIn('if (fly < -2) return t("curve.bellyRich")', app_js)
+
+    def test_fed_path_fails_closed_to_qualitative_scenario(self):
+        html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
+        app_js = FRONTEND_JS
+        policy = app_js[app_js.index("function hasActionableFedProbabilities()") : app_js.index("function renderSupply()")]
+
+        self.assertIn("audit.actionable === true", policy)
+        self.assertIn("audit.probabilitiesAvailable === true", policy)
+        self.assertIn("state.fedPath.length > 0", policy)
+        self.assertIn('pathTitle.textContent = t("panel.qualitativeScenario")', policy)
+        self.assertIn('scenario.drivers.join(" · ")', policy)
+        self.assertIn("fedMeetingLabel(scenario.nextMeeting)", policy)
+        self.assertIn('id="fedPathTitle"', html)
+        self.assertIn('id="fedPathNote"', html)
+
+    def test_static_hero_and_policy_copy_do_not_assert_a_market_regime(self):
+        html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")
+        hero = html[html.index('<section id="summary"') : html.index('<section id="curve"')]
+        policy = html[html.index('<section id="policy"') : html.index('<section id="supply"')]
+
+        self.assertIn("实时结论", hero)
+        self.assertIn("情景模拟", hero)
+        self.assertNotIn("熊市变陡", hero)
+        self.assertNotIn("政策路径逆转", hero)
+        self.assertIn("定性情景", policy)
+        self.assertNotIn("远端加息尾部风险上升", policy)
 
     def test_remaining_research_sections_use_action_snapshots_and_fold_details(self):
         html = (PROJECT_ROOT / "index.html").read_text(encoding="utf-8")

@@ -14,6 +14,7 @@ class HealthCheckTests(unittest.TestCase):
                 "generatedAt": "2026-05-20T14:36:24+00:00",
                 "sourceCounts": {"ok": 36, "modeled": 1},
                 "errors": [],
+                "dashboardContract": {"valid": True, "scope": "full", "issues": []},
             }
 
         stdout = io.StringIO()
@@ -23,6 +24,45 @@ class HealthCheckTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("OK", stdout.getvalue())
         self.assertIn("ok=36", stdout.getvalue())
+
+    def test_main_degrades_when_service_omits_contract_health_audit(self):
+        def fetcher(url, timeout):
+            return {
+                "status": "ok",
+                "asOf": "2026-07-17",
+                "generatedAt": "2026-07-19T14:34:26+00:00",
+                "sourceCounts": {"ok": 84},
+                "errors": [],
+            }
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main([], fetcher=fetcher)
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("service reload required", stdout.getvalue())
+
+    def test_main_prints_dashboard_contract_failures(self):
+        def fetcher(url, timeout):
+            return {
+                "status": "degraded",
+                "asOf": "2026-07-17",
+                "generatedAt": "2026-07-19T14:34:26+00:00",
+                "sourceCounts": {"ok": 84},
+                "errors": [],
+                "dashboardContract": {
+                    "valid": False,
+                    "scope": "full",
+                    "issues": ["equity action contract is stale"],
+                },
+            }
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main([], fetcher=fetcher)
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("equity action contract is stale", stdout.getvalue())
 
     def test_main_returns_two_for_degraded_health_and_can_notify(self):
         notifications = []

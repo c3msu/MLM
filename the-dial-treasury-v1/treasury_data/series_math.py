@@ -104,18 +104,31 @@ def iter_asof_aligned_points(
         previous_date = primary_point.date
 
 
-def compute_tenor_realized_volatility(records: list[YieldCurveRecord], tenor: str, window: int = 20) -> float:
+def compute_tenor_realized_volatility(
+    records: list[YieldCurveRecord],
+    tenor: str,
+    window: int = 20,
+    *,
+    max_gap_days: int = 7,
+) -> float:
     if window < 2:
         raise ValueError("window must be at least 2")
+    if max_gap_days < 1:
+        raise ValueError("max_gap_days must be positive")
     ordered = clean_curve_records(records)
     changes_bp: list[float] = []
     for prior, current in zip(ordered, ordered[1:]):
         if (
-            tenor not in prior.values
+            (current.date - prior.date).days > max_gap_days
+            or tenor not in prior.values
             or tenor not in current.values
             or not math.isfinite(prior.values[tenor])
             or not math.isfinite(current.values[tenor])
         ):
+            # A long source outage makes the next observed move a multi-day
+            # change, not one daily return.  Start a new contiguous window so
+            # it cannot create a false annualized-volatility spike.
+            changes_bp.clear()
             continue
         changes_bp.append((current.values[tenor] - prior.values[tenor]) * 100)
     sample = changes_bp[-window:]
@@ -482,19 +495,29 @@ def treasury_curve_curvature_abs_points(records: list[YieldCurveRecord]) -> list
     return rows
 
 
-def curve_realized_volatility_points(records: list[YieldCurveRecord], tenor: str, *, window: int) -> list[SeriesPoint]:
+def curve_realized_volatility_points(
+    records: list[YieldCurveRecord],
+    tenor: str,
+    *,
+    window: int,
+    max_gap_days: int = 7,
+) -> list[SeriesPoint]:
     if window < 2:
         raise ValueError("window must be at least 2")
+    if max_gap_days < 1:
+        raise ValueError("max_gap_days must be positive")
     ordered = clean_curve_records(records)
     rows: list[SeriesPoint] = []
     rolling = RollingSampleVariance(window)
     for prior, current in zip(ordered, ordered[1:]):
         if (
-            tenor not in prior.values
+            (current.date - prior.date).days > max_gap_days
+            or tenor not in prior.values
             or tenor not in current.values
             or not math.isfinite(prior.values[tenor])
             or not math.isfinite(current.values[tenor])
         ):
+            rolling = RollingSampleVariance(window)
             continue
         rolling.append((current.values[tenor] - prior.values[tenor]) * 100)
         if rolling.count < window:
@@ -518,13 +541,23 @@ def onrrp_buffer_risk_points(series: TimeSeries | None, *, threshold_billions: f
     return rows
 
 
-def realized_volatility_points(series: TimeSeries | None, *, window: int = 63) -> list[SeriesPoint]:
+def realized_volatility_points(
+    series: TimeSeries | None,
+    *,
+    window: int = 63,
+    max_gap_days: int = 7,
+) -> list[SeriesPoint]:
     if not series or window < 2:
         return []
+    if max_gap_days < 1:
+        raise ValueError("max_gap_days must be positive")
     ordered = [point for point in clean_points(series.points) if point.value > 0]
     rows: list[SeriesPoint] = []
     rolling = RollingSampleVariance(window)
     for prior, current in zip(ordered, ordered[1:]):
+        if (current.date - prior.date).days > max_gap_days:
+            rolling = RollingSampleVariance(window)
+            continue
         rolling.append(math.log(current.value / prior.value))
         if rolling.count < window:
             continue
@@ -619,9 +652,19 @@ def funding_fragmentation_points(
     z_window: int = 252,
     smooth_window: int = 21,
     max_alignment_gap_days: int = 7,
+    robust_scale_floor_bp: float = 1.0,
 ) -> list[SeriesPoint]:
+    """Build cross-corridor fragmentation from prior-only robust baselines.
+
+    Each leg's robust z-score is measured against up to ``z_window`` *prior*
+    observations.  Including the current observation in its own median/MAD
+    baseline mechanically compresses precisely the shock this factor is meant
+    to detect.  The current row is added only after its score is computed.
+    """
     if not sofr or not obfr or not iorb or not rrp_award:
         return []
+    if robust_scale_floor_bp <= 0:
+        raise ValueError("robust_scale_floor_bp must be positive")
     legs: list[tuple[date, float, float, float]] = []
     for point, aligned in iter_asof_aligned_points(
         sofr.points,
@@ -643,17 +686,19 @@ def funding_fragmentation_points(
         )
     smoothed: list[SeriesPoint] = []
     rolling_leg_values: list[list[float]] = [[], [], []]
+    segment_legs: deque[tuple[date, float, float, float]] = deque()
     ema: float | None = None
     alpha = 2 / (smooth_window + 1)
-    for index, (point_date, *values) in enumerate(legs):
-        if z_window > 0:
-            for leg_index, value in enumerate(values):
-                insort(rolling_leg_values[leg_index], value)
-            if index >= z_window:
-                stale = legs[index - z_window]
-                for leg_index, stale_value in enumerate(stale[1:]):
-                    stale_position = bisect_left(rolling_leg_values[leg_index], stale_value)
-                    rolling_leg_values[leg_index].pop(stale_position)
+    previous_date: date | None = None
+    for point_date, *values in legs:
+        if previous_date is not None and (point_date - previous_date).days > max_alignment_gap_days:
+            # Fragmentation is an observation-count rolling statistic.  After
+            # a source outage, carrying the pre-outage robust z-score window
+            # and EMA into the new regime would make old data look current.
+            rolling_leg_values = [[], [], []]
+            segment_legs.clear()
+            ema = None
+        previous_date = point_date
         z_scores: list[float] = []
         for leg_index, value in enumerate(values):
             sample = rolling_leg_values[leg_index]
@@ -662,11 +707,25 @@ def funding_fragmentation_points(
                 continue
             leg_median = median_from_sorted(sample)
             mad = median_absolute_deviation_from_sorted(sample, leg_median)
-            z_scores.append(0.0 if mad == 0 else (value - leg_median) / (mad * 1.4826))
+            # Corridor rates are normally quoted in one-basis-point
+            # increments and can remain pinned long enough for MAD to be zero.
+            # A 1bp scale floor detects the eventual break without exploding
+            # sub-resolution noise into an unbounded z-score.
+            robust_scale = max(mad * 1.4826, robust_scale_floor_bp)
+            z_scores.append((value - leg_median) / robust_scale)
         mean_z = sum(z_scores) / len(z_scores)
         dispersion = math.sqrt(sum((value - mean_z) ** 2 for value in z_scores) / len(z_scores))
         ema = dispersion if ema is None else alpha * dispersion + (1 - alpha) * ema
         smoothed.append(SeriesPoint(point_date, ema))
+        if z_window > 0:
+            segment_legs.append((point_date, *values))
+            for leg_index, value in enumerate(values):
+                insort(rolling_leg_values[leg_index], value)
+            if len(segment_legs) > z_window:
+                stale = segment_legs.popleft()
+                for leg_index, stale_value in enumerate(stale[1:]):
+                    stale_position = bisect_left(rolling_leg_values[leg_index], stale_value)
+                    rolling_leg_values[leg_index].pop(stale_position)
     return smoothed
 
 

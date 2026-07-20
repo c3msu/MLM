@@ -916,6 +916,26 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertAlmostEqual(drivers["模型路径"]["contribution"], 0.4)
         self.assertIn("代理", audit["weightRecommendation"])
 
+    def test_build_conclusion_audit_counts_stale_sources_as_quality_warnings(self):
+        groups = [
+            {
+                "id": "g1",
+                "name": "货币政策",
+                "weight": 100,
+                "factors": [{"n": "政策因子", "score": 1, "curve": 0, "v": "中性"}],
+            }
+        ]
+
+        audit = build_conclusion_audit(
+            groups,
+            source_status=[{"name": "FRED DFF", "status": "stale", "latest": "2026-06-01"}],
+        )
+
+        self.assertEqual(audit["sourceWarningCount"], 1)
+        self.assertEqual(audit["sourceStaleCount"], 1)
+        self.assertNotEqual(audit["confidence"]["level"], "high")
+        self.assertIn("数据源警告", audit["weightRecommendation"])
+
     def test_build_dashboard_adds_bhadial_style_historical_percentiles(self):
         curve_records = [
             YieldCurveRecord(
@@ -1188,8 +1208,8 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertIn("reliabilityScore", macro_liquidity)
         self.assertIn("effectiveWeightCoveragePct", macro_liquidity)
         self.assertIn("Bhadial Conditions Score", macro_liquidity["method"])
-        self.assertIn("module weights", macro_liquidity["method"])
-        self.assertIn("EMA(5)", macro_liquidity["method"])
+        self.assertIn("fixed-weight 21-factor", macro_liquidity["method"])
+        self.assertIn("5 daily data-availability observations", macro_liquidity["method"])
         self.assertEqual(
             [module["name"] for module in macro_liquidity["modules"]],
             ["Liquidity", "Funding", "Treasury", "Rates", "Credit", "Risk", "External"],
@@ -1249,10 +1269,15 @@ class DashboardBuilderTests(unittest.TestCase):
                 item["name"]
                 for item in sorted(
                     [component for component in macro_liquidity["components"] if component["scoreEligible"]],
-                    key=lambda item: abs(item["contribution"]),
+                    key=lambda item: abs(item["headlineContribution"]),
                     reverse=True,
                 )[:5]
             ],
+        )
+        self.assertEqual(macro_liquidity["explanationContributionField"], "headlineContribution")
+        self.assertAlmostEqual(macro_liquidity["contributionAudit"]["factorResidual"], 0.0, places=5)
+        self.assertTrue(
+            all(item["contributionBasis"] == "headlineContribution" for item in macro_liquidity["drivers"])
         )
         implication_labels = {item["label"] for item in macro_liquidity["implications"]}
         self.assertEqual(implication_labels, {"久期", "风险资产", "融资压力"})
@@ -1439,11 +1464,17 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertLess(risk["score"], 75)
         self.assertLessEqual(risk["detectedPostSignalShock"]["returnPct"], -2.0)
         self.assertEqual(risk["priorSessionAudit"]["asOf"], "2026-06-04")
-        self.assertGreaterEqual(risk["priorSessionAudit"]["score"], 75)
-        self.assertEqual(risk["priorSessionAudit"]["regime"], "Strong Alert")
+        self.assertLess(risk["priorSessionAudit"]["score"], 75)
+        self.assertEqual(risk["priorSessionAudit"]["regime"], "Watch")
         self.assertTrue(risk["priorSessionAudit"]["auditOnly"])
-        component_keys = {component["key"] for component in risk["components"]}
+        components_by_key = {component["key"]: component for component in risk["components"]}
+        component_keys = set(components_by_key)
         self.assertTrue({"volTargetPressure", "qqqTltRotation", "marketFlow", "sectorRotation", "hotStockReversal", "turnover", "eventRisk"}.issubset(component_keys))
+        self.assertEqual(components_by_key["hotStockReversal"]["metrics"]["hotCount"], 1)
+        self.assertEqual(components_by_key["hotStockReversal"]["metrics"]["reversalCount"], 1)
+        self.assertFalse(risk["actionable"])
+        self.assertFalse(risk["allocation"]["actionable"])
+        self.assertIsNone(risk["allocation"]["exposureBandPct"])
         driver_keys = {driver["key"] for driver in risk["drivers"]}
         self.assertTrue({"rallyExtension", "leaderConcentration", "lateRotationBreak", "hotStockReversal", "eventRisk"}.intersection(driver_keys))
         self.assertTrue(risk["backtest"]["available"])
@@ -1981,29 +2012,45 @@ class DashboardBuilderTests(unittest.TestCase):
 
         self.assertGreaterEqual(flow["score"], 75)
         self.assertTrue(any(driver["key"] == "downtrendContinuation" for driver in flow["drivers"]))
-        self.assertEqual(risk["regime"], "Strong Alert")
-        self.assertGreaterEqual(risk["score"], 75)
+        self.assertEqual(risk["regime"], "Caution")
+        self.assertLess(risk["score"], 75)
+        components_by_key = {component["key"]: component for component in risk["components"]}
+        self.assertEqual(components_by_key["hotStockReversal"]["metrics"]["hotCount"], 0)
+        self.assertEqual(components_by_key["hotStockReversal"]["metrics"]["reversalCount"], 0)
+        self.assertFalse(risk["actionable"])
+        self.assertFalse(risk["allocation"]["actionable"])
+        self.assertIsNone(risk["allocation"]["exposureBandPct"])
         self.assertTrue(risk["weightCalibration"]["available"])
+        self.assertEqual(
+            risk["lookAheadGuard"]["scoreInputs"],
+            "Only same-day or earlier replayable OHLCV factors enter the production score; event calendars remain context-only.",
+        )
         calibration_rows = {row["component"]: row for row in risk["weightCalibration"]["rows"]}
         self.assertIn("marketFlow", calibration_rows)
         self.assertEqual(calibration_rows["marketFlow"]["configuredWeight"], 0.22)
         self.assertIn(calibration_rows["marketFlow"]["calibratedRole"], {"validated", "context", "downweighted"})
+        self.assertTrue(all(row["recommendation"] for row in calibration_rows.values()))
 
     def test_equity_score_adjustments_expose_behavior_preserving_rule_audit(self):
         def component(key: str, score: float, metrics: dict | None = None) -> dict:
-            return {"key": key, "score": score, "metrics": metrics or {}}
+            return {
+                "key": key,
+                "score": score,
+                "scoreUse": "scored" if key in scoring_equity.EQUITY_RISK_REPLAY_SCORED_COMPONENTS else "context",
+                "metrics": metrics or {},
+            }
 
-        components = [
+        core_components = [
             component("sectorRotation", 85.0),
             component("hotStockReversal", 85.0),
             component("marketFlow", 75.0, {"downtrendFragilityScore": 40.0}),
             component("qqqTltRotation", 75.0),
             component("volTargetPressure", 40.0),
             component("turnover", 50.0),
-            component("eventRisk", 30.0),
-            component("macroOverlay", 30.0),
         ]
+        components = [*core_components, component("eventRisk", 100.0), component("macroOverlay", 100.0)]
 
+        core_adjustments = scoring_equity.equity_score_adjustments(core_components, base_score=70.0)
         adjustments = scoring_equity.equity_score_adjustments(components, base_score=70.0)
         rule_keys = [rule["key"] for rule in adjustments["rules"]]
 
@@ -2012,6 +2059,8 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(adjustments["scoreFloor"], 0.0)
         self.assertEqual(adjustments["adjustedBeforeFloor"], 65.0)
         self.assertEqual(adjustments["finalScore"], 65.0)
+        self.assertEqual(adjustments["finalScore"], core_adjustments["finalScore"])
+        self.assertEqual(adjustments["amplifier"], core_adjustments["amplifier"])
         self.assertFalse(adjustments["floorApplied"])
         self.assertEqual(
             rule_keys,
@@ -2021,18 +2070,20 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(scoring_equity.equity_noise_dampener(components), -14.0)
         self.assertEqual(scoring_equity.equity_convexity_score_floor(components), 0.0)
 
-    def test_equity_noise_dampener_does_not_treat_missing_macro_as_low_risk(self):
+    def test_equity_noise_dampener_ignores_context_only_macro_overlay(self):
         components = [
-            {"key": "sectorRotation", "score": 85.0},
-            {"key": "hotStockReversal", "score": 85.0},
-            {"key": "marketFlow", "score": 75.0, "metrics": {"downtrendFragilityScore": 40.0}},
-            {"key": "qqqTltRotation", "score": 75.0},
-            {"key": "volTargetPressure", "score": 40.0},
-            {"key": "eventRisk", "score": 30.0},
+            {"key": "sectorRotation", "score": 85.0, "scoreUse": "scored"},
+            {"key": "hotStockReversal", "score": 85.0, "scoreUse": "scored"},
+            {"key": "marketFlow", "score": 75.0, "scoreUse": "scored", "metrics": {"downtrendFragilityScore": 40.0}},
+            {"key": "qqqTltRotation", "score": 75.0, "scoreUse": "scored"},
+            {"key": "volTargetPressure", "score": 40.0, "scoreUse": "scored"},
+            {"key": "eventRisk", "score": 30.0, "scoreUse": "context"},
         ]
 
-        self.assertEqual(scoring_equity.equity_noise_dampener(components), 0.0)
-        components.append({"key": "macroOverlay", "score": 30.0})
+        self.assertEqual(scoring_equity.equity_noise_dampener(components), -14.0)
+        components.append({"key": "macroOverlay", "score": 30.0, "scoreUse": "context"})
+        self.assertEqual(scoring_equity.equity_noise_dampener(components), -14.0)
+        components[-1]["score"] = 90.0
         self.assertEqual(scoring_equity.equity_noise_dampener(components), -14.0)
 
     def test_equity_forward_labels_require_complete_trading_session_horizon(self):
@@ -2179,9 +2230,15 @@ class DashboardBuilderTests(unittest.TestCase):
             option_open_interest=None,
         )
 
-        self.assertGreaterEqual(risk["score"], 75)
-        self.assertEqual(risk["regime"], "Strong Alert")
-        self.assertIn("confirmedDowntrend", {rule["key"] for rule in risk["scoreAdjustments"]["rules"]})
+        self.assertLess(risk["score"], 75)
+        self.assertEqual(risk["regime"], "Caution")
+        components_by_key = {component["key"]: component for component in risk["components"]}
+        self.assertEqual(components_by_key["hotStockReversal"]["metrics"]["hotCount"], 0)
+        self.assertEqual(components_by_key["hotStockReversal"]["metrics"]["reversalCount"], 0)
+        self.assertIn("downtrendBreak", {rule["key"] for rule in risk["scoreAdjustments"]["rules"]})
+        self.assertFalse(risk["actionable"])
+        self.assertFalse(risk["allocation"]["actionable"])
+        self.assertIsNone(risk["allocation"]["exposureBandPct"])
 
     def test_equity_short_term_risk_attaches_source_quality_and_factor_evidence(self):
         market_bars = {
@@ -3461,7 +3518,9 @@ class DashboardBuilderTests(unittest.TestCase):
             idea_titles[:4],
             ["战术减久期", "做陡 5s30s 曲线", "前端持有 · 吃 carry", "战术做多盈亏平衡通胀"],
         )
-        self.assertIn("宏观可靠性评分", dashboard["ideas"][0]["text"])
+        self.assertEqual(dashboard["macroLiquidity"]["scoredFactorCount"], 0)
+        self.assertEqual(dashboard["macroLiquidity"]["effectiveWeightCoveragePct"], 0)
+        self.assertIn("宏观可靠性证据不足", dashboard["ideas"][0]["text"])
         self.assertIn("QRA", dashboard["ideas"][1]["text"])
         self.assertIn("SOFR", dashboard["ideas"][2]["text"])
         self.assertIn("WTI", dashboard["ideas"][3]["text"])
@@ -3827,6 +3886,37 @@ class RegionalMonitorTests(unittest.TestCase):
                 "statusCn": {"risk": "泡沫风险", "watch": "观察", "quiet": "低风险"}[status],
                 "score": score,
                 "daysToCritical": days,
+                "fitProductionEligible": status == "risk",
+                "productionEligible": status == "risk",
+                "actionable": status == "risk",
+                "scoreUse": "production_signal" if status == "risk" else "research_only",
+                "actionabilityStatus": (
+                    "current_threshold_triggered"
+                    if status == "risk"
+                    else "fit_or_predictive_validation_not_eligible"
+                ),
+                "validation": {
+                    "productionEvidenceAvailable": status == "risk",
+                    "productionActionable": status == "risk",
+                    "productionThreshold": 75,
+                    "replayModelAudit": {
+                        "required": True,
+                        "productionModelSpecId": dashboard_builder.GLOBAL_LPPL_PRODUCTION_MODEL_SPEC_ID,
+                        "liveModelSpecId": dashboard_builder.GLOBAL_LPPL_PRODUCTION_MODEL_SPEC_ID,
+                        "liveModelMetadataAvailable": True,
+                        "liveValidationComparable": True,
+                        "liveComparable": True,
+                        "observedModelSpecIds": [dashboard_builder.GLOBAL_LPPL_PRODUCTION_MODEL_SPEC_ID],
+                        "observationCount": 120,
+                        "comparableObservationCount": 120,
+                        "unknownModelSpecCount": 0,
+                        "mismatchedModelSpecCount": 0,
+                        "replayComparable": True,
+                        "comparable": True,
+                        "enforcementPass": True,
+                        "status": "comparable",
+                    },
+                },
             }
         return {
             "asOf": "2026-06-12",
@@ -3951,6 +4041,8 @@ class RegionalMonitorTests(unittest.TestCase):
 
         self.assertTrue(spy_val["available"])
         self.assertTrue(ewy_val["available"])
+        self.assertEqual(ewy_val["validationStatus"], "research-validation")
+        self.assertFalse(ewy_val["independentHoldout"])
         spy_ids = {f["id"] for f in spy_val["factors"]}
         ewy_ids = {f["id"] for f in ewy_val["factors"]}
         # Benchmark (US) has no relative-strength-vs-US factor; other regions do.
@@ -3960,7 +4052,11 @@ class RegionalMonitorTests(unittest.TestCase):
         self.assertIn("momentum3m", ewy_ids)
         self.assertIn("realizedVol", ewy_ids)
         sample = ewy_val["factors"][0]
-        for field in ("id", "oosIc3m", "hitRateOos", "baseRate", "lift", "classification", "leadTimeDays"):
+        for field in (
+            "id", "oosIc3m", "hitRateOos", "baseRate", "lift", "classification", "leadTimeDays",
+            "wrongWay", "robust", "foldStability3m", "oosSampleSize3m", "oosAlertCount",
+            "fdrQValue3m", "fdrSignificant3m", "actionableRobust",
+        ):
             self.assertIn(field, sample)
         self.assertIn(ewy_val["bestFactor"], ewy_ids)
 
@@ -3995,6 +4091,12 @@ class RegionalMonitorTests(unittest.TestCase):
             self.assertIn("oosIc3m", composite)
             self.assertIn("weights", composite)
             self.assertIn("beatsBestSingleFactor", composite)
+            for field in (
+                "direction", "observationCount", "oosSampleSize3m", "oosAlertCount",
+                "wrongWay", "robust", "foldStability3m", "pValue3m",
+                "fdrQValue3m", "fdrSignificant3m", "actionableRobust",
+            ):
+                self.assertIn(field, composite)
             weight_sum = sum(w["weight"] for w in composite["weights"])
             self.assertTrue(abs(weight_sum - 1.0) < 0.05 or weight_sum == 0.0)
 
@@ -4020,6 +4122,13 @@ class RegionalMonitorTests(unittest.TestCase):
         self.assertIn("lpplScore", weights)
         self.assertGreater(weights["lpplScore"], 0.0)
         self.assertIn(composite["classification"], {"leading", "coincident", "lagging", "none"})
+        calibration_audit = composite["calibrationAudit"]
+        self.assertGreater(calibration_audit["purgedOverlapCount"], 0)
+        self.assertLess(
+            date.fromisoformat(calibration_audit["latestEligibleLabelEndDate"]),
+            date.fromisoformat(calibration_audit["oosStartDate"]),
+        )
+        self.assertIn("actual first price endpoint", calibration_audit["endpointRule"])
 
     def test_factor_validation_unavailable_for_short_sample(self):
         bars = self._bars("EWT", [100.0 + i for i in range(40)])
@@ -4042,6 +4151,7 @@ class RegionalMonitorTests(unittest.TestCase):
         ewh_row = next(r for r in enriched if r["symbol"] == "EWH")
         self.assertTrue(ewh_row["factorValidation"]["available"])
         self.assertTrue(ewh_row["factorValidation"]["factors"])
+        self.assertFalse(ewh_row["factorValidation"]["independentHoldout"])
 
     @staticmethod
     def _region(key, name_cn, bubble, market_state, rs, validated_factor=None,
@@ -4052,6 +4162,9 @@ class RegionalMonitorTests(unittest.TestCase):
             "availableCount": 1,
             "indexCount": 1,
             "maxScore": {"risk": 90.0, "watch": 55.0, "quiet": 30.0}[bubble],
+            "productionEligibleCount": 1 if bubble == "risk" else 0,
+            "actionableCount": 1 if bubble == "risk" else 0,
+            "actionableRiskCount": 1 if bubble == "risk" else 0,
             "priceFactors": {
                 "available": True,
                 "marketState": market_state,
@@ -4062,13 +4175,56 @@ class RegionalMonitorTests(unittest.TestCase):
         factors = []
         if validated_factor:
             factors = [{"id": validated_factor, "labelCn": "已实现波动" if validated_factor == "realizedVol" else "LPPL泡沫评分",
-                        "classification": "leading", "lift": 1.7, "oosIc3m": -0.5, "leadTimeDays": 23.0,
-                        "hitRateOos": 0.4, "baseRate": 0.23, "alertThreshold": vol_threshold}]
+                        "direction": "higher_risk", "classification": "leading", "lift": 1.7,
+                        "oosIc3m": 0.5, "wrongWay": False, "robust": True,
+                        "fdrSignificant3m": True, "inferenceValid3m": True,
+                        "foldStability3m": {"stablePositive": True},
+                        "actionableRobust": True, "observationCount": 180,
+                        "oosSampleSize3m": 60, "oosAlertCount": 8,
+                        "leadTimeDays": 23.0, "hitRateOos": 0.4, "baseRate": 0.23,
+                        "alertThreshold": vol_threshold}]
         index = {
             "symbol": "EWX",
+            "available": True,
             "score": agg["maxScore"],
+            "status": bubble,
+            "fitProductionEligible": bubble == "risk",
+            "productionEligible": bubble == "risk",
+            "actionable": bubble == "risk",
+            "scoreUse": "production_signal" if bubble == "risk" else "research_only",
+            "actionabilityStatus": (
+                "current_threshold_triggered"
+                if bubble == "risk"
+                else "fit_or_predictive_validation_not_eligible"
+            ),
+            "validation": {
+                "productionEvidenceAvailable": bubble == "risk",
+                "productionActionable": bubble == "risk",
+                "productionThreshold": 75,
+                "replayModelAudit": {
+                    "required": True,
+                    "productionModelSpecId": dashboard_builder.GLOBAL_LPPL_PRODUCTION_MODEL_SPEC_ID,
+                    "liveModelSpecId": dashboard_builder.GLOBAL_LPPL_PRODUCTION_MODEL_SPEC_ID,
+                    "liveModelMetadataAvailable": True,
+                    "liveValidationComparable": True,
+                    "liveComparable": True,
+                    "observedModelSpecIds": [dashboard_builder.GLOBAL_LPPL_PRODUCTION_MODEL_SPEC_ID],
+                    "observationCount": 120,
+                    "comparableObservationCount": 120,
+                    "unknownModelSpecCount": 0,
+                    "mismatchedModelSpecCount": 0,
+                    "replayComparable": True,
+                    "comparable": True,
+                    "enforcementPass": True,
+                    "status": "comparable",
+                },
+            },
             "priceFactors": {"available": True, "realizedVol": vol_current},
-            "factorValidation": {"available": bool(factors), "factors": factors},
+            "factorValidation": {
+                "available": bool(factors),
+                "independentHoldout": True,
+                "factors": factors,
+            },
         }
         return {"key": key, "name": name_cn, "nameCn": name_cn, "indices": [index], "aggregate": agg}
 
@@ -4104,7 +4260,7 @@ class RegionalMonitorTests(unittest.TestCase):
             "lift": 1.3, "hitRateOos": 0.5, "baseRate": 0.3, "leadTimeDays": 40.0,
             "currentValue": 1.8, "alertThreshold": 1.2,
             "direction": "higher_risk", "oosIc3m": 0.31, "wrongWay": False,
-            "robust": True, "fdrSignificant3m": True,
+            "robust": True, "fdrSignificant3m": True, "inferenceValid3m": True,
             "foldStability3m": {"stablePositive": True}, "actionableRobust": True,
             "observationCount": 180, "oosSampleSize3m": 60, "oosAlertCount": 8,
         }
@@ -4131,6 +4287,7 @@ class RegionalMonitorTests(unittest.TestCase):
             "wrongWay": False,
             "robust": True,
             "fdrSignificant3m": True,
+            "inferenceValid3m": True,
             "foldStability3m": {"stablePositive": True},
             "actionableRobust": True,
             "observationCount": 180,
@@ -4142,6 +4299,7 @@ class RegionalMonitorTests(unittest.TestCase):
             "unexpected_direction": {"direction": "higher_better"},
             "wrong_direction": {"wrongWay": True, "oosIc3m": -0.31},
             "weak_lift": {"lift": 1.0},
+            "not_robust": {"robust": False, "actionableRobust": False},
             "fdr_failed": {"fdrSignificant3m": False, "actionableRobust": False},
             "fold_failed": {"foldStability3m": {"stablePositive": False}, "actionableRobust": False},
             "too_few_observations": {"observationCount": 59},
@@ -4171,9 +4329,14 @@ class RegionalMonitorTests(unittest.TestCase):
             "indices": [{
                 "symbol": "EWY", "score": 90.0,
                 "priceFactors": {"available": True, "realizedVol": 40.0},
-                "factorValidation": {"available": True, "factors": [
-                    {"id": "realizedVol", "labelCn": "已实现波动", "classification": "leading", "lift": 1.7,
-                     "oosIc3m": -0.5, "leadTimeDays": 23.0, "hitRateOos": 0.4, "baseRate": 0.23,
+                "factorValidation": {"available": True, "independentHoldout": True, "factors": [
+                    {"id": "realizedVol", "labelCn": "已实现波动", "direction": "higher_risk",
+                     "classification": "leading", "lift": 1.7, "oosIc3m": 0.5,
+                     "wrongWay": False, "robust": True, "fdrSignificant3m": True,
+                     "inferenceValid3m": True,
+                     "foldStability3m": {"stablePositive": True}, "actionableRobust": True,
+                     "observationCount": 180, "oosSampleSize3m": 60, "oosAlertCount": 8,
+                     "leadTimeDays": 23.0, "hitRateOos": 0.4, "baseRate": 0.23,
                      "alertThreshold": 24.0, "alertCountTotal": 11, "hitRateTotal": 0.55},
                 ]},
             }],
@@ -4185,6 +4348,94 @@ class RegionalMonitorTests(unittest.TestCase):
         self.assertAlmostEqual(alert["breachHitRateTotal"], 0.55)
         self.assertIn("历史共突破11次", alert["trackRecord"])
         self.assertIn("历史共突破11次", alert["message"])
+
+    def test_non_independent_region_factor_stays_research_only(self):
+        region = self._region(
+            "korea", "韩国", "watch", "neutral", 0.0,
+            validated_factor="realizedVol", vol_current=30.0, vol_threshold=24.0,
+        )
+        region["indices"][0]["factorValidation"]["independentHoldout"] = False
+
+        alert = dashboard_builder.build_region_factor_alert(region)
+        allocation = dashboard_builder.build_region_allocation(region)
+
+        self.assertFalse(alert["available"])
+        self.assertFalse(allocation["validatedLeadingFactors"])
+        self.assertNotEqual(allocation["confidence"], "high")
+
+    def test_raw_lppl_risk_without_production_trigger_is_context_only(self):
+        region = self._region("korea", "韩国", "risk", "neutral", 0.0)
+        region["aggregate"]["productionEligibleCount"] = 0
+        region["aggregate"]["actionableCount"] = 0
+        region["aggregate"]["actionableRiskCount"] = 0
+
+        allocation = dashboard_builder.build_region_allocation(region)
+
+        self.assertEqual(allocation["stance"], "neutral")
+        self.assertEqual(allocation["cautionScore"], 10.0)
+        self.assertFalse(allocation["productionLpplTriggered"])
+        self.assertTrue(any("研究观察" in driver for driver in allocation["drivers"]))
+
+    def test_kospi_wrong_way_factor_cannot_trigger_alert_or_raise_allocation(self):
+        region = self._region(
+            "korea", "韩国", "risk", "neutral", 10.0,
+            validated_factor="realizedVol", vol_current=43.0, vol_threshold=12.0,
+        )
+        region["indices"][0]["symbol"] = "KOSPI"
+        factor = region["indices"][0]["factorValidation"]["factors"][0]
+        factor.update({
+            "oosIc3m": -0.777,
+            "wrongWay": True,
+            "robust": False,
+            "fdrSignificant3m": False,
+            "foldStability3m": {"stablePositive": False},
+            "actionableRobust": False,
+        })
+        region["aggregate"].update(
+            {"productionEligibleCount": 0, "actionableCount": 0, "actionableRiskCount": 0}
+        )
+
+        alert = dashboard_builder.build_region_factor_alert(region)
+        self.assertFalse(alert["available"])
+        region["factorAlert"] = alert
+        allocation = dashboard_builder.build_region_allocation(region)
+        baseline_region = self._region("korea", "韩国", "risk", "neutral", 10.0)
+        baseline_region["aggregate"].update(
+            {"productionEligibleCount": 0, "actionableCount": 0, "actionableRiskCount": 0}
+        )
+        baseline = dashboard_builder.build_region_allocation(baseline_region)
+        self.assertFalse(allocation["validatedLeadingFactors"])
+        self.assertNotEqual(allocation["confidence"], "high")
+        self.assertEqual(allocation["cautionScore"], baseline["cautionScore"])
+        self.assertNotIn("已验证", allocation["rationale"])
+
+    def test_twii_non_robust_factor_cannot_trigger_alert_or_raise_allocation(self):
+        region = self._region(
+            "taiwan", "台湾", "watch", "neutral", 5.0,
+            validated_factor="realizedVol", vol_current=30.0, vol_threshold=24.0,
+        )
+        region["indices"][0]["symbol"] = "TWII"
+        factor = region["indices"][0]["factorValidation"]["factors"][0]
+        factor.update({
+            "oosIc3m": 0.31,
+            "wrongWay": False,
+            "robust": False,
+            "fdrSignificant3m": False,
+            "foldStability3m": {"stablePositive": False},
+            "actionableRobust": False,
+        })
+
+        alert = dashboard_builder.build_region_factor_alert(region)
+        self.assertFalse(alert["available"])
+        region["factorAlert"] = alert
+        allocation = dashboard_builder.build_region_allocation(region)
+        baseline = dashboard_builder.build_region_allocation(
+            self._region("taiwan", "台湾", "watch", "neutral", 5.0)
+        )
+        self.assertFalse(allocation["validatedLeadingFactors"])
+        self.assertNotEqual(allocation["confidence"], "high")
+        self.assertEqual(allocation["cautionScore"], baseline["cautionScore"])
+        self.assertNotIn("已验证", allocation["rationale"])
 
     def test_breached_alert_raises_allocation_caution(self):
         breached = self._region("korea", "韩国", "watch", "neutral", 0.0, validated_factor="realizedVol", vol_current=30.0, vol_threshold=24.0)
@@ -4203,6 +4454,7 @@ class RegionalMonitorTests(unittest.TestCase):
         self.assertEqual(alloc["stanceCn"], "减持")
         self.assertGreaterEqual(alloc["cautionScore"], 55.0)
         self.assertEqual(alloc["confidence"], "high")  # backed by a validated leading factor
+        self.assertTrue(alloc["productionLpplTriggered"])
         self.assertTrue(alloc["validatedLeadingFactors"])
         self.assertIn("已验证领先因子", alloc["rationale"])
 
@@ -4210,7 +4462,9 @@ class RegionalMonitorTests(unittest.TestCase):
         region = self._region("taiwan", "台湾", "quiet", "constructive", 18.0)
         alloc = dashboard_builder.build_region_allocation(region)
         self.assertEqual(alloc["stance"], "overweight")
-        self.assertEqual(alloc["exposureBandPct"][1], 115)
+        self.assertFalse(alloc["actionable"])
+        self.assertIsNone(alloc["exposureBandPct"])
+        self.assertEqual(alloc["contextBand"][1], 115)
         self.assertLess(alloc["cautionScore"], 30.0)
 
     def test_allocation_neutral_without_validated_factor_is_lower_confidence(self):
@@ -4230,7 +4484,8 @@ class RegionalMonitorTests(unittest.TestCase):
         ]
         rotation = dashboard_builder.build_regional_rotation(regions)
         self.assertTrue(rotation["available"])
-        self.assertIn("taiwan", rotation["favorRegions"])
+        self.assertNotIn("taiwan", rotation["favorRegions"])
+        self.assertIn("taiwan", rotation["contextFavorRegions"])
         self.assertIn("korea", rotation["reduceRegions"])
         self.assertEqual(rotation["ranking"][0], "taiwan")  # lowest caution ranked first
 
@@ -4284,9 +4539,11 @@ class RegionalMonitorTests(unittest.TestCase):
         ]}
         rot = dashboard_builder.build_us_internal_rotation(us)
         self.assertTrue(rot["available"])
-        self.assertEqual(rot["tilt"], "broad")
+        self.assertEqual(rot["tilt"], "balanced")
+        self.assertEqual(rot["contextTilt"], "broad")
+        self.assertFalse(rot["actionable"])
         self.assertGreater(rot["techPoints"], rot["broadPoints"])
-        self.assertIn("偏宽基", rot["tiltCn"])
+        self.assertIn("偏宽基", rot["contextTiltCn"])
         self.assertTrue(rot["drivers"])
 
     def test_us_internal_rotation_tilts_to_tech_when_broad_riskier(self):
@@ -4295,8 +4552,10 @@ class RegionalMonitorTests(unittest.TestCase):
             self._us_index("QQQ", "quiet", 30.0, 16.0),
         ]}
         rot = dashboard_builder.build_us_internal_rotation(us)
-        self.assertEqual(rot["tilt"], "tech")
-        self.assertIn("偏科技", rot["tiltCn"])
+        self.assertEqual(rot["tilt"], "balanced")
+        self.assertEqual(rot["contextTilt"], "tech")
+        self.assertFalse(rot["actionable"])
+        self.assertIn("偏科技", rot["contextTiltCn"])
 
     def test_ohlcv_staleness_is_trading_day_aware_over_weekend(self):
         from datetime import date as _date
@@ -4385,6 +4644,16 @@ class RegionalMonitorTests(unittest.TestCase):
 
     def test_health_payload_surfaces_regional_breach_alerts(self):
         from treasury_data.api import build_health_payload
+        korea = self._region(
+            "korea", "韩国", "risk", "stressed", -8.0,
+            validated_factor="realizedVol", vol_current=43.0, vol_threshold=12.0,
+        )
+        korea["factorAlert"] = dashboard_builder.build_region_factor_alert(korea)
+        korea["allocation"] = dashboard_builder.build_region_allocation(korea)
+        japan = self._region("japan", "日本", "quiet", "constructive", 2.0)
+        japan["factorAlert"] = {"available": False}
+        japan["allocation"] = dashboard_builder.build_region_allocation(japan)
+        rotation = dashboard_builder.build_regional_rotation([korea, japan])
         dashboard = {
             "asOf": "2026-06-12",
             "generatedAt": "2026-06-13T00:00:00+00:00",
@@ -4392,12 +4661,8 @@ class RegionalMonitorTests(unittest.TestCase):
             "regionalMonitor": {
                 "available": True,
                 "asOf": "2026-06-12",
-                "rotation": {"available": True, "reduceRegions": ["korea"], "favorRegions": [], "summary": "减持韩国"},
-                "regions": [
-                    {"key": "korea", "nameCn": "韩国",
-                     "factorAlert": {"available": True, "state": "breached", "factorLabelCn": "已实现波动", "current": 43.0, "threshold": 12.0}},
-                    {"key": "japan", "nameCn": "日本", "factorAlert": {"available": True, "state": "normal"}},
-                ],
+                "rotation": rotation,
+                "regions": [korea, japan],
             },
         }
         payload = build_health_payload(dashboard)
@@ -4442,11 +4707,62 @@ class PortfolioOverviewRobustnessTierTests(unittest.TestCase):
             if robust is not None
         ]
         signal_validation = {"available": True, "composites": composites}
+        spy_actionable = spy_robust is True
+        spy_context_allocation = {"exposureBandPct": [60, 90], "horizon": "1-3M", "actionable": True}
+        spy_allocation = (
+            spy_context_allocation
+            if spy_actionable
+            else {"exposureBandPct": None, "horizon": "1-3M", "actionable": False}
+        )
+        equity_actionable = equity_robust is True
+        equity_context_allocation = {"exposureBandPct": [50, 70], "horizon": "1-10d", "actionable": True}
+        equity = {
+            "score": 80.0,
+            "asOf": "2026-06-01",
+            "actionable": equity_actionable,
+            "scoreScale": {"coreComplete": True, "thresholdComparable": True},
+            "allocation": (
+                equity_context_allocation
+                if equity_actionable
+                else {"exposureBandPct": None, "horizon": "1-10d", "actionable": False}
+            ),
+            "contextAllocation": None if equity_actionable else equity_context_allocation,
+            "productionValidation": {
+                "available": True,
+                "scoreContractAllowsAction": True,
+                "thresholdValidated": equity_actionable,
+                "currentTriggered": equity_actionable,
+                "actionable": equity_actionable,
+            },
+            "backtest": {
+                "walkForward": {
+                    "available": True,
+                    "thresholdTests": [{
+                        "threshold": 75,
+                        "productionUse": True,
+                        "oosValidated": equity_actionable,
+                        "sampleSize": 198,
+                        "alertDays": 10,
+                        "precision": 70.0,
+                        "baseRate": 50.0,
+                    }],
+                },
+            },
+        }
         return dashboard_builder.build_portfolio_overview(
-            spy_early_warning={"score": 45.0, "regime": "", "asOf": "2026-06-01",
-                               "allocation": {"exposureBandPct": [60, 90], "horizon": "1-3M"}},
-            equity_short_term_risk={"score": 80.0, "asOf": "2026-06-01",
-                                    "allocation": {"exposureBandPct": [50, 70], "horizon": "1-10d"}},
+            spy_early_warning={
+                "score": 45.0,
+                "regime": "",
+                "asOf": "2026-06-01",
+                "aggregateActionableRobust": spy_actionable,
+                "predictiveValidity": {
+                    "status": "actionable" if spy_actionable else "research-context",
+                    "actionable": spy_actionable,
+                },
+                "allocation": spy_allocation,
+                "contextAllocation": None if spy_actionable else spy_context_allocation,
+            },
+            equity_short_term_risk=equity,
             global_lppl_risk=None,
             macro_liquidity={"score": 48.0, "regime": ""},
             signal_validation=signal_validation,
@@ -4460,7 +4776,7 @@ class PortfolioOverviewRobustnessTierTests(unittest.TestCase):
         self.assertEqual(layers[0]["layer"], "spyEarlyWarning")
         self.assertEqual(layers[0]["confidenceTier"], "validated")
         tiers = {l["layer"]: l["confidenceTier"] for l in layers}
-        self.assertEqual(tiers["equityShortTermRisk"], "context")
+        self.assertEqual(tiers["equityShortTermRisk"], "research")
         self.assertEqual(tiers["bhadialComposite"], "context")
 
     def test_confidence_tier_maps_robust_verdict(self):
@@ -4530,8 +4846,9 @@ class SignalValidationRobustnessLabelingTests(unittest.TestCase):
         self.assertIs(spy["aggregateCiRobust"], False)
         self.assertIs(spy["aggregateActionableRobust"], False)
         self.assertEqual(spy["aggregateOosCi3m"], [-0.02, 0.59])
-        self.assertEqual(spy["robustSleeves"], ["ratesCurveStress"])
-        self.assertEqual(spy["exploratorySleeves"], ["fundingStress"])
+        self.assertEqual(spy["robustSleeves"], [])
+        self.assertEqual(spy["researchRobustSleeves"], ["ratesCurveStress"])
+        self.assertEqual(spy["exploratorySleeves"], ["fundingStress", "ratesCurveStress"])
 
 
 if __name__ == "__main__":
